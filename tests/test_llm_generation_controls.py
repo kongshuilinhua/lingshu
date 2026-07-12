@@ -71,6 +71,24 @@ def test_chat_stream_allows_qwen3_thinking_when_requested(monkeypatch):
     assert captured["payload"]["max_tokens"] == 8192
 
 
+def test_chat_forces_thinking_off_for_non_streaming_qwen3(monkeypatch):
+    # DashScope 约束：enable_thinking=true 仅流式支持。
+    # 同步 chat() 即使显式传 thinking=True 也必须强制关闭，避免非流式路径直接 400。
+    captured = {}
+    provider = OpenAICompatibleProvider()
+    monkeypatch.setattr(llm_module, "get_settings", lambda: _settings())
+
+    def fake_post(url, payload, api_key):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post)
+
+    provider.chat([{"role": "user", "content": "深度分析"}], thinking=True)
+
+    assert captured["payload"]["enable_thinking"] is False
+
+
 def test_chat_stream_disables_qwen3_thinking_when_not_requested(monkeypatch):
     # thinking=False 时对 Qwen3 显式下发 enable_thinking=false（而非不下发）：
     # 混合推理模型默认开思考，不显式关闭会让简单问题也长时间无首字输出。

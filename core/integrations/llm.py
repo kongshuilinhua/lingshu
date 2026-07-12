@@ -184,6 +184,8 @@ class OpenAICompatibleProvider:
         🛡️ 防御性编程：
             - 对空 API_KEY 在执行前进行前置检查，避免发出无谓的 HTTP 请求。
             - `thinking` 默认 False：查询理解、工具决策、记忆摘要等内部调用不应触发混合推理模型的隐藏思考。
+            - 即使传入 thinking=True，非流式请求也会被 `_apply_generation_limits` 强制关闭
+              enable_thinking（DashScope 仅流式支持开启），深度思考轨迹只在流式链路生效。
         """
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="chat")
@@ -599,7 +601,9 @@ class OpenAICompatibleProvider:
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
         if self._supports_enable_thinking(payload.get("model", ""), settings, runtime_config):
-            payload["enable_thinking"] = bool(thinking)
+            # 🛡️ DashScope 协议约束：enable_thinking=true 仅流式调用支持，
+            #    非流式请求强制关闭，避免同步路径（run/工具决策等）开思考时直接 400。
+            payload["enable_thinking"] = bool(thinking) and bool(payload.get("stream"))
 
     def _supports_enable_thinking(self, model: str, settings, runtime_config: dict | None) -> bool:
         """Return whether the provider/model is known to accept enable_thinking."""
