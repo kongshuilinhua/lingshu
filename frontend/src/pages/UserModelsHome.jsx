@@ -257,6 +257,7 @@ function UserModelsPanel({
   deleteUserModelConfig,
   requestDeleteConfirm,
   setProfileError,
+  probeUserModels,
   testUserModelDraft,
   testUserModelConfig,
   updateUserModelConfig,
@@ -273,6 +274,8 @@ function UserModelsPanel({
   const [keyDialogConfig, setKeyDialogConfig] = useState(null);
   const [editConfig, setEditConfig] = useState(null);
   const [editForm, setEditForm] = useState(null);
+  const [probedModels, setProbedModels] = useState([]);
+  const [probing, setProbing] = useState(false);
   const activePreset = USER_MODEL_PRESET_MAP[form.preset_id] || USER_MODEL_PRESET_MAP.custom;
   const formReady = Boolean(form.display_name.trim() && form.base_url.trim() && form.chat_model.trim() && form.api_key.trim());
   const canSaveForm = formReady && draftTestResult?.ok;
@@ -356,6 +359,24 @@ function UserModelsPanel({
       setProfileError(errorMessage(err));
     } finally {
       setDraftTesting(false);
+    }
+  }
+
+  async function probeModelsDraft() {
+    if (!form.base_url.trim() || !form.api_key.trim()) {
+      setNotice('请先填写 base_url 和 api_key');
+      return;
+    }
+    setProbing(true);
+    setNotice('');
+    try {
+      const result = await probeUserModels({ base_url: form.base_url, api_key: form.api_key });
+      setProbedModels(result.models || []);
+      if (!result.ok) setNotice(result.message || '拉取模型列表失败');
+    } catch (err) {
+      setProfileError(errorMessage(err));
+    } finally {
+      setProbing(false);
     }
   }
 
@@ -522,7 +543,13 @@ function UserModelsPanel({
                     </label>
                     <label className="field-stack">
                       <span>chat_model</span>
-                      <input value={form.chat_model} onChange={(event) => updateForm({ chat_model: event.target.value, preset_id: form.preset_id || 'custom' })} placeholder="qwen-plus" />
+                      <div className="chat-model-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <input value={form.chat_model} onChange={(event) => updateForm({ chat_model: event.target.value, preset_id: form.preset_id || 'custom' })} placeholder="qwen-plus" list="probed-models" style={{ flex: 1 }} />
+                        <datalist id="probed-models">
+                          {probedModels.map((m) => <option key={m} value={m} />)}
+                        </datalist>
+                        <button type="button" disabled={probing || !form.base_url.trim() || !form.api_key.trim()} onClick={probeModelsDraft}>{probing ? '拉取中' : '拉取模型'}</button>
+                      </div>
                     </label>
                   </div>
                 </div>

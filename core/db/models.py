@@ -471,6 +471,60 @@ class AgentTool(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class AgentAgentBinding(Base):
+    """
+    智能体与子智能体绑定(supervisor → 已发布子 agent)。
+
+    🎯 绑定后,子 agent 在 supervisor 运行时被包装成 type="agent" 工具,
+    由 LLM 在 ReAct 循环里按需调用,实现多智能体协作(supervisor/orchestrator 模式)。
+    """
+    __tablename__ = "agent_agent_bindings"
+    __table_args__ = (UniqueConstraint("agent_id", "target_agent_id", name="uq_agent_agent_binding"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    target_agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class McpServer(Base):
+    """
+    MCP(Model Context Protocol)server 配置。
+
+    🎯 平台作为 MCP client 接入用户配置的 MCP server(stdio transport),
+    把其工具暴露给绑定它的 agent 调用,实现工具生态扩展(无需逐个手写 HTTP 工具)。
+    """
+    __tablename__ = "mcp_servers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    transport: Mapped[str] = mapped_column(String(20), default="stdio")
+    # command: 启动 server 的命令列表,如 ["python", "-m", "mymcp"] 或 ["npx", "server.js"]
+    command: Mapped[list] = mapped_column(JSON, default=list)
+    env: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class AgentMcpBinding(Base):
+    """
+    智能体与 MCP server 绑定表。
+    """
+    __tablename__ = "agent_mcp_bindings"
+    __table_args__ = (UniqueConstraint("agent_id", "mcp_server_id", name="uq_agent_mcp_server"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    mcp_server_id: Mapped[int] = mapped_column(ForeignKey("mcp_servers.id", ondelete="CASCADE"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class WorkflowDefinition(Base):
     """
     工作流节点定义实体。

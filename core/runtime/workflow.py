@@ -1,38 +1,62 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from sqlalchemy.orm import Session
 
+from core.config import get_settings
 from core.db.models import (
     Agent,
+    AgentAgentBinding,
     AgentKnowledgeBase,
+    AgentMcpBinding,
     AgentVersion,
+    McpServer,
     ModelConfig,
     Run,
     RunStep,
-    Session as ChatSession,
     SessionMemory,
     Tool,
-    UserModelConfig,
     Upload,
+    UserModelConfig,
 )
-from core.config import get_settings
+from core.db.models import (
+    Session as ChatSession,
+)
 from core.integrations.llm import OpenAICompatibleProvider
-from core.services.agents import get_agent_detail, normalize_memory, normalize_rag, normalize_tool_policy, normalize_query_understanding
+from core.integrations.mcp_client import get_mcp_client
 from core.services import query_understanding as qu_service
+from core.services.agents import (
+    get_agent_detail,
+    normalize_memory,
+    normalize_query_understanding,
+    normalize_rag,
+    normalize_tool_policy,
+)
+from core.services.memory import (
+    get_memory_profile,
+    memory_used_event,
+    recall_facts,
+    recall_profile_memory,
+)
+from core.services.memory_summary import (
+    build_memory_payload,
+    parse_memory,
+    summarize_turns,
+)
 from core.services.rag import retrieve
-from core.services.memory import get_memory_profile, memory_used_event, recall_profile_memory, recall_facts
-from core.services.memory_summary import build_memory_payload, parse_memory, summarize_turns
-from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
+
 try:
     from langchain_core.messages.utils import count_tokens_approximately
 except ImportError:
     def count_tokens_approximately(msgs):
         return sum(len(m.content) for m in msgs) // 2
+from core.runtime.graph import MAX_GRAPH_STEPS, advance, resolve_next
+from core.services import web_search as web_search_service
 from core.services.models import resolve_agent_model
 from core.services.tools import execute_tool, tool_call_event, tool_schema_for_llm
 from core.services.uploads import get_workspace_uploads, resolve_image_data_url
@@ -40,7 +64,6 @@ from core.services.user_models import (
     resolve_user_model_config,
     user_model_runtime_config,
 )
-from core.services import web_search as web_search_service
 from core.services.web_search import WebSearchError
 
 
@@ -92,6 +115,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None = None,
         search_enabled: bool | None = None,
         attachments: list[dict] | None = None,
+        _agent_call_stack: list[int] | None = None,
     ) -> tuple[Run, str, list[dict], list[dict]]:
         """
         同步执行工作流引擎（Sync Workflow Pipeline）。
@@ -150,6 +174,8 @@ class WorkflowRunner:
             "search_status": search_status,
             "web_sources": search_status.get("sources", []),
             "uploads": uploads,
+            "user_id": chat_session.user_id,
+            "agent_call_stack": _agent_call_stack or [],
         }
         self._understand_query(runtime, context)
 
@@ -178,18 +204,26 @@ class WorkflowRunner:
         context["profile_memory_used"] = profile_memory_event
         steps: list[dict] = []
 
-        # 串行调度执行每个图节点元数据
-        for node in runtime.workflow:
+        # 游标驱动调度:按节点 next / Condition 分支决定下一跳;无显式边时退化为列表顺序(线性兼容)。
+        executed: set[str] = set()
+        i = 0
+        while i < len(runtime.workflow):
+            node = runtime.workflow[i]
+            # 🛡️ 防环与防失控:已执行节点不再进入(Condition 死循环)+ 全局步数硬墙
+            if node.get("id") in executed or len(executed) >= MAX_GRAPH_STEPS:
+                break
+            executed.add(node.get("id"))
             output = self._execute_node(runtime, node, context)
             if not steps:
                 self._inject_first_node_events(output, context)
             events = output.pop("events", [])
             context.update(output)
+            is_paused = bool(output.get("paused"))
             step = RunStep(
                 run_id=run.id,
                 node_id=node["id"],
                 node_type=node["type"],
-                status="succeeded",
+                status="paused" if is_paused else "succeeded",
                 input={"input": user_message},
                 output=output,
             )
@@ -207,6 +241,12 @@ class WorkflowRunner:
                     "events": events,
                 }
             )
+            if is_paused:
+                run.status = "paused"
+                self.db.commit()
+                return run, "", self._public_sources(context), steps
+            next_id = resolve_next(node, output, context)
+            i = advance(i, next_id, runtime.workflow)
 
         final_answer = context.get("answer") or context.get("draft") or "当前智能体没有生成回答。"
         # 若开启了会话上下文记忆，同步将其打包并截断更新
@@ -238,6 +278,7 @@ class WorkflowRunner:
         search_enabled: bool | None = None,
         attachments: list[dict] | None = None,
         async_memory: bool = False,
+        _agent_call_stack: list[int] | None = None,
     ):
         """
         流式生成器执行工作流（SSE Streaming Event Generator）。
@@ -260,10 +301,18 @@ class WorkflowRunner:
             thinking_enabled=thinking_enabled,
             search_enabled=search_enabled,
             attachments=attachments,
+            _agent_call_stack=_agent_call_stack,
         )
         self.runtime = runtime
         steps: list[dict] = []
-        for node in runtime.workflow:
+        executed: set[str] = set()
+        i = 0
+        while i < len(runtime.workflow):
+            node = runtime.workflow[i]
+            # 🛡️ 防环与防失控:已执行节点不再进入(Condition 死循环)+ 全局步数硬墙
+            if node.get("id") in executed or len(executed) >= MAX_GRAPH_STEPS:
+                break
+            executed.add(node.get("id"))
             if node["type"] == "LLM":
                 # LLM 节点流式输出专用生成器中继
                 output = yield from self._stream_llm_node(runtime, node, context)
@@ -273,7 +322,8 @@ class WorkflowRunner:
                 self._inject_first_node_events(output, context)
             events = output.pop("events", [])
             context.update(output)
-            step = self._persist_step(run, node, user_message, output)
+            is_paused = bool(output.get("paused"))
+            step = self._persist_step(run, node, user_message, output, status="paused" if is_paused else "succeeded")
             step_payload = {
                 "id": step.id,
                 "node_id": step.node_id,
@@ -284,6 +334,13 @@ class WorkflowRunner:
             }
             steps.append(step_payload)
             yield {"event": "step", "step": step_payload}
+            if is_paused:
+                run.status = "paused"
+                self.db.commit()
+                yield {"event": "paused", "data": {"node_id": node.get("id"), "prompt": output.get("approval_prompt")}}
+                return
+            next_id = resolve_next(node, output, context)
+            i = advance(i, next_id, runtime.workflow)
 
         final_answer = context.get("answer") or context.get("draft") or "当前智能体没有生成回答。"
         compaction_event = None
@@ -327,6 +384,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None,
         search_enabled: bool | None,
         attachments: list[dict] | None,
+        _agent_call_stack: list[int] | None = None,
     ) -> tuple[object, Run, dict]:
         """
         初始化运行上下文并落库草稿（流式运行时前置管道）。
@@ -374,6 +432,8 @@ class WorkflowRunner:
             "search_status": search_status,
             "web_sources": search_status.get("sources", []),
             "uploads": uploads,
+            "user_id": chat_session.user_id,
+            "agent_call_stack": _agent_call_stack or [],
         }
         self._understand_query(runtime, context)
 
@@ -403,13 +463,13 @@ class WorkflowRunner:
 
         return runtime, run, context
 
-    def _persist_step(self, run: Run, node: dict, user_message: str, output: dict) -> RunStep:
+    def _persist_step(self, run: Run, node: dict, user_message: str, output: dict, *, status: str = "succeeded") -> RunStep:
         """持久化步骤实体元数据。"""
         step = RunStep(
             run_id=run.id,
             node_id=node["id"],
             node_type=node["type"],
-            status="succeeded",
+            status=status,
             input={"input": user_message},
             output=output,
         )
@@ -565,7 +625,7 @@ class WorkflowRunner:
                         if matching:
                             try:
                                 # 安全沙箱化调度工具执行
-                                result = execute_tool(matching, {"input": tool_args})
+                                result = execute_tool(matching, {"input": tool_args, "_db": self.db, "_user_id": context.get("user_id"), "agent_call_stack": context.get("agent_call_stack")})
                                 result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
                                 events.append({"event": "tool_call", "data": tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))})
                                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result.get("content") or result.get("result_preview") or ""})
@@ -614,6 +674,10 @@ class WorkflowRunner:
                 # 🛡️ 拦截模型彻底返回空文本的异常崩溃状况
                 raise ValueError("Model returned an empty answer")
             return {"answer": answer, "citation_count": len([*context.get("sources", []), *context.get("web_sources", [])])}
+        # Human-in-the-loop:人工审批节点,执行到此暂停,等人工确认(切片2 resume)后继续
+        if node_type == "HumanApproval":
+            config = node.get("config") or {}
+            return {"paused": True, "approval_prompt": config.get("prompt", "请确认是否继续执行")}
         return {}
 
     def _stream_llm_node(self, agent, node: dict, context: dict):
@@ -1016,16 +1080,68 @@ class WorkflowRunner:
             lines.append(f"{index}. {title}\nURL: {url}\nSnippet: {snippet}")
         return "\n\n".join(lines)
 
-    def _runtime_tools(self, agent, node: dict) -> list[Tool]:
+    def _runtime_tools(self, agent, node: dict) -> list:
         tool_ids = getattr(agent, "tool_ids", []) or []
+        tools = []
         if tool_ids:
-            return (
+            tools = (
                 self.db.query(Tool)
                 .filter(Tool.id.in_(tool_ids), Tool.enabled.is_(True))
                 .order_by(Tool.id.asc())
                 .all()
             )
-        return []
+        # Agent-as-Tool:把绑定的已发布子 agent 包装成 type="agent" 工具,LLM 在 ReAct 循环里按需调用
+        bindings = (
+            self.db.query(AgentAgentBinding)
+            .filter(AgentAgentBinding.agent_id == agent.id, AgentAgentBinding.enabled.is_(True))
+            .all()
+        )
+        for b in bindings:
+            target = self.db.get(Agent, b.target_agent_id)
+            if not target or not target.published_version_id:
+                continue
+            tools.append(
+                SimpleNamespace(
+                    id=f"agent_{target.id}",
+                    name=f"call_agent_{target.id}",
+                    label=target.name,
+                    description=f"委派任务给智能体「{target.name}」",
+                    type="agent",
+                    schema={"target_agent_id": target.id},
+                    enabled=True,
+                )
+            )
+        # MCP 工具:把绑定的 MCP server 的工具包装成 type="mcp" 工具,LLM 在 ReAct 循环里按需调用
+        mcp_bindings = (
+            self.db.query(AgentMcpBinding)
+            .filter(AgentMcpBinding.agent_id == agent.id, AgentMcpBinding.enabled.is_(True))
+            .all()
+        )
+        for mb in mcp_bindings:
+            server = self.db.get(McpServer, mb.mcp_server_id)
+            if not server or not server.enabled:
+                continue
+            try:
+                mcp_tools = get_mcp_client(server).list_tools()
+            except Exception:
+                # server 不可达:跳过其工具,不阻断主流程
+                continue
+            for mt in mcp_tools:
+                mt_name = mt.get("name")
+                if not mt_name:
+                    continue
+                tools.append(
+                    SimpleNamespace(
+                        id=f"mcp_{server.id}_{mt_name}",
+                        name=f"mcp_{server.id}_{mt_name}",
+                        label=mt.get("description") or mt_name,
+                        description=mt.get("description") or mt_name,
+                        type="mcp",
+                        schema={"mcp_server_id": server.id, "tool_name": mt_name, "input_schema": mt.get("inputSchema")},
+                        enabled=True,
+                    )
+                )
+        return tools
 
     def _attachment_text(self, uploads: list[Upload]) -> str:
         """格式化传入文档提取出的文本附件，并强硬截取前 6000 字符限制单次对话 Token 的无序爆发。"""
@@ -1113,7 +1229,6 @@ def compact_session_memory(
     """
     import logging
     import time
-    from core.integrations.llm import OpenAICompatibleProvider
 
     logger = logging.getLogger(__name__)
     start_time = time.perf_counter()
@@ -1273,6 +1388,7 @@ def compact_session_memory_task(
     FastAPI 后台任务专用的包装器，新开 db Session 并在结束时关闭。
     """
     import logging
+
     from core.db.session import SessionLocal
     from core.runtime.memory_pipeline import run_memory_pipeline
     logger = logging.getLogger(__name__)

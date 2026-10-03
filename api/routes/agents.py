@@ -17,16 +17,19 @@ from api.schemas import (
 )
 from core.db.models import Agent, AgentVersion, WorkflowDefinition, WorkspaceMember
 from core.db.session import get_db
+from core.runtime.graph import validate_graph
 from core.runtime.workflow import default_workflow
 from core.security.permissions import can_manage
 from core.services.agents import (
     agent_summary,
     create_agent,
-    delete_agent as delete_agent_service,
     ensure_template_agents_published,
     get_agent_detail,
     publish_agent,
     update_agent,
+)
+from core.services.agents import (
+    delete_agent as delete_agent_service,
 )
 from core.services.memory import (
     delete_memory_profile,
@@ -81,12 +84,9 @@ def _apply_model_selection(db: Session, payload: dict, *, user_id: int) -> dict:
 
 
 def _validate_workflow_nodes(nodes: list[dict]) -> None:
-    allowed = {"Start", "LLM", "Knowledge", "Tool", "Answer"}
-    seen = {node.get("type") for node in nodes}
-    if not seen.issubset(allowed):
-        raise HTTPException(status_code=400, detail="Unsupported workflow node type")
-    if not {"Start", "Answer"}.issubset(seen):
-        raise HTTPException(status_code=400, detail="Workflow requires Start and Answer nodes")
+    errors = validate_graph(nodes)
+    if errors:
+        raise HTTPException(status_code=400, detail="; ".join(errors))
 
 
 @router.get("")

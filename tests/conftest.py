@@ -7,11 +7,42 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
 
+@pytest.fixture(scope="session")
+def _test_db_url():
+    """session 级测试库:优先 TEST_DATABASE_URL 环境变量,无则起 testcontainers MySQL。
+
+    让本地无测试库也能跑 client-fixture 集成测试(消除 ~88 skip)。
+    container session 级复用,schema 由 client fixture function 级重建。
+    """
+    env = os.getenv("TEST_DATABASE_URL")
+    if env:
+        yield env
+        return
+    from testcontainers.community.mysql import MySqlContainer
+    import pymysql
+
+    container = MySqlContainer("mysql:8.0", dialect="pymysql", root_password="rootpass")
+    container.start()
+    try:
+        # CI 的 mysql:8.0 service 设了 log_bin_trust_function_creators=1 让 init_db 创建 trigger;
+        # testcontainers 容器默认未设 → 用 root 连接设 GLOBAL,否则 CREATE TRIGGER 报 errno 1419。
+        conn = pymysql.connect(
+            host=container.get_container_host_ip(),
+            port=int(container.get_exposed_port(3306)),
+            user="root",
+            password="rootpass",
+        )
+        with conn.cursor() as cur:
+            cur.execute("SET GLOBAL log_bin_trust_function_creators = 1")
+        conn.close()
+        yield container.get_connection_url()
+    finally:
+        container.stop()
+
+
 @pytest.fixture()
-def client(monkeypatch):
-    database_url = os.getenv("TEST_DATABASE_URL")
-    if not database_url:
-        pytest.skip("Test database required. Set TEST_DATABASE_URL.")
+def client(monkeypatch, _test_db_url):
+    database_url = _test_db_url
 
     _terminate_database_connections(database_url)
     

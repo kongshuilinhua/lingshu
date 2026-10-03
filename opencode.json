@@ -1,0 +1,46 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "tars-ai/4WWBCKTX/glm-5.2",
+  "small_model": "tars-ai/4WWBCKTX/glm-5.2",
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "*": "ask",
+      "git *": "allow",
+      "uv run *": "allow",
+      "uv pip *": "allow",
+      "npm run *": "allow",
+      "npm install": "allow",
+      "git push": "ask",
+      "git push --force": "deny",
+      "git push -f": "deny",
+      "git reset --hard": "deny",
+      "git clean -fd": "deny",
+      "git clean -fdx": "deny",
+      "git branch -D": "deny"
+    }
+  },
+  "command": {
+    "lint": {
+      "description": "跑后端 ruff E+F lint 检查(CI 等价规则)。",
+      "agent": "build",
+      "template": "运行 `uv run --with ruff ruff check api/ core/ tests/ eval/ --select E4,E7,E9,F --ignore=E501` 并逐条报告问题。$ARGUMENTS"
+    },
+    "test": {
+      "description": "跑后端 pytest(mock LLM 模式,无需真实 API key / DB)。",
+      "agent": "build",
+      "template": "运行 `LINGSHU_MOCK_LLM=true LINGSHU_VECTOR_BACKEND=memory uv run python -m pytest tests/ --timeout=60 $ARGUMENTS` 并报告通过/失败统计与失败用例。"
+    },
+    "build-frontend": {
+      "description": "构建前端 Vite 产物,验证 JSX 语法。",
+      "agent": "build",
+      "template": "在 frontend 目录运行 `npm run build` 并报告构建结果。$ARGUMENTS"
+    },
+    "release-check": {
+      "description": "发布前检查(含前端构建)。",
+      "agent": "build",
+      "template": "运行 `uv run python scripts/release_check.py --with-frontend` 并报告结果。$ARGUMENTS"
+    }
+  }
+}

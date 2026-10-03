@@ -6,7 +6,7 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
 from api.access import invite_workspace
@@ -24,7 +24,12 @@ from api.serializers import (
 )
 from core.db.models import User, WorkspaceMember, WorkspaceInvite
 from core.db.session import get_db
-from core.security.auth import create_access_token, hash_password, verify_password
+from core.security.auth import (
+    create_access_token,
+    hash_password,
+    revoke_access_token,
+    verify_password,
+)
 from core.security.permissions import normalize_role
 from core.services.bootstrap import (
     create_default_workspace_user,
@@ -79,6 +84,23 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     membership = db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user.id).first()
     token = create_access_token({"sub": str(user.id), "workspace_id": membership.workspace_id if membership else None})
     return {"access_token": token, "token_type": "bearer", "user": user_payload(user)}
+
+
+@router.post("/logout")
+def logout(
+    authorization: str | None = Header(default=None),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    主动登出：把当前令牌的 jti 写入 Redis 黑名单，使其立即失效。
+
+    令牌有效期为 24 小时，若没有撤销出口，泄露的令牌在这段时间内无法作废。
+    `revoke_access_token` 在 Redis 不可用时返回 False（降级为不撤销），
+    此时仍返回 200——客户端该清本地令牌的动作不应被服务端缓存状态阻塞，
+    但用 `revoked` 字段如实告知调用方撤销是否真的生效。
+    """
+    token = (authorization or "").split(" ", 1)[1].strip()
+    return {"revoked": revoke_access_token(token)}
 
 
 @router.get("/me")

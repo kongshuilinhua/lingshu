@@ -25,7 +25,6 @@
       COMMON_STORAGETYPE: local
     ports:
       - "19530:19530"
-      - "9091:9091"
     volumes:
       - milvus_data:/var/lib/milvus
 

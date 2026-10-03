@@ -85,14 +85,14 @@ class Settings(BaseSettings):
     storage_secure: bool = Field(default=False, alias="STORAGE_SECURE")
 
     # ── LLM 供应商配置 ─────────────────────────────────────────
-    # 🎯 多供应商路由设计：默认走阿里云灵积(DashScope)的 OpenAI 兼容接口，
-    #    也可无缝切换至 DeepSeek 或任何 OpenAI 兼容端点
-    openai_api_base: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1", alias="OPENAI_API_BASE")
+    # 🎯 多供应商路由设计：默认走 SiliconFlow 的 OpenAI 兼容接口，
+    #    也可无缝切换至 DashScope/DeepSeek 或任何 OpenAI 兼容端点
+    openai_api_base: str = Field(default="https://api.siliconflow.cn/v1", alias="OPENAI_API_BASE")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
-    # 🧠 默认聊天模型：qwen-plus 是阿里通义千问的高性价比版本，131K 上下文窗口
-    openai_model: str = Field(default="qwen-plus", alias="OPENAI_MODEL")
-    # 🧠 Embedding 模型：text-embedding-v3 是灵积平台最新的高维向量模型
-    openai_embedding_model: str = Field(default="text-embedding-v3", alias="OPENAI_EMBEDDING_MODEL")
+    # 🧠 默认聊天模型：deepseek-ai/DeepSeek-V4-Flash，性价比高（¥1/M 输入）
+    openai_model: str = Field(default="deepseek-ai/DeepSeek-V4-Flash", alias="OPENAI_MODEL")
+    # 🧠 Embedding 模型：BAAI/bge-m3，多语言长上下文(8192)、1024 维，SiliconFlow 免费款
+    openai_embedding_model: str = Field(default="BAAI/bge-m3", alias="OPENAI_EMBEDDING_MODEL")
     # 🛡️ 嵌入批量上限：DashScope text-embedding-v3 单次最多 10 条，超出会 400 InvalidParameter。
     # 其它供应商（如 OpenAI 可达 2048）可通过环境变量调大。
     embedding_batch_size: int = Field(default=10, alias="EMBEDDING_BATCH_SIZE")
@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=8192, ge=0, alias="LLM_MAX_TOKENS")
     # 查询理解解析器：默认保留原生 JSON 解析；可选 LangChain 结构化输出
     qu_parser: str = Field(default="native", alias="QU_PARSER")
+    # 跨语言查询翻译：中文查询→英文翻译喂给 BM25（英文文档），Dense/Rerank 不受影响
+    translate_query_enabled: bool = Field(default=True, alias="LINGSHU_TRANSLATE_QUERY")
+    # 翻译用模型（None 复用主对话模型；建议配成免费/便宜的小模型如 Qwen3-8B）
+    translate_model: str | None = Field(default=None, alias="LINGSHU_TRANSLATE_MODEL")
 
     # ── LangSmith 可观测性（默认关闭，不产生外部 trace） ────────
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
@@ -158,7 +162,7 @@ class Settings(BaseSettings):
 
     # Rerank 重排序：使用 Cross-Encoder 或 API 对 RRF 融合结果做精排
     rag_rerank_enabled: bool = Field(default=True, alias="RAG_RERANK_ENABLED")
-    rag_rerank_model: str = Field(default="qwen3-rerank", alias="RAG_RERANK_MODEL")
+    rag_rerank_model: str = Field(default="BAAI/bge-reranker-v2-m3", alias="RAG_RERANK_MODEL")
     # rerank_top_n: 精排后保留的候选数，通常大于最终 top_k 以给后续过滤留余量
     rag_rerank_top_n: int = Field(default=6, alias="RAG_RERANK_TOP_N")
 

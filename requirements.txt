@@ -20,6 +20,7 @@ cryptography>=41.0.0
 slowapi==0.1.9
 
 pymilvus==2.5.4
+setuptools<80
 redis==5.2.1
 celery==5.4.0
 requests==2.32.5
@@ -30,5 +31,6 @@ minio==7.2.12
 
 pytest==8.3.4
 pytest-timeout==2.3.1
+testcontainers[mysql]>=4.0
 httpx==0.28.1
 pypdf==5.1.0

@@ -31,7 +31,18 @@ settings = get_settings()
 
 # 🎯 数据库连接引擎引擎初始化
 # future=True 启用 SQLAlchemy 2.0 兼容模式，保证查询接口的前向兼容性
-engine = create_engine(settings.database_url, future=True)
+#
+# 🛡️ 连接存活性保障（仅对真实连接池的 driver 生效）：
+#   - pool_pre_ping：借出连接前先探活。MySQL 的 wait_timeout 默认 8 小时会主动
+#     切断空闲连接，而连接池并不知情、会继续持有这些死连接。典型症状是低峰期过后
+#     第一个请求报 "MySQL server has gone away"。
+#   - pool_recycle=3600：主动在 1 小时后回收连接，早于服务端超时，双重兜底。
+#   SQLite 用的是 SingletonThreadPool/StaticPool，不接受这些参数，故按 driver 区分。
+_engine_kwargs: dict = {"future": True}
+if not settings.database_url.startswith("sqlite"):
+    _engine_kwargs.update(pool_pre_ping=True, pool_recycle=3600)
+
+engine = create_engine(settings.database_url, **_engine_kwargs)
 
 # 🎯 会话工厂声明 (Thread-local Session Local)
 # autoflush=False: 禁用自动提交缓冲区，防止未显式 commit 的修改提前落库，有利于事务边界控制

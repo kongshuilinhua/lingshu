@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import re
 import time
 
@@ -274,6 +275,31 @@ def test_user_model_payload(payload: dict, *, detect_image: bool = False) -> dic
         **data,
     )
     return test_user_model_config(config, detect_image=detect_image)
+
+
+def probe_models_payload(payload: dict) -> dict:
+    """
+    拉取 base_url 端点支持的模型列表(GET /models)。
+
+    🎯 让用户只填 base_url + api_key 即可下拉选 model,无需手记模型串(最易错项)。
+    兼容 OpenAI /v1/models 标准:返回 {data:[{id:...}]}。
+    """
+    base_url = (payload.get("base_url") or "").strip().rstrip("/")
+    api_key = _required_api_key(payload.get("api_key"))
+    if not base_url:
+        raise ValueError("base_url is required")
+    try:
+        resp = httpx.get(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        models = sorted(m.get("id") for m in (data.get("data") or []) if m.get("id"))
+        return {"ok": True, "models": models, "count": len(models)}
+    except Exception as exc:
+        return {"ok": False, "models": [], "count": 0, "message": _sanitize_probe_error(exc)}
 
 
 def detect_image_support_for_payload(*, api_key: str, data: dict) -> bool:

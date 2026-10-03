@@ -342,6 +342,12 @@ class UserModelCapabilityTestRequest(UserModelConfigRequest):
     detect_image: bool = False
 
 
+class UserModelProbeModelsRequest(BaseModel):
+    """拉取端点模型列表(GET /models)的请求契约:只需 base_url + api_key。"""
+    base_url: str = Field(min_length=1, max_length=500)
+    api_key: str = Field(max_length=4096)
+
+
 class UserModelConfigUpdateRequest(BaseModel):
     """更新私有大模型连接参数契约。"""
     display_name: str | None = Field(default=None, min_length=1, max_length=160)

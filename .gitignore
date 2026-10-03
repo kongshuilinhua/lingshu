@@ -29,6 +29,7 @@ storage/
 rag/chroma_db/
 agent/tools/chroma_db/
 *.sqlite3
+*.db
 md5.txt
 
 # 本地聊天记录
@@ -76,3 +77,5 @@ dataset/
 # 个人面试准备脚本（本地保留，不入库）
 scripts/scrape_xiaolin_*.py
 scripts/xiaolin_interview_notes.py
+.zcode/
+*.tar.gz

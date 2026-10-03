@@ -10,6 +10,7 @@ from api.schemas import (
     UserModelCapabilityTestRequest,
     UserModelConfigRequest,
     UserModelConfigUpdateRequest,
+    UserModelProbeModelsRequest,
 )
 from core.db.models import ModelConfig, User, WorkspaceMember
 from core.db.session import get_db
@@ -26,6 +27,7 @@ from core.services.user_models import (
     delete_user_model_config,
     get_owned_user_model,
     list_user_model_configs,
+    probe_models_payload,
     test_user_model_config,
     test_user_model_payload,
     update_user_model_config,
@@ -111,6 +113,15 @@ def test_user_model_draft(request: UserModelCapabilityTestRequest, current_user:
         payload = request.model_dump()
         detect_image = bool(payload.pop("detect_image", False))
         return test_user_model_payload(payload, detect_image=detect_image)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/user-models/probe-models")
+def probe_user_models(request: UserModelProbeModelsRequest, current_user: User = Depends(get_current_user)):
+    """填 base_url + api_key 后拉取可用模型列表,前端下拉选 model,无需手记模型串。"""
+    try:
+        return probe_models_payload(request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

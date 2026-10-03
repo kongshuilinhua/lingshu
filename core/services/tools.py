@@ -29,7 +29,7 @@ from core.services import web_search as web_search_service
 
 # 🧠 魔鬼数字：防范 HTTP 响应体过大导致的内存抖动和 OOM 崩溃，上限硬性限制为 1MB
 MAX_RESPONSE_BYTES = 1024 * 1024
-TOOL_TYPES = {"builtin", "builtin_search", "http"}
+TOOL_TYPES = {"builtin", "builtin_search", "http", "agent", "mcp"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 AUTH_TYPES = {"none", "bearer", "header", "query"}
 # 🛡️ 安全限制：禁止工具请求云原生环境的元数据地址，防止服务器凭证泄露漏洞
@@ -93,6 +93,40 @@ def dns_pinned(host: str, ip: str):
         if hasattr(_local_dns_pinning, "pins"):
             _local_dns_pinning.pins.pop(host.lower(), None)
         socket.getaddrinfo = original_getaddrinfo
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """
+    🛡️ 阻断 urllib 的自动重定向（SSRF 第 3 阶段防线）。
+
+    urllib 默认装载 HTTPRedirectHandler 会自动跟随 3xx，而 `_validate_safe_https_url`
+    与 `dns_pinned` 只约束首跳。攻击者用自己控制的合法外网域名返回
+    `302 Location: http://169.254.169.254/...`，重定向后的请求是全新 URL，
+    既不重新过 IP 校验，DNS pin 对新 host 也不生效（纯 IP 目标根本不走 DNS），
+    等于绕过全部前置防线读取云元数据。
+
+    因此这里让 urllib 把 3xx 当普通响应返回（返回 None 即不构造重定向请求），
+    由 `_execute_http_tool` 自行逐跳校验后再手动发起下一跳。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - 覆写父类行为
+        return None
+
+    def _passthrough(self, req, fp, code, msg, headers):
+        """把 3xx 响应原样交回 opener.open()，而不是让默认处理器抛 HTTPError。"""
+        return fp
+
+    # urllib 的错误链会把 3xx 派发到 http_error_<code>；返回非 None 即作为 open() 的结果
+    http_error_301 = _passthrough
+    http_error_302 = _passthrough
+    http_error_303 = _passthrough
+    http_error_307 = _passthrough
+    http_error_308 = _passthrough
+
+
+# 🛡️ 手动重定向的最大跳数：够覆盖正常的 http->https / 规范化跳转，又不给重定向链留放大空间
+MAX_REDIRECTS = 3
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 
 # ── Built-in tool implementations ───────────────────────────────────
@@ -509,7 +543,112 @@ def execute_tool(tool: Tool, context: dict) -> dict:
         return _execute_builtin_search(tool, context)
     if tool.type == "http":
         return _execute_http_tool(tool, context)
+    if tool.type == "agent":
+        return _execute_agent_tool(tool, context)
+    if tool.type == "mcp":
+        return _execute_mcp_tool(tool, context)
     raise ValueError("Unsupported tool type")
+
+
+def _execute_agent_tool(tool, context: dict) -> dict:
+    """
+    Agent-as-Tool:调用已发布子 agent,返回其回答作为工具结果。
+
+    🎯 supervisor 在 ReAct 循环里调用绑定的子 agent,子 agent 用发布快照
+    同步跑完一回合,answer 作为 tool result 回流主循环继续推理。
+    🛡️ 防递归:子 agent 若已在 agent_call_stack 中则拒绝,防 A→B→A 死循环。
+    """
+    schema = getattr(tool, "schema", None) or {}
+    target_id = schema.get("target_agent_id")
+    if not target_id:
+        raise ValueError("Agent tool has no target_agent_id")
+    db = context.get("_db")
+    if db is None:
+        raise ValueError("Agent tool execution requires a database session")
+
+    from core.db.models import Agent, Session as ChatSession
+    from core.runtime.workflow import WorkflowRunner
+
+    target = db.get(Agent, target_id)
+    if not target:
+        raise ValueError("Target agent not found")
+    if not target.published_version_id:
+        raise ValueError("Target agent has no published version")
+
+    call_stack: list[int] = list(context.get("agent_call_stack") or [])
+    if target.id in call_stack:
+        raise ValueError(f"Recursive agent call to agent {target.id} blocked")
+
+    raw_input = context.get("input")
+    if isinstance(raw_input, dict):
+        user_message = raw_input.get("input") or json.dumps(raw_input, ensure_ascii=False)
+    else:
+        user_message = str(raw_input)
+
+    sub_session = ChatSession(
+        workspace_id=target.workspace_id,
+        agent_id=target.id,
+        user_id=context.get("_user_id") or 0,
+        title="agent-tool-call",
+        is_debug=True,
+    )
+    db.add(sub_session)
+    db.flush()
+
+    runner = WorkflowRunner(db)
+    _run, answer, _sources, _steps = runner.run(
+        agent=target,
+        chat_session=sub_session,
+        user_message=user_message,
+        mode="published",
+        _agent_call_stack=[*call_stack, target.id],
+    )
+    return {
+        "tool": tool.name,
+        "tool_type": "agent",
+        "status_code": 200,
+        "content": answer,
+        "result_preview": answer,
+        "result_json": _safe_json(answer),
+    }
+
+
+def _execute_mcp_tool(tool, context: dict) -> dict:
+    """
+    MCP 工具执行:转发到 MCP server 的 tools/call,聚合 text content 作为工具结果。
+
+    🎯 agent 在 ReAct 循环里调用经 MCP server 暴露的工具,平台作 client 转发并取回文本。
+    """
+    schema = getattr(tool, "schema", None) or {}
+    server_id = schema.get("mcp_server_id")
+    tool_name = schema.get("tool_name")
+    if not server_id or not tool_name:
+        raise ValueError("MCP tool has no mcp_server_id/tool_name")
+    db = context.get("_db")
+    if db is None:
+        raise ValueError("MCP tool execution requires a database session")
+
+    from core.db.models import McpServer
+    from core.integrations.mcp_client import get_mcp_client
+
+    server = db.get(McpServer, server_id)
+    if not server:
+        raise ValueError("MCP server not found")
+    if not server.enabled:
+        raise ValueError("MCP server is disabled")
+
+    client = get_mcp_client(server)
+    raw_input = context.get("input")
+    arguments = raw_input if isinstance(raw_input, dict) else {"input": raw_input}
+    text = client.call_tool(tool_name, arguments)
+    return {
+        "tool": tool.name,
+        "tool_type": "mcp",
+        "status_code": 200,
+        "content": text,
+        "result_preview": text,
+        "result_json": _safe_json(text),
+    }
 
 
 def tool_call_event(tool: Tool, result: dict, *, status: str = "success", input_preview: str = "", error_code: str | None = None) -> dict:
@@ -540,6 +679,10 @@ def _tool_fields(payload: dict, *, partial: bool = False, existing: Tool | None 
         raise ValueError("Unsupported tool type")
     if tool_type == "builtin":
         raise ValueError("Built-in tools can only be managed by the system")
+    if tool_type == "agent":
+        raise ValueError("Agent tools are created via agent bindings, not the tool API")
+    if tool_type == "mcp":
+        raise ValueError("MCP tools are created via MCP server bindings, not the tool API")
 
     result: dict = {}
     if "type" in data or not partial:
@@ -1126,34 +1269,65 @@ def _execute_http_tool(tool: Tool, context: dict) -> dict:
         data = json.dumps(body if body is not None else _body_from_schema(tool.body_schema or {}, input_data)).encode("utf-8")
         headers.setdefault("Content-Type", "application/json")
         
-    request = urllib.request.Request(url, data=data, headers=headers, method=tool.method)
     started = time.monotonic()
-    
+
     # 5. 执行请求并截断保护
+    # 🛡️ 禁用自动重定向，改为逐跳校验：每一跳都重新过 SSRF 关哨并重建 DNS pin
+    opener = urllib.request.build_opener(_NoRedirectHandler)
+    current_url = url
+    current_host = parsed_host
+    current_ip = validated_ip
+    current_method = tool.method
+    current_data = data
+    current_headers = dict(headers)
+
     try:
-        # 利用 dns_pinned 阻断 DNS 重绑定
-        with dns_pinned(parsed_host, validated_ip):
-            with urllib.request.urlopen(request, timeout=tool.timeout_seconds) as response:
-                content_type = response.headers.get("Content-Type", "")
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-                # 🛡️ 边界防线：超出限制拒绝读取，杜绝内存爆满
-                if len(raw) > MAX_RESPONSE_BYTES:
-                    raise ValueError("Tool response is too large")
-                text = raw.decode("utf-8", errors="replace")
-                result_json = _safe_json(text)
-                return {
-                    "tool": tool.name,
-                    "tool_type": tool.type,
-                    "status_code": response.status,
-                    "content_type": content_type,
-                    "latency_ms": int((time.monotonic() - started) * 1000),
-                    "content": _preview(text, 4000),
-                    "result_preview": _preview(text),
-                    "result_json": result_json,
-                }
+        for _hop in range(MAX_REDIRECTS + 1):
+            request = urllib.request.Request(
+                current_url, data=current_data, headers=current_headers, method=current_method
+            )
+            # 利用 dns_pinned 阻断 DNS 重绑定
+            with dns_pinned(current_host, current_ip):
+                with opener.open(request, timeout=tool.timeout_seconds) as response:
+                    status = response.status
+                    if status in _REDIRECT_CODES:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ValueError("HTTP tool request failed")
+                        # 相对 Location 需基于当前 URL 解析为绝对地址后再校验
+                        next_url = urllib.parse.urljoin(current_url, location)
+                        # 关键：新地址必须重新通过 HTTPS + 私网/元数据拦截校验
+                        current_ip = _validate_safe_https_url(next_url)
+                        current_host = urllib.parse.urlparse(next_url).hostname
+                        current_url = next_url
+                        # 303 及 301/302 的实践语义：后续跳转降级为无 body 的 GET
+                        if status == 303 or (status in {301, 302} and current_method == "POST"):
+                            current_method = "GET"
+                            current_data = None
+                            current_headers.pop("Content-Type", None)
+                        continue
+
+                    content_type = response.headers.get("Content-Type", "")
+                    raw = response.read(MAX_RESPONSE_BYTES + 1)
+                    # 🛡️ 边界防线：超出限制拒绝读取，杜绝内存爆满
+                    if len(raw) > MAX_RESPONSE_BYTES:
+                        raise ValueError("Tool response is too large")
+                    text = raw.decode("utf-8", errors="replace")
+                    result_json = _safe_json(text)
+                    return {
+                        "tool": tool.name,
+                        "tool_type": tool.type,
+                        "status_code": status,
+                        "content_type": content_type,
+                        "latency_ms": int((time.monotonic() - started) * 1000),
+                        "content": _preview(text, 4000),
+                        "result_preview": _preview(text),
+                        "result_json": result_json,
+                    }
+        raise ValueError("HTTP tool request exceeded the redirect limit")
     except urllib.error.HTTPError as exc:
-        detail = exc.read(512).decode("utf-8", errors="replace")
-        raise ValueError(f"HTTP tool request failed with status {exc.code}: {_preview(detail, 200)}") from exc
+        # 只回状态码，不回上游响应体——响应体可能含上游内部细节或凭证回显
+        raise ValueError(f"HTTP tool request failed with status {exc.code}") from exc
     except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
         raise ValueError("HTTP tool request failed") from exc
 
@@ -1171,12 +1345,17 @@ def _validate_safe_https_url(url: str) -> str:
     host = parsed.hostname.strip().lower()
     if host in {"localhost", "metadata", "metadata.google.internal"} or host.endswith(".localhost"):
         raise ValueError("HTTP tool target is blocked")
+    # 注意：只用 try 包住「是不是 IP 字面量」这一个判断。
+    # 原写法把 _reject_ip 也包在同一个 try 里，而 _reject_ip 的拦截信号同样是
+    # ValueError，会被 except 一起吞掉，导致私网字面量走到下面的 DNS 分支才被拦住
+    # ——碰巧仍能拦住，但拦截逻辑依赖了错误分支，属于易碎实现。
     try:
         ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
         _reject_ip(ip)
         return str(ip)
-    except ValueError:
-        pass
     addr_info = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
     for info in addr_info:
         _reject_ip(ipaddress.ip_address(info[4][0]))
@@ -1322,6 +1501,24 @@ def _tool_parameters_schema(tool: Tool) -> dict:
                 }
             },
             "required": ["query"],
+        }
+    if tool.type == "agent":
+        return {
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "description": "委派给该智能体的子任务或问题"}
+            },
+            "required": ["input"],
+        }
+    if tool.type == "mcp":
+        # 优先用 MCP server 声明的 inputSchema;缺失时退化为通用 input
+        input_schema = (tool.schema or {}).get("input_schema")
+        if isinstance(input_schema, dict) and input_schema:
+            return input_schema
+        return {
+            "type": "object",
+            "properties": {"input": {"type": "string", "description": "传给该 MCP 工具的输入"}},
+            "required": ["input"],
         }
     properties: dict = {}
     required: list[str] = []

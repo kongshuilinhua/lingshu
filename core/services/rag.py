@@ -16,6 +16,7 @@ from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import vector_store as vector_store_module
 from core.observability.metrics import record_cache
 from core.services.rag_cache import redis_store, ttl_with_jitter
+from core.services.query_translate import translate_query
 
 # 🧠 魔鬼数字：BM25 构建分批批次大小，防止全表读取导致的高内存开销与游标挂起
 BM25_BATCH_SIZE = 1000
@@ -89,11 +90,14 @@ def retrieve(
     )
     
     # 2. 稀疏文本搜索通道 (Sparse BM25 Channel)
+    # 🌐 跨语言查询翻译：中文查询→英文翻译喂给 BM25（英文文档），修复跨语言词项零重叠
+    translated_query = translate_query(provider, query, runtime_config=runtime_config)
+    bm25_query = translated_query or query
     bm25_hits = _bm25_search(
         db,
         workspace_id=workspace_id,
         knowledge_base_ids=knowledge_base_ids,
-        query=query,
+        query=bm25_query,
         limit=int(config.get("bm25_top_k") or settings.rag_bm25_top_k),
     )
     
@@ -130,8 +134,8 @@ def retrieve(
     if parent_expansion and sources:
         _expand_parents(db, workspace_id=workspace_id, sources=sources)
 
-    no_evidence = not _has_evidence(sources, query)
-    
+    no_evidence = not _has_evidence(sources, bm25_query)
+
     status = started_status | {
         "reason": "available" if sources else "no_match",
         "matched_chunks": len(final_hits),
@@ -145,6 +149,7 @@ def retrieve(
             "model": settings.rag_rerank_model,
             "error": rerank_error or None,
         },
+        "translate": {"enabled": settings.translate_query_enabled, "applied": translated_query is not None, "model": settings.translate_model or settings.openai_model},
         "cache": {"enabled": bool(config.get("cache_enabled", settings.rag_cache_enabled)), "hit": False, "backend": "redis" if redis_store.available else "none"},
         "no_evidence": no_evidence,
         "refuse_when_no_evidence": bool(config.get("refuse_when_no_evidence", settings.rag_refuse_when_no_evidence)),

@@ -21,6 +21,11 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from core.config import get_settings
 
 
+# 🛡️ 验签侧的算法白名单。本模块的签名实现是硬编码的 HMAC-SHA256，
+# 因此这里只接受 HS256——配置项若被改成其它值，请求会明确失败而不是静默降级。
+_ALLOWED_ALGORITHMS = {"HS256"}
+
+
 # ═══════════════════════════════════════════════════════════════
 # 密码哈希（Password Hashing）
 # ═══════════════════════════════════════════════════════════════
@@ -145,6 +150,21 @@ def decode_access_token(token: str) -> dict:
     if len(parts) != 3:
         raise ValueError("Invalid token format")
     h, p, s = parts
+    # 🛡️ Header 校验：显式断言 alg 在白名单内。
+    # 原实现把 header 当不透明串直接参与 HMAC 计算，从不解析 alg。当前签发端固定
+    # HS256 所以尚不可被 alg:none 直接打穿，但 jwt_algorithm 是可配置项，一旦改成
+    # RS256 或引入第二条签发路径，验签侧不会跟着变，会静默退化成「用公钥当 HMAC
+    # 密钥」的 algorithm confusion 漏洞。自研 JWT 必须把 alg 白名单写死在验签侧。
+    try:
+        header = json.loads(_b64url_decode(h))
+    except (ValueError, json.JSONDecodeError):
+        raise ValueError("Invalid token header")
+    if header.get("alg") not in _ALLOWED_ALGORITHMS:
+        raise ValueError("Unsupported token algorithm")
+    if header.get("alg") != settings.jwt_algorithm:
+        raise ValueError("Unexpected token algorithm")
+    if str(header.get("typ", "JWT")).upper() != "JWT":
+        raise ValueError("Unsupported token type")
     # 🛡️ 签名验证：恒定时间比较，防止计时攻击
     expected = hmac.new(settings.jwt_secret.encode(), f"{h}.{p}".encode(), hashlib.sha256).digest()
     if not hmac.compare_digest(_b64url_decode(s), expected):

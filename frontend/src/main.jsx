@@ -142,6 +142,7 @@ import {
   filesFromList,
   filesFromClipboard,
   hasTransferFiles,
+  API_BASE,
 } from './utils.js';
 
 function App() {
@@ -379,6 +380,16 @@ function App() {
   }
 
   function logout() {
+    // 先中断进行中的 SSE 流，否则登出后旧流仍会继续往 messages 里写 token。
+    useChatStore.getState().stopStream();
+    // 通知服务端把当前令牌加入黑名单。令牌有效期 24 小时，仅清本地存储的话
+    // 泄露的令牌在这段时间内依然可用。失败不阻塞本地登出。
+    if (token) {
+      fetch(`${API_BASE}/api/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
     storeLogout();  // Phase 4: Zustand handles token/me/workspace cleanup
     setAgents([]);
     setActiveAgentId(null);
@@ -625,6 +636,10 @@ function App() {
 
   async function testUserModelDraft(payload) {
     return api('/api/user-models/test', { token, method: 'POST', body: payload });
+  }
+
+  async function probeUserModels(payload) {
+    return api('/api/user-models/probe-models', { token, method: 'POST', body: payload });
   }
 
   async function updateUserModelConfig(configId, patch) {
@@ -1275,6 +1290,14 @@ function App() {
     memoryProfileLoading,
     memoryProfileSaving,
     renameSessionById,
+    // 页面模块拆分时漏传这四项：activeSessionId 缺失会让会话列表无法高亮当前会话，
+    // 且 BuilderView 的标题编辑器整块 (activeSessionId && ...) 永远不渲染。
+    // 四者必须一起补——只补 activeSessionId 会让编辑器开始渲染，然后在首次输入时
+    // 因 setSessionTitleDraft 未定义而抛错。
+    activeSessionId,
+    sessionTitleDraft,
+    setSessionTitleDraft,
+    renameSession,
     ragRuntime,
     searchEnabled,
     thinkingEnabled,
@@ -1827,6 +1850,7 @@ function HomeView(props) {
             deleteUserModelConfig={deleteUserModelConfig}
             testUserModelConfig={testUserModelConfig}
             testUserModelDraft={testUserModelDraft}
+            probeUserModels={probeUserModels}
           />
         )}
 

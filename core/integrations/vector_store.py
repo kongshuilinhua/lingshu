@@ -185,6 +185,10 @@ class MilvusVectorStore:
         if not self._client:
             self._fallback.delete(filters=filters)
             return
+        # collection 不存在时直接跳过——全新 Milvus 上没有东西可删，
+        # 不应因 collection 未创建（首次入库 delete 先于 upsert）而抛异常。
+        if not self._client.has_collection(self.settings.milvus_collection):
+            return
         expr = build_milvus_filter(filters)
         if expr:
             self._client.delete(collection_name=self.settings.milvus_collection, filter=expr)
