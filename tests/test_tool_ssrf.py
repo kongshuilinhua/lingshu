@@ -122,6 +122,21 @@ def test_safe_redirect_is_followed(monkeypatch):
     assert seen[-1] == "https://example.com/v2/api"
 
 
+def test_cross_origin_redirect_does_not_send_authorization(monkeypatch):
+    seen = []
+
+    def fake_open(self, request, timeout=None):
+        seen.append(request)
+        return _FakeResponse(302, {"Location": "https://other.example/v1"})
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", fake_open)
+    tool = _tool()
+    tool.headers_schema = {"Authorization": {}}
+    with pytest.raises(ValueError, match="cross-origin"):
+        tools_service._execute_http_tool(tool, {"input": {"Authorization": "Bearer secret"}})
+    assert len(seen) == 1
+
+
 def test_redirect_loop_hits_hop_limit(monkeypatch):
     """无限重定向必须被跳数上限截断，而不是打满超时或递归。"""
     hops: list[str] = []

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import httpx
+import ipaddress
+import json
 import re
 import time
+import urllib.parse
+import urllib.request
 
 from sqlalchemy.orm import Session
 
@@ -10,6 +13,7 @@ from core.config import get_settings
 from core.db.models import Agent, UserModelConfig
 from core.integrations.llm import OpenAICompatibleProvider
 from core.security.api_keys import decrypt_api_key, encrypt_api_key
+from core.security.outbound_http import open_public_https
 
 
 def user_model_payload(config: UserModelConfig) -> dict:
@@ -181,6 +185,7 @@ def user_model_runtime_config(config: UserModelConfig) -> dict:
     return {
         "provider": config.provider,
         "base_url": config.base_url,
+        "untrusted_base_url": True,
         "api_key": decrypt_api_key(config.encrypted_api_key),
         "chat_model": config.chat_model,
         "supports_image": config.supports_image,
@@ -288,14 +293,18 @@ def probe_models_payload(payload: dict) -> dict:
     api_key = _required_api_key(payload.get("api_key"))
     if not base_url:
         raise ValueError("base_url is required")
+    _validate_public_base_url(base_url)
     try:
-        resp = httpx.get(
-            f"{base_url}/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10,
+        request = urllib.request.Request(
+            f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
         )
-        resp.raise_for_status()
-        data = resp.json()
+        with open_public_https(request, timeout=10) as response:
+            if response.status != 200:
+                raise ValueError("Model endpoint redirected or rejected the request")
+            raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("Model list response is too large")
+        data = json.loads(raw)
         models = sorted(m.get("id") for m in (data.get("data") or []) if m.get("id"))
         return {"ok": True, "models": models, "count": len(models)}
     except Exception as exc:
@@ -354,6 +363,8 @@ def _config_fields(payload: dict, *, partial: bool = False) -> dict:
     for key in ["display_name", "provider", "base_url", "chat_model"]:
         if key in data:
             data[key] = str(data[key]).strip()
+    if "base_url" in data:
+        _validate_public_base_url(data["base_url"])
     if "reasoning_type" in data:
         data["reasoning_type"] = _reasoning_type(data["reasoning_type"])
         data["supports_reasoning"] = data["reasoning_type"] != "none"
@@ -372,6 +383,19 @@ def _config_fields(payload: dict, *, partial: bool = False) -> dict:
     if "provider" in data and data["provider"] != "openai-compatible":
         raise ValueError("Invalid model config")
     return data
+
+
+def _validate_public_base_url(value: str) -> None:
+    parsed = urllib.parse.urlsplit(value)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment):
+        raise ValueError("Public HTTPS base_url required")
+    try:
+        ip = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return
+    if not ip.is_global:
+        raise ValueError("Public HTTPS base_url required")
 
 
 def _config_data_for_probe(config: UserModelConfig, fields: dict) -> dict:

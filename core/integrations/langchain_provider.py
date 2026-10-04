@@ -56,13 +56,17 @@ def get_chat_model(*, model=None, temperature=0.0, runtime_config=None, **kwargs
         resolved_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
         return MockChatOpenAI(model=resolved_model)
 
+    import httpx
     from langchain_openai import ChatOpenAI
     from core.integrations.llm import OpenAICompatibleProvider
+    from core.security.outbound_http import PublicHTTPSHttpxTransport
 
     provider = OpenAICompatibleProvider()
     api_key = provider._api_key(settings, runtime_config, purpose="chat")
     base_url = provider._api_base(settings, runtime_config, purpose="chat")
     resolved_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
+    if (runtime_config or {}).get("untrusted_base_url"):
+        kwargs["http_client"] = httpx.Client(transport=PublicHTTPSHttpxTransport(), follow_redirects=False)
     return ChatOpenAI(
         model=resolved_model,
         base_url=base_url,

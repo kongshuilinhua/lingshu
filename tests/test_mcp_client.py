@@ -85,3 +85,25 @@ def test_mcp_client_start_failure():
     """command 不存在 → 启动即 McpError。"""
     with pytest.raises(McpError, match="Cannot start"):
         McpClient(command=["definitely-not-a-real-binary-xyz"]).list_tools()
+
+
+def test_mcp_client_times_out_and_stops_silent_server():
+    client = McpClient(
+        command=[sys.executable, "-c", "import sys,time; sys.stdin.readline(); time.sleep(10)"],
+        timeout_seconds=0.2,
+    )
+    with pytest.raises(McpError, match="timed out"):
+        client.list_tools()
+    assert not client.started
+
+
+def test_mcp_client_stderr_cannot_block_protocol():
+    code = SERVER_CODE.replace(
+        'if method == "initialize":',
+        'if method == "initialize":\n            sys.stderr.write("x" * 100000)\n            sys.stderr.flush()',
+    )
+    client = McpClient(command=[sys.executable, "-c", code], timeout_seconds=2)
+    try:
+        assert client.list_tools()[0]["name"] == "echo"
+    finally:
+        client.close()

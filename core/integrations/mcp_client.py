@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import threading
+import time
 
 # MCP 协议版本(初始化握手声明,2024-11-05 是 stdio transport 稳定版本)
 _PROTOCOL_VERSION = "2024-11-05"
@@ -26,12 +28,14 @@ class McpClient:
     线程安全:用锁串行化 stdin 写入与响应读取,避免多请求交错污染 id 匹配。
     """
 
-    def __init__(self, command: list[str], env: dict | None = None):
+    def __init__(self, command: list[str], env: dict | None = None, *, timeout_seconds: float = 30):
         self._command = command
         self._env = env
+        self._timeout_seconds = timeout_seconds
         self._proc: subprocess.Popen | None = None
         self._next_id = 1
         self._lock = threading.Lock()
+        self._responses: queue.Queue[str | None] = queue.Queue(maxsize=256)
 
     @property
     def started(self) -> bool:
@@ -45,27 +49,71 @@ class McpClient:
                 self._command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 env=self._env,
                 text=True,
                 bufsize=1,
             )
         except FileNotFoundError as exc:
             raise McpError(f"Cannot start MCP server: {exc}") from exc
+        self._responses = queue.Queue(maxsize=256)
+        threading.Thread(
+            target=self._read_stdout, args=(self._proc.stdout, self._responses), daemon=True
+        ).start()
         self._initialize()
+
+    @staticmethod
+    def _read_stdout(pipe, responses: queue.Queue[str | None]) -> None:
+        def publish(item: str | None) -> None:
+            while True:
+                try:
+                    responses.put_nowait(item)
+                    return
+                except queue.Full:
+                    try:
+                        responses.get_nowait()
+                    except queue.Empty:
+                        pass
+
+        for line in pipe:
+            publish(line)
+        publish(None)
 
     def _send(self, payload: dict) -> None:
         if self._proc is None or self._proc.stdin is None:
             raise McpError("MCP server not started")
-        self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        self._proc.stdin.flush()
+        stdin = self._proc.stdin
+        done = threading.Event()
+        errors: list[Exception] = []
+
+        def write() -> None:
+            try:
+                stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                stdin.flush()
+            except (OSError, ValueError) as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+        threading.Thread(target=write, daemon=True).start()
+        if not done.wait(self._timeout_seconds):
+            raise McpError("MCP server request timed out")
+        if errors:
+            raise McpError("MCP server request failed") from errors[0]
 
     def _recv(self, expected_id: int) -> dict:
-        if self._proc is None or self._proc.stdout is None:
+        if self._proc is None:
             raise McpError("MCP server not started")
+        deadline = time.monotonic() + self._timeout_seconds
         while True:
-            line = self._proc.stdout.readline()
-            if not line:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise McpError("MCP server response timed out")
+            try:
+                line = self._responses.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise McpError("MCP server response timed out") from exc
+            if line is None:
                 raise McpError("MCP server closed the connection")
             try:
                 msg = json.loads(line)
@@ -79,14 +127,18 @@ class McpClient:
 
     def _call(self, method: str, params: dict | None = None) -> dict:
         with self._lock:
-            self._ensure()
-            msg_id = self._next_id
-            self._next_id += 1
-            payload: dict = {"jsonrpc": "2.0", "id": msg_id, "method": method}
-            if params is not None:
-                payload["params"] = params
-            self._send(payload)
-            return self._recv(msg_id)
+            try:
+                self._ensure()
+                msg_id = self._next_id
+                self._next_id += 1
+                payload: dict = {"jsonrpc": "2.0", "id": msg_id, "method": method}
+                if params is not None:
+                    payload["params"] = params
+                self._send(payload)
+                return self._recv(msg_id)
+            except (McpError, OSError):
+                self.close()
+                raise
 
     def _initialize(self) -> None:
         # 调用方(_call)已持锁,这里直接用 _send/_recv,不重入 _call(否则 threading.Lock 死锁)
@@ -129,6 +181,7 @@ class McpClient:
             except Exception:
                 try:
                     self._proc.kill()
+                    self._proc.wait(timeout=2)
                 except Exception:
                     pass
             self._proc = None

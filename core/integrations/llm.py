@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from core.config import get_settings
 from core.integrations.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
+from core.security.outbound_http import open_public_https
 
 # 🎯 系统硬编码默认的 OpenAI 兼容模式 API 端点（指向阿里云百炼/通义千问兼容接口）
 DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -225,7 +226,10 @@ class OpenAICompatibleProvider:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
         try:
-            data = self._post_json(url, payload, api_key)
+            if (runtime_config or {}).get("untrusted_base_url"):
+                data = self._post_json(url, payload, api_key, public_only=True)
+            else:
+                data = self._post_json(url, payload, api_key)
         except Exception:
             breaker.record_failure()
             raise
@@ -302,7 +306,10 @@ class OpenAICompatibleProvider:
             payload["tool_choice"] = "auto"
         # 🎯 编排流转：有工具绑定时，实际上由工作流 runtime 模块使用非流式 chat() 做决策，流式仅在最后的最终回答生成阶段触发
         try:
-            yield from self._post_json_stream(url, payload, api_key)
+            if (runtime_config or {}).get("untrusted_base_url"):
+                yield from self._post_json_stream(url, payload, api_key, public_only=True)
+            else:
+                yield from self._post_json_stream(url, payload, api_key)
         except Exception:
             breaker.record_failure()
             raise
@@ -519,7 +526,7 @@ class OpenAICompatibleProvider:
             self._breakers[model_name] = CircuitBreaker(failure_threshold=3, timewindow=60)
         return self._breakers[model_name]
 
-    def _post_json(self, url: str, payload: dict, api_key: str, *, timeout_seconds: int = 60) -> dict:
+    def _post_json(self, url: str, payload: dict, api_key: str, *, timeout_seconds: int = 60, public_only: bool = False) -> dict:
         """
         同步 POST JSON 工具函数。
 
@@ -540,7 +547,10 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            opened = open_public_https(request, timeout=timeout_seconds) if public_only else urllib.request.urlopen(request, timeout=timeout_seconds)
+            with opened as response:
+                if public_only and response.status != 200:
+                    raise RuntimeError("Model endpoint redirected or rejected the request")
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:800]
@@ -552,7 +562,7 @@ class OpenAICompatibleProvider:
                 f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
             ) from exc
 
-    def _post_json_stream(self, url: str, payload: dict, api_key: str) -> Iterable[dict]:
+    def _post_json_stream(self, url: str, payload: dict, api_key: str, *, public_only: bool = False) -> Iterable[dict]:
         """
         纯 Python 原生 SSE（Server-Sent Events）解析流式输出生成器（产出 chat_stream 帧协议 dict）。
 
@@ -572,7 +582,10 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            opened = open_public_https(request, timeout=120) if public_only else urllib.request.urlopen(request, timeout=120)
+            with opened as response:
+                if public_only and response.status != 200:
+                    raise RuntimeError("Model endpoint redirected or rejected the request")
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line or not line.startswith("data:"):

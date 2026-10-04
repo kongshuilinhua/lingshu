@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import ast
-import ipaddress
 import json
 import math as _math
 import operator as _operator
 import socket
-import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import contextmanager
 from datetime import datetime, timezone as _timezone
 
 import random
@@ -25,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from core.db.models import AgentTool, Tool
 from core.security.api_keys import decrypt_api_key, encrypt_api_key
+from core.security.outbound_http import open_public_https, open_pinned_https, resolve_public_https
 from core.services import web_search as web_search_service
 
 # 🧠 魔鬼数字：防范 HTTP 响应体过大导致的内存抖动和 OOM 崩溃，上限硬性限制为 1MB
@@ -32,99 +30,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 TOOL_TYPES = {"builtin", "builtin_search", "http", "agent", "mcp"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 AUTH_TYPES = {"none", "bearer", "header", "query"}
-# 🛡️ 安全限制：禁止工具请求云原生环境的元数据地址，防止服务器凭证泄露漏洞
-# 🛡️ 安全限制：禁止工具请求所有私有/保留网段 + 云原生元数据地址
-# 参考 RFC 1918, RFC 6598 (CGN), RFC 6890, RFC 4291 (IPv6)
-_BLOCKED_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),         # RFC 1918 Private
-    ipaddress.ip_network("172.16.0.0/12"),       # RFC 1918 Private
-    ipaddress.ip_network("192.168.0.0/16"),      # RFC 1918 Private
-    ipaddress.ip_network("127.0.0.0/8"),         # Loopback
-    ipaddress.ip_network("169.254.0.0/16"),      # Link-local (AWS/Google/Azure metadata)
-    ipaddress.ip_network("100.64.0.0/10"),       # RFC 6598 Carrier-grade NAT
-    ipaddress.ip_network("0.0.0.0/8"),           # Current network
-    ipaddress.ip_network("224.0.0.0/4"),         # Multicast
-    ipaddress.ip_network("240.0.0.0/4"),         # Reserved
-    ipaddress.ip_network("::1/128"),             # IPv6 loopback
-    ipaddress.ip_network("fc00::/7"),            # IPv6 unique local
-    ipaddress.ip_network("fe80::/10"),           # IPv6 link-local
-]
-CLOUD_METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal"}
-
-# 🎯 线程本地存储（Thread-Local Storage）：用于保障高并发请求下 DNS Pinning 独立工作，防止线程串扰
-_local_dns_pinning = threading.local()
-
-
-@contextmanager
-def dns_pinned(host: str, ip: str):
-    """
-    🛡️ 精准防御：DNS 固化上下文管理器（Anti-DNS Rebinding）。
-
-    🎯 意图与工程大局观：
-        为 HTTP 插件调用提供高级别 SSRF 安全阻断。
-        - 为什么要做 DNS Pinning？
-          传统的 SSRF 防御只在解析 URL 时通过 `socket.gethostbyname` 验证 IP。
-          攻击者可以利用 DNS Rebinding（重绑定）技术：在第一次 DNS 解析时返回外网合法 IP，在实际发起 HTTP 请求建立 TCP 连接的瞬间（由 requests 库再次发起 DNS 解析），将域名解析修改为内网私有 IP（如 `127.0.0.1`），从而绕过所有前置 IP 校验。
-        
-    🛡️ 防御机制：
-        1. 在解析校验阶段得到安全的 `validated_ip`。
-        2. 通过劫持全局 `socket.getaddrinfo`，在上下文生命周期内，强制将目标 Host 仅解析为指定的固化 IP。
-        3. 即使 requests 库在建立连接时发起第二次 DNS 解析，也只会被引流至安全的 IP，完美切断 DNS Rebinding 攻击链条。
-    """
-    if not hasattr(_local_dns_pinning, "pins"):
-        _local_dns_pinning.pins = {}
-    _local_dns_pinning.pins[host.lower()] = ip
-    
-    original_getaddrinfo = socket.getaddrinfo
-    
-    def pinned_getaddrinfo(h, port, family=0, type=0, proto=0, flags=0):
-        h_lower = str(h or "").lower()
-        if hasattr(_local_dns_pinning, "pins") and h_lower in _local_dns_pinning.pins:
-            pinned_ip = _local_dns_pinning.pins[h_lower]
-            is_ipv6 = ":" in pinned_ip
-            fam = socket.AF_INET6 if is_ipv6 else socket.AF_INET
-            return [(fam, socket.SOCK_STREAM, 6, "", (pinned_ip, port))]
-        return original_getaddrinfo(h, port, family, type, proto, flags)
-        
-    socket.getaddrinfo = pinned_getaddrinfo
-    try:
-        yield
-    finally:
-        if hasattr(_local_dns_pinning, "pins"):
-            _local_dns_pinning.pins.pop(host.lower(), None)
-        socket.getaddrinfo = original_getaddrinfo
-
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """
-    🛡️ 阻断 urllib 的自动重定向（SSRF 第 3 阶段防线）。
-
-    urllib 默认装载 HTTPRedirectHandler 会自动跟随 3xx，而 `_validate_safe_https_url`
-    与 `dns_pinned` 只约束首跳。攻击者用自己控制的合法外网域名返回
-    `302 Location: http://169.254.169.254/...`，重定向后的请求是全新 URL，
-    既不重新过 IP 校验，DNS pin 对新 host 也不生效（纯 IP 目标根本不走 DNS），
-    等于绕过全部前置防线读取云元数据。
-
-    因此这里让 urllib 把 3xx 当普通响应返回（返回 None 即不构造重定向请求），
-    由 `_execute_http_tool` 自行逐跳校验后再手动发起下一跳。
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - 覆写父类行为
-        return None
-
-    def _passthrough(self, req, fp, code, msg, headers):
-        """把 3xx 响应原样交回 opener.open()，而不是让默认处理器抛 HTTPError。"""
-        return fp
-
-    # urllib 的错误链会把 3xx 派发到 http_error_<code>；返回非 None 即作为 open() 的结果
-    http_error_301 = _passthrough
-    http_error_302 = _passthrough
-    http_error_303 = _passthrough
-    http_error_307 = _passthrough
-    http_error_308 = _passthrough
-
-
-# 🛡️ 手动重定向的最大跳数：够覆盖正常的 http->https / 规范化跳转，又不给重定向链留放大空间
+# 🛡️ 同站 HTTPS 跳转最多三次，限制重定向链放大。
 MAX_REDIRECTS = 3
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
 
@@ -915,42 +821,23 @@ def _exec_web_reader(args: dict) -> dict:
     """
     抓取并深度阅读第三方网页正文。
     
-    🛡️ 抗 SSRF 防御链：
-        - 必须是 http/https 开头且 Hostname 完整。
-        - Host 严禁匹配 localhost 环回域及 Google/AWS 元数据魔术地址。
-        - 将 Hostname 显式通过 DNS 寻址拉取 IP 地址并使用 `_reject_ip` 强制审计（排除内网私有 A/B/C 类 IP 段及 IPv6 环回地址）。
-        - 发起请求时使用 `dns_pinned` 锁死连接 IP，避免 DNS Rebinding 逃逸。
+    只连接校验过的公网 HTTPS 地址；TLS 仍校验原始主机名。
     """
     url = str(args.get("url") or "").strip()
     if not url:
         return {"content": json.dumps({"error": "URL cannot be empty"}), "result_preview": "Error: Empty URL"}
     try:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            return {"content": json.dumps({"error": "Invalid URL scheme (http/https required)"}), "result_preview": "Error: Invalid URL"}
-        host = parsed.hostname.strip().lower()
-        if host in {"localhost", "metadata", "metadata.google.internal"} or host.endswith(".localhost"):
-            return {"content": json.dumps({"error": "Blocked internal URL"}), "result_preview": "Error: Blocked URL"}
-        try:
-            ip = ipaddress.ip_address(host)
-            _reject_ip(ip)
-            validated_ip = str(ip)
-        except ValueError:
-            addr_info = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-            validated_ip = addr_info[0][4][0]
-            for info in addr_info:
-                _reject_ip(ipaddress.ip_address(info[4][0]))
-    except ValueError:
-        return {"content": json.dumps({"error": "Blocked: URL resolves to internal address"}), "result_preview": "Error: Blocked URL"}
-    try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        with dns_pinned(host, validated_ip):
-            resp = httpx.get(url, headers=headers, timeout=8)
-        if resp.status_code != 200:
-            return {"content": json.dumps({"error": f"Failed to fetch page. HTTP status: {resp.status_code}"}), "result_preview": f"HTTP Error: {resp.status_code}"}
+        request = urllib.request.Request(url, headers=headers)
+        with open_public_https(request, timeout=8) as response:
+            status = response.status
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if status != 200 or len(raw) > MAX_RESPONSE_BYTES:
+            return {"content": json.dumps({"error": f"Failed to fetch page. HTTP status: {status}"}), "result_preview": f"HTTP Error: {status}"}
+        html = raw.decode("utf-8", errors="replace")
         
-        content = clean_html(resp.text)
-        title_match = re.search(r'<title[^>]*>([\s\S]*?)<\/title>', resp.text, re.I)
+        content = clean_html(html)
+        title_match = re.search(r'<title[^>]*>([\s\S]*?)<\/title>', html, re.I)
         title = title_match.group(1).strip() if title_match else "Unknown Title"
         
         # 🧠 魔鬼数字：返回正文前 3000 字，防大报文超大上下文爆 LLM 窗口
@@ -1249,7 +1136,6 @@ def _execute_http_tool(tool: Tool, context: dict) -> dict:
     """
     # 1. 固化寻址与 SSRF 阻断
     validated_ip = _validate_safe_https_url(tool.url)
-    parsed_host = urllib.parse.urlparse(tool.url).hostname
     input_data = _dict_value(context.get("input"))
     body = context.get("body")
     
@@ -1272,10 +1158,8 @@ def _execute_http_tool(tool: Tool, context: dict) -> dict:
     started = time.monotonic()
 
     # 5. 执行请求并截断保护
-    # 🛡️ 禁用自动重定向，改为逐跳校验：每一跳都重新过 SSRF 关哨并重建 DNS pin
-    opener = urllib.request.build_opener(_NoRedirectHandler)
+    # 🛡️ 禁用自动重定向，逐跳校验并连接本次解析出的公网 IP。
     current_url = url
-    current_host = parsed_host
     current_ip = validated_ip
     current_method = tool.method
     current_data = data
@@ -1286,44 +1170,42 @@ def _execute_http_tool(tool: Tool, context: dict) -> dict:
             request = urllib.request.Request(
                 current_url, data=current_data, headers=current_headers, method=current_method
             )
-            # 利用 dns_pinned 阻断 DNS 重绑定
-            with dns_pinned(current_host, current_ip):
-                with opener.open(request, timeout=tool.timeout_seconds) as response:
-                    status = response.status
-                    if status in _REDIRECT_CODES:
-                        location = response.headers.get("Location")
-                        if not location:
-                            raise ValueError("HTTP tool request failed")
-                        # 相对 Location 需基于当前 URL 解析为绝对地址后再校验
-                        next_url = urllib.parse.urljoin(current_url, location)
-                        # 关键：新地址必须重新通过 HTTPS + 私网/元数据拦截校验
-                        current_ip = _validate_safe_https_url(next_url)
-                        current_host = urllib.parse.urlparse(next_url).hostname
-                        current_url = next_url
-                        # 303 及 301/302 的实践语义：后续跳转降级为无 body 的 GET
-                        if status == 303 or (status in {301, 302} and current_method == "POST"):
-                            current_method = "GET"
-                            current_data = None
-                            current_headers.pop("Content-Type", None)
-                        continue
+            with open_pinned_https(request, ip=current_ip, timeout=tool.timeout_seconds) as response:
+                status = response.status
+                if status in _REDIRECT_CODES:
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("HTTP tool request failed")
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    next_ip = _validate_safe_https_url(next_url)
+                    previous = urllib.parse.urlsplit(current_url)
+                    following = urllib.parse.urlsplit(next_url)
+                    if (previous.hostname, previous.port or 443) != (following.hostname, following.port or 443):
+                        raise ValueError("HTTP tool cross-origin redirect is blocked")
+                    current_ip = next_ip
+                    current_url = next_url
+                    if status == 303 or (status in {301, 302} and current_method == "POST"):
+                        current_method = "GET"
+                        current_data = None
+                        current_headers.pop("Content-Type", None)
+                    continue
 
-                    content_type = response.headers.get("Content-Type", "")
-                    raw = response.read(MAX_RESPONSE_BYTES + 1)
-                    # 🛡️ 边界防线：超出限制拒绝读取，杜绝内存爆满
-                    if len(raw) > MAX_RESPONSE_BYTES:
-                        raise ValueError("Tool response is too large")
-                    text = raw.decode("utf-8", errors="replace")
-                    result_json = _safe_json(text)
-                    return {
-                        "tool": tool.name,
-                        "tool_type": tool.type,
-                        "status_code": status,
-                        "content_type": content_type,
-                        "latency_ms": int((time.monotonic() - started) * 1000),
-                        "content": _preview(text, 4000),
-                        "result_preview": _preview(text),
-                        "result_json": result_json,
-                    }
+                content_type = response.headers.get("Content-Type", "")
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ValueError("Tool response is too large")
+                text = raw.decode("utf-8", errors="replace")
+                result_json = _safe_json(text)
+                return {
+                    "tool": tool.name,
+                    "tool_type": tool.type,
+                    "status_code": status,
+                    "content_type": content_type,
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                    "content": _preview(text, 4000),
+                    "result_preview": _preview(text),
+                    "result_json": result_json,
+                }
         raise ValueError("HTTP tool request exceeded the redirect limit")
     except urllib.error.HTTPError as exc:
         # 只回状态码，不回上游响应体——响应体可能含上游内部细节或凭证回显
@@ -1333,54 +1215,8 @@ def _execute_http_tool(tool: Tool, context: dict) -> dict:
 
 
 def _validate_safe_https_url(url: str) -> str:
-    """
-    🛡️ HTTP 工具外部请求安全审计关哨（SSRF 第 1 阶段防线）。
-    - 强制限制必须使用 HTTPS 协议，保障密钥传输在链路层的机密性，拒绝不安全的 HTTP。
-    - 验证 Hostname 不属于环回域名或谷歌云/AWS 的元数据接口。
-    - 提取 IP 或解析 IP，调用 `_reject_ip` 强制排除所有的私网网段与环回网段。
-    """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("HTTP tools require an HTTPS URL")
-    host = parsed.hostname.strip().lower()
-    if host in {"localhost", "metadata", "metadata.google.internal"} or host.endswith(".localhost"):
-        raise ValueError("HTTP tool target is blocked")
-    # 注意：只用 try 包住「是不是 IP 字面量」这一个判断。
-    # 原写法把 _reject_ip 也包在同一个 try 里，而 _reject_ip 的拦截信号同样是
-    # ValueError，会被 except 一起吞掉，导致私网字面量走到下面的 DNS 分支才被拦住
-    # ——碰巧仍能拦住，但拦截逻辑依赖了错误分支，属于易碎实现。
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is not None:
-        _reject_ip(ip)
-        return str(ip)
-    addr_info = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
-    for info in addr_info:
-        _reject_ip(ipaddress.ip_address(info[4][0]))
-    return str(addr_info[0][4][0])
-
-
-def _reject_ip(ip: ipaddress._BaseAddress) -> None:
-    """
-    🛡️ 高精度 SSRF 私有 IP 审计过滤哨兵。
-
-    涵盖：
-    - IPv4 环回地址、RFC 1918 私有网段、链路本地、多播、保留地址
-    - RFC 6598 运营商级 NAT (100.64.0.0/10)
-    - IPv6 环回 (::1)、唯一本地 (fc00::/7)、链路本地 (fe80::/10)
-    - 云原生元数据魔术地址 (169.254.169.254, metadata.google.internal)
-
-    双重检查策略：
-    1. Python ipaddress 标准方法（is_loopback/is_private/is_link_local/is_multicast/is_reserved）
-    2. 显式 IP 网段列表 _BLOCKED_NETWORKS（兜底未被标准方法覆盖的边界）
-    """
-    if (ip.is_loopback or ip.is_private or ip.is_link_local
-            or ip.is_multicast or ip.is_reserved
-            or str(ip) in CLOUD_METADATA_HOSTS
-            or any(ip in net for net in _BLOCKED_NETWORKS)):
-        raise ValueError(f"HTTP tool target is blocked: {ip}")
+    """Resolve and validate one HTTPS hop before connecting."""
+    return resolve_public_https(url)[1]
 
 
 def _headers(tool: Tool, input_data: dict) -> dict:

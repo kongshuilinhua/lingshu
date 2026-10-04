@@ -15,6 +15,11 @@ EXPECTED_PYTHON = (3, 11)
 LIGHTWEIGHT_PYTEST_TARGETS = [
     "tests/test_config.py",
     "tests/test_llm_generation_controls.py",
+    "tests/test_outbound_http.py",
+    "tests/test_tool_ssrf.py",
+    "tests/test_probe_models.py",
+    "tests/test_mcp_client.py",
+    "tests/test_mysql_trigger_migration.py",
     "tests/test_query_understanding.py",
     "tests/test_rag_eval.py",
     "tests/test_corpus_tools.py",

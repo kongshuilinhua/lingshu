@@ -24,7 +24,7 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 - **系统模型**：管理员预设的模型配置，供所有用户选择
 - **用户私有模型**：每个用户可配置自己的模型供应商（base_url + api_key + 模型名），支持 OpenAI 兼容接口
 - 模型能力标注：是否支持图片/文档/深度思考（reasoning），前端按能力展示对应 UI 开关
-- 支持 DashScope（通义千问）、DeepSeek 或任意 OpenAI 兼容接口
+- 支持 DashScope（通义千问）、DeepSeek 或公网 HTTPS 的 OpenAI 兼容接口
 - 用户可设置默认模型、测试模型连通性和多模态能力
 
 ### 智能体管理
@@ -170,7 +170,7 @@ langchain/
 │   ├── check_text_encoding.py      #   文本编码检查
 │   └── release_check.py            #   发布前检查
 ├── tests/                          # 测试
-│   ├── conftest.py                 #   测试配置（内存数据库/模拟向量库）
+│   ├── conftest.py                 #   测试配置（隔离 MySQL/模拟向量库）
 │   ├── test_api_knowledge.py       #   知识库 API 测试
 │   ├── test_knowledge_service.py   #   知识库服务测试
 │   ├── test_models.py              #   模型配置测试
@@ -372,7 +372,7 @@ FastAPI (api/main.py)
 # 发布检查必须使用 Python 3.11；本地推荐通过 uv 免激活运行。
 uv run python scripts/release_check.py --with-frontend
 
-# 需指向一次性测试库（切勿用生产库）；纯函数/单元测试无需 DB 会自动 skip
+# 全量测试需指向一次性测试库（切勿用生产库），或安装 Docker 供 testcontainers 启动 MySQL
 $env:TEST_DATABASE_URL = "mysql+pymysql://lingshu:lingshu@<host>:3306/lingshu_agent_test"
 $env:DATABASE_URL = $env:TEST_DATABASE_URL
 $env:LINGSHU_MOCK_LLM = "true"; $env:LINGSHU_VECTOR_BACKEND = "memory"
@@ -381,8 +381,8 @@ uv run python -m pytest tests/ --timeout=60
 
 - **CI（GitHub Actions）**：`CI`(发布检查) + `Lint & Test`(ruff + compile + pytest) 两条流水线。
 - `scripts/release_check.py` 在没有 `TEST_DATABASE_URL` 时也会运行不依赖数据库的轻量 pytest 子集，避免发布检查只做编译不跑测试。
-- CI 自带 MySQL service；`test_platform_api.py` 及 `test_final_rag.py` 的 3 个 client-fixture 集成用例在 CI 环境有连接/探针的环境限制，**仅本地运行**，CI 已 `--ignore`/`--deselect`，其余全部单元/功能/入库/LangChain 测试在 CI 执行。
-- `core.db.session.init_db` 在无 `SUPER` 权限的库上会跳过触发器创建（告警不阻断），便于受限环境与测试。
+- CI 自带 MySQL service，并运行完整测试集；本机未提供测试库或 Docker 时可先运行 `scripts/release_check.py` 的轻量测试集。
+- MySQL 约束迁移逐项检查列、索引和触发器；权限不足时启动失败，避免数据库停留在约束缺失状态。
 
 ---
 

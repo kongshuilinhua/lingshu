@@ -59,15 +59,8 @@ jobs:
           LINGSHU_MOCK_LLM: "true"
           LINGSHU_VECTOR_BACKEND: "memory"
           JWT_SECRET: test-secret-do-not-use-in-production
-        # 说明：test_platform_api.py 及 test_final_rag.py 的 3 个 client-fixture 集成用例
-        # 在 CI 环境存在陈年的连接/探针问题（本地可正常通过），不在 CI 跑、仅本地验证；
-        # 其余单元/功能/入库/LangChain 测试全部在 CI 执行。--timeout=60 防任何用例挂死。
-        run: |
-          python -m pytest tests/ -v --timeout=60 \
-            --ignore=tests/test_platform_api.py \
-            --deselect tests/test_final_rag.py::test_chat_rag_options_emit_hybrid_status \
-            --deselect tests/test_final_rag.py::test_knowledge_index_job_endpoint_has_redis_fallback \
-            --deselect tests/test_final_rag.py::test_bm25_search_batching
+        # 使用隔离的 MySQL service 跑完整套件，任何集成回归都会阻断合并。
+        run: python -m pytest tests/ -v --timeout=60
 
   frontend:
     runs-on: ubuntu-latest

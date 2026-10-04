@@ -7,7 +7,7 @@ Lingshu Agent 是 FastAPI(Python 3.11,后端)+ Vite/React 18(前端)的全栈 AI
 所有回复一律用中文。
 
 ## 测试与 lint 命令(改完代码必跑)
-- **后端测试**(mock LLM,无需真实 API key / DB):
+- **后端测试**(mock LLM,无需真实 API key；全量测试需 `TEST_DATABASE_URL` 或 Docker/testcontainers):
   `LINGSHU_MOCK_LLM=true LINGSHU_VECTOR_BACKEND=memory uv run python -m pytest tests/ --timeout=60`
 - **后端 lint**(CI 等价规则,仅 E+F):
   `uv run --with ruff ruff check api/ core/ tests/ eval/ --select E4,E7,E9,F --ignore=E501`
