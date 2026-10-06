@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from core.db.models import (
     Agent,
     AgentKnowledgeBase,
+    AgentMcpBinding,
+    AgentSkillBinding,
     AgentMemoryProfile,
     AgentSettings,
     AgentTool,
@@ -14,6 +16,7 @@ from core.db.models import (
     Feedback,
     KnowledgeBase,
     Message,
+    McpServer,
     ModelConfig,
     Run,
     RunStep,
@@ -28,6 +31,8 @@ from core.services.bootstrap import DEFAULT_WORKFLOW
 from core.services.models import model_payload
 from core.services.tools import tool_payload
 from core.services.user_models import user_model_snapshot
+from core.services.mcp_registry import agent_bindings_payload
+from core.services.skills import skill_bindings
 
 # 🎯 系统预设推荐词
 DEFAULT_SUGGESTED_QUESTIONS = [
@@ -48,7 +53,7 @@ DEFAULT_RAG = {
     "cache_enabled": True,
     "refuse_when_no_evidence": True,
 }
-DEFAULT_TOOL_POLICY = {"mode": "auto", "allowed_tool_names": []}
+DEFAULT_TOOL_POLICY = {"mode": "auto", "allowed_tool_names": [], "web_search_enabled": False}
 DEFAULT_QUERY_UNDERSTANDING = {
     "enabled": True,
     "model": None,
@@ -124,6 +129,8 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
         "system_prompt": current_agent_text("system_prompt", agent.system_prompt),
         "knowledge_base_ids": kb_ids,
         "tools": [tool_payload(tool) for tool in tools],
+        "mcp_bindings": agent_bindings_payload(db, agent.id),
+        "skill_bindings": skill_bindings(db, agent.id),
         "workflow": workflow.nodes if workflow else DEFAULT_WORKFLOW,
         "model_config": model_payload(model_config) if model_config else None,
         "user_model_config": user_model_snapshot(user_model_config),
@@ -334,6 +341,8 @@ def delete_agent(db: Session, agent: Agent) -> None:
     db.query(AgentKnowledgeBase).filter(AgentKnowledgeBase.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentMemoryProfile).filter(AgentMemoryProfile.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentTool).filter(AgentTool.agent_id == agent.id).delete(synchronize_session=False)
+    db.query(AgentSkillBinding).filter(AgentSkillBinding.agent_id == agent.id).delete(synchronize_session=False)
+    db.query(AgentMcpBinding).filter(AgentMcpBinding.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentSettings).filter(AgentSettings.agent_id == agent.id).delete(synchronize_session=False)
     db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).delete(synchronize_session=False)
     db.query(AgentVersion).filter(AgentVersion.agent_id == agent.id).delete(synchronize_session=False)
@@ -396,7 +405,24 @@ def copy_agent_from_market(db: Session, *, source: Agent, user_id: int, workspac
     workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == copied.id).first()
     if workflow:
         workflow.nodes = snapshot.get("workflow") or DEFAULT_WORKFLOW
-        db.commit()
+    for item in snapshot.get("mcp_bindings") or []:
+        server = db.get(McpServer, item.get("server_id"))
+        if not server or not server.enabled or not server.is_listed or server.workspace_id not in {None, workspace_id}:
+            continue
+        selected = item.get("selected_tools") or []
+        known = {tool.get("name") for tool in (server.catalog or {}).get("tools") or []}
+        if selected and set(selected).issubset(known):
+            db.add(AgentMcpBinding(
+                agent_id=copied.id, mcp_server_id=server.id,
+                enabled=bool(item.get("enabled", True)), config={"selected_tools": selected},
+            ))
+    from core.db.models import Skill, SkillVersion
+    for item in snapshot.get('skill_bindings') or []:
+        skill = db.get(Skill, item.get('skill_id'))
+        skill_version = db.get(SkillVersion, item.get('version_id'))
+        if skill and skill.enabled and skill.is_listed and skill.workspace_id == workspace_id and skill_version and skill_version.skill_id == skill.id:
+            db.add(AgentSkillBinding(agent_id=copied.id, skill_id=skill.id, version_id=skill_version.id, enabled=item.get('enabled', True)))
+    db.commit()
     db.refresh(copied)
     return copied
 
@@ -518,7 +544,7 @@ def normalize_tool_policy(value) -> dict:
     data = value.model_dump() if hasattr(value, "model_dump") else dict(value or {})
     mode = data.get("mode") if data.get("mode") == "auto" else "auto"
     names = [str(item).strip() for item in data.get("allowed_tool_names", []) if str(item).strip()]
-    return {"mode": mode, "allowed_tool_names": names[:50]}
+    return {"mode": mode, "allowed_tool_names": names[:50], "web_search_enabled": data.get('web_search_enabled') is True}
 
 
 def normalize_query_understanding(value) -> dict:

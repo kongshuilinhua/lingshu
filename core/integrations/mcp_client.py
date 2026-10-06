@@ -189,27 +189,54 @@ class McpClient:
 
 # 🧠 client 池:按 server_id 复用连接,避免每次 tool 调用都 spawn 子进程。
 # 进程级 dict,web worker 间不共享(每 worker 缓存自己的);配置变更需重启或显式失效。
-_CLIENTS: dict[int, "McpClient"] = {}
+_CLIENTS: dict[int, object] = {}
+_CLIENTS_LOCK = threading.Lock()
 
 
-def get_mcp_client(server) -> "McpClient":
-    """按 server.id 复用或惰性创建 McpClient。server 鸭子类型:需有 id/command/env。"""
+def get_mcp_client(server):
+    """按 server id + 配置版本复用官方 SDK 连接。"""
     sid = getattr(server, "id", None)
     if sid is None:
         raise McpError("MCP server has no id")
-    client = _CLIENTS.get(sid)
-    if client is None:
-        command = getattr(server, "command", None) or []
-        if not isinstance(command, list) or not command:
-            raise McpError("MCP server command must be a non-empty list")
-        env = getattr(server, "env", None) or None
-        client = McpClient(command=command, env=env)
+    from core.integrations.mcp_sdk_client import SdkMcpClient
+
+    version = getattr(server, "config_version", None) or 1
+    with _CLIENTS_LOCK:
+        client = _CLIENTS.get(sid)
+        if client is not None and client.config.get("config_version") == version:
+            return client
+        if client is not None:
+            client.close()
+        config = {
+            "id": sid,
+            "config_version": version,
+            "transport": getattr(server, "transport", None) or "stdio",
+            "protocol_mode": getattr(server, "protocol_mode", None) or "legacy",
+            "url": getattr(server, "url", None) or "",
+            "command": getattr(server, "command", None) or [],
+            "env": getattr(server, "env", None) or {},
+            "encrypted_env": getattr(server, "encrypted_env", None) or "",
+            "auth_type": getattr(server, "auth_type", None) or "none",
+            "oauth_scope": getattr(server, "oauth_scope", None) or "",
+            "encrypted_auth": getattr(server, "encrypted_auth", None) or "",
+        }
+        client = SdkMcpClient(config)
         _CLIENTS[sid] = client
-    return client
+        return client
 
 
 def invalidate_mcp_client(server_id: int) -> None:
     """配置变更或删除 server 时关闭并移除缓存连接。"""
-    client = _CLIENTS.pop(server_id, None)
+    with _CLIENTS_LOCK:
+        client = _CLIENTS.pop(server_id, None)
     if client is not None:
+        client.close()
+
+
+def close_all_mcp_clients() -> None:
+    """Release stdio children and remote sessions during API shutdown."""
+    with _CLIENTS_LOCK:
+        clients = list(_CLIENTS.values())
+        _CLIENTS.clear()
+    for client in clients:
         client.close()

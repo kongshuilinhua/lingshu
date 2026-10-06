@@ -56,6 +56,12 @@ def get_chat_model(*, model=None, temperature=0.0, runtime_config=None, **kwargs
         resolved_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
         return MockChatOpenAI(model=resolved_model)
 
+    if (runtime_config or {}).get("provider") == "anthropic":
+        from core.integrations.anthropic_langchain import AnthropicChatModel
+
+        return AnthropicChatModel(model_name=model or runtime_config.get("chat_model") or settings.openai_model,
+                                  runtime_config=runtime_config)
+
     import httpx
     from langchain_openai import ChatOpenAI
     from core.integrations.llm import OpenAICompatibleProvider

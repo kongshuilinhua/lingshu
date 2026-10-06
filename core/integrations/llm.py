@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from core.config import get_settings
+from core.integrations import anthropic_protocol
 from core.integrations.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
 from core.security.outbound_http import open_public_https
 
@@ -30,6 +31,7 @@ class ChatResponse:
     """
     content: str | None = None
     tool_calls: list[dict] | None = None
+    provider_content: list[dict] | None = None
 
 
 # 🛡️ 兼容垫片：部分模型/网关（典型如 Qwen 系）不会把函数调用放进 OpenAI 标准的
@@ -147,10 +149,10 @@ def _extract_text_tool_calls(content: str) -> list[dict]:
 
 class OpenAICompatibleProvider:
     """
-    标准 OpenAI 兼容模型提供商。
+    统一聊天网关：OpenAI-compatible 和 Anthropic Messages。
 
     🎯 意图与工程大局观：
-        系统底层唯一且核心的通用 LLM 交互客户端。
+        通过 runtime_config.provider 选择消息协议，保留旧类名兼容现有导入。
         不仅支持同步问答（chat）、流式输出（chat_stream）、文本嵌入（embed），还前瞻性地内置了标准 RAG 重排器（rerank）接口。
         
     🛡️ 防御性设计：
@@ -174,6 +176,7 @@ class OpenAICompatibleProvider:
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
         thinking: bool = False,
+        tool_choice=None,
     ) -> ChatResponse:
         """
         同步文本生成方法（支持 Tool Call 参数请求）。
@@ -214,6 +217,22 @@ class OpenAICompatibleProvider:
         if not breaker.allow_request():
             raise RuntimeError(f"Model '{model_name}' is temporarily unavailable (circuit breaker open)")
 
+        if (runtime_config or {}).get("provider") == "anthropic":
+            url = anthropic_protocol.endpoint(self._api_base(settings, runtime_config), "messages")
+            payload = anthropic_protocol.request_body(
+                messages, model=model_name, max_tokens=int((runtime_config or {}).get("max_tokens") or settings.llm_max_tokens or 8192),
+                tools=tools, choice=tool_choice, thinking=thinking,
+            )
+            try:
+                data = self._post_json(url, payload, api_key, headers=anthropic_protocol.headers(api_key),
+                                       public_only=bool((runtime_config or {}).get("untrusted_base_url")))
+                result = ChatResponse(**anthropic_protocol.parse_response(data))
+            except Exception:
+                breaker.record_failure()
+                raise
+            breaker.record_success()
+            return result
+
         url = self._api_base(settings, runtime_config, purpose="chat").rstrip("/") + "/chat/completions"
         payload: dict = {
             "model": model_name,
@@ -224,7 +243,7 @@ class OpenAICompatibleProvider:
         self._apply_generation_limits(payload, settings, runtime_config, thinking)
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = self._openai_tool_choice(tool_choice)
         try:
             if (runtime_config or {}).get("untrusted_base_url"):
                 data = self._post_json(url, payload, api_key, public_only=True)
@@ -245,6 +264,7 @@ class OpenAICompatibleProvider:
         runtime_config: dict | None = None,
         tools: list[dict] | None = None,
         thinking: bool = False,
+        tool_choice=None,
     ) -> Iterable[dict]:
         """
         异步流式文本生成生成器（Server-Sent Events）。
@@ -293,6 +313,21 @@ class OpenAICompatibleProvider:
         if not breaker.allow_request():
             raise RuntimeError(f"Model '{model_name}' is temporarily unavailable (circuit breaker open)")
 
+        if (runtime_config or {}).get("provider") == "anthropic":
+            url = anthropic_protocol.endpoint(self._api_base(settings, runtime_config), "messages")
+            payload = anthropic_protocol.request_body(
+                messages, model=model_name, max_tokens=int((runtime_config or {}).get("max_tokens") or settings.llm_max_tokens or 8192),
+                stream=True, tools=tools, choice=tool_choice, thinking=thinking,
+            )
+            try:
+                yield from self._post_json_stream(url, payload, api_key, headers=anthropic_protocol.headers(api_key),
+                    protocol="anthropic", public_only=bool((runtime_config or {}).get("untrusted_base_url")))
+            except Exception:
+                breaker.record_failure()
+                raise
+            breaker.record_success()
+            return
+
         url = self._api_base(settings, runtime_config, purpose="chat").rstrip("/") + "/chat/completions"
         payload: dict = {
             "model": model_name,
@@ -303,7 +338,7 @@ class OpenAICompatibleProvider:
         self._apply_generation_limits(payload, settings, runtime_config, thinking)
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = self._openai_tool_choice(tool_choice)
         # 🎯 编排流转：有工具绑定时，实际上由工作流 runtime 模块使用非流式 chat() 做决策，流式仅在最后的最终回答生成阶段触发
         try:
             if (runtime_config or {}).get("untrusted_base_url"):
@@ -473,6 +508,8 @@ class OpenAICompatibleProvider:
         """
         if runtime_config and purpose == "chat" and runtime_config.get("api_key"):
             return str(runtime_config["api_key"]).strip() or None
+        if purpose == "chat" and (runtime_config or {}).get("provider") == "anthropic":
+            return (getattr(settings, "anthropic_api_key", None) or "").strip() or None
         if purpose == "embedding" and settings.embedding_api_key:
             return settings.embedding_api_key.strip() or None
         if purpose == "rerank" and settings.rerank_api_key:
@@ -494,6 +531,8 @@ class OpenAICompatibleProvider:
         """
         if runtime_config and purpose == "chat" and runtime_config.get("base_url"):
             return str(runtime_config["base_url"]).strip()
+        if purpose == "chat" and (runtime_config or {}).get("provider") == "anthropic":
+            return getattr(settings, "anthropic_api_base", "https://api.anthropic.com/v1")
         if purpose == "embedding" and settings.embedding_api_base:
             return settings.embedding_api_base
         if purpose == "rerank" and settings.rerank_api_base:
@@ -526,7 +565,7 @@ class OpenAICompatibleProvider:
             self._breakers[model_name] = CircuitBreaker(failure_threshold=3, timewindow=60)
         return self._breakers[model_name]
 
-    def _post_json(self, url: str, payload: dict, api_key: str, *, timeout_seconds: int = 60, public_only: bool = False) -> dict:
+    def _post_json(self, url: str, payload: dict, api_key: str, *, timeout_seconds: int = 60, public_only: bool = False, headers: dict | None = None) -> dict:
         """
         同步 POST JSON 工具函数。
 
@@ -540,7 +579,7 @@ class OpenAICompatibleProvider:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
+            headers=headers or {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
             },
@@ -551,18 +590,22 @@ class OpenAICompatibleProvider:
             with opened as response:
                 if public_only and response.status != 200:
                     raise RuntimeError("Model endpoint redirected or rejected the request")
-                return json.loads(response.read().decode("utf-8"))
+                raw = response.read(8 * 1024 * 1024 + 1)
+                if len(raw) > 8 * 1024 * 1024:
+                    raise RuntimeError("Model response is too large")
+                return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            detail = exc.read(4096).decode("utf-8", errors="replace").replace(api_key, "[secret]")[:800]
             raise RuntimeError(
-                f"Model call failed: HTTP {exc.code}. Check OPENAI_API_BASE, API key and model name. {detail}"
+                f"Model call failed: HTTP {exc.code}. Check endpoint, API key and model name. {detail}"
             ) from exc
         except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
             raise RuntimeError(
-                f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
+                f"Model call failed: cannot connect to model gateway {url}. Check endpoint, proxy, certs and API key. Raw error: {exc}"
             ) from exc
 
-    def _post_json_stream(self, url: str, payload: dict, api_key: str, *, public_only: bool = False) -> Iterable[dict]:
+    def _post_json_stream(self, url: str, payload: dict, api_key: str, *, public_only: bool = False,
+                          headers: dict | None = None, protocol: str = "openai-compatible") -> Iterable[dict]:
         """
         纯 Python 原生 SSE（Server-Sent Events）解析流式输出生成器（产出 chat_stream 帧协议 dict）。
 
@@ -574,7 +617,7 @@ class OpenAICompatibleProvider:
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
+            headers={**headers, "Accept": "text/event-stream"} if headers else {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "text/event-stream",
@@ -586,6 +629,9 @@ class OpenAICompatibleProvider:
             with opened as response:
                 if public_only and response.status != 200:
                     raise RuntimeError("Model endpoint redirected or rejected the request")
+                if protocol == "anthropic":
+                    yield from anthropic_protocol.stream_frames(response)
+                    return
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line or not line.startswith("data:"):
@@ -599,14 +645,24 @@ class OpenAICompatibleProvider:
                         continue
                     yield from self._stream_delta(data)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            detail = exc.read(4096).decode("utf-8", errors="replace").replace(api_key, "[secret]")[:800]
             raise RuntimeError(
-                f"Model call failed: HTTP {exc.code}. Check OPENAI_API_BASE, API key and model name. {detail}"
+                f"Model call failed: HTTP {exc.code}. Check endpoint, API key and model name. {detail}"
             ) from exc
         except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
             raise RuntimeError(
-                f"Model call failed: cannot connect to model gateway {url}. Check OPENAI_API_BASE, proxy, certs and API key. Raw error: {exc}"
+                f"Model call failed: cannot connect to model gateway {url}. Check endpoint, proxy, certs and API key. Raw error: {exc}"
             ) from exc
+
+    @staticmethod
+    def _openai_tool_choice(choice):
+        if choice is None:
+            return "auto"
+        if choice == "any":
+            return "required"
+        if isinstance(choice, str) and choice not in {"auto", "required", "none"}:
+            return {"type": "function", "function": {"name": choice}}
+        return choice
 
     def _apply_generation_limits(self, payload: dict, settings, runtime_config: dict | None, thinking: bool) -> None:
         """Apply provider-safe generation controls to chat completion payloads."""

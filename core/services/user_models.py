@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from core.config import get_settings
 from core.db.models import Agent, UserModelConfig
 from core.integrations.llm import OpenAICompatibleProvider
+from core.integrations import anthropic_protocol
 from core.security.api_keys import decrypt_api_key, encrypt_api_key
 from core.security.outbound_http import open_public_https
 
@@ -106,7 +107,7 @@ def update_user_model_config(db: Session, *, config: UserModelConfig, payload: d
     🛡️ 安全控制与自适应能力检验：
         当涉及网关或模型变更时，重新触发针对当前端点多模态的自动嗅探，保持能力标签实时性。
     """
-    should_probe_image = any(key in payload for key in ("api_key", "base_url", "chat_model", "supports_image"))
+    should_probe_image = any(key in payload for key in ("api_key", "base_url", "provider", "chat_model", "supports_image"))
     if "api_key" in payload:
         api_key = payload["api_key"]
         if api_key is None or not str(api_key).strip():
@@ -294,19 +295,32 @@ def probe_models_payload(payload: dict) -> dict:
     if not base_url:
         raise ValueError("base_url is required")
     _validate_public_base_url(base_url)
+    provider = _protocol(payload.get("provider"))
     try:
-        request = urllib.request.Request(
-            f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
-        )
-        with open_public_https(request, timeout=10) as response:
-            if response.status != 200:
-                raise ValueError("Model endpoint redirected or rejected the request")
-            raw = response.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise ValueError("Model list response is too large")
-        data = json.loads(raw)
-        models = sorted(m.get("id") for m in (data.get("data") or []) if m.get("id"))
-        return {"ok": True, "models": models, "count": len(models)}
+        url = anthropic_protocol.endpoint(base_url, "models") if provider == "anthropic" else f"{base_url}/models"
+        auth_headers = anthropic_protocol.headers(api_key) if provider == "anthropic" else {"Authorization": f"Bearer {api_key}"}
+        models = set()
+        cursors = set()
+        for _ in range(20):
+            request = urllib.request.Request(url, headers=auth_headers)
+            with open_public_https(request, timeout=10) as response:
+                if response.status != 200:
+                    raise ValueError("Model endpoint redirected or rejected the request")
+                raw = response.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("Model list response is too large")
+            data = json.loads(raw)
+            models.update(item["id"] for item in (data.get("data") or [])
+                          if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"])
+            if provider != "anthropic" or not data.get("has_more") or len(models) >= 500:
+                ordered = sorted(models)[:500]
+                return {"ok": True, "models": ordered, "count": len(ordered)}
+            cursor = data.get("last_id")
+            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                raise ValueError("Invalid model list pagination")
+            cursors.add(cursor)
+            url = anthropic_protocol.endpoint(base_url, "models") + "?" + urllib.parse.urlencode({"after_id": cursor})
+        raise ValueError("Model list pagination limit exceeded")
     except Exception as exc:
         return {"ok": False, "models": [], "count": 0, "message": _sanitize_probe_error(exc)}
 
@@ -380,8 +394,8 @@ def _config_fields(payload: dict, *, partial: bool = False) -> dict:
         raise ValueError("Invalid model config")
     if any(key in data and not data[key] for key in required):
         raise ValueError("Invalid model config")
-    if "provider" in data and data["provider"] != "openai-compatible":
-        raise ValueError("Invalid model config")
+    if "provider" in data:
+        data["provider"] = _protocol(data["provider"])
     return data
 
 
@@ -396,6 +410,15 @@ def _validate_public_base_url(value: str) -> None:
         return
     if not ip.is_global:
         raise ValueError("Public HTTPS base_url required")
+
+
+def _protocol(value) -> str:
+    value = str(value or "openai-compatible").strip()
+    if value == "openai":
+        value = "openai-compatible"
+    if value not in {"openai-compatible", "anthropic"}:
+        raise ValueError("Unsupported model protocol")
+    return value
 
 
 def _config_data_for_probe(config: UserModelConfig, fields: dict) -> dict:

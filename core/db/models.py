@@ -489,6 +489,57 @@ class AgentAgentBinding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class Skill(Base):
+    __tablename__ = "skills"
+    __table_args__ = (UniqueConstraint("workspace_id", "created_by", "slug", name="uq_skill_owner_slug"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    slug: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(80), default="通用")
+    current_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_listed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class SkillVersion(Base):
+    __tablename__ = "skill_versions"
+    __table_args__ = (UniqueConstraint("skill_id", "version", name="uq_skill_version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    instructions: Mapped[str] = mapped_column(LongText)
+    digest: Mapped[str] = mapped_column(String(64))
+    scripts_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class SkillFile(Base):
+    __tablename__ = "skill_files"
+    __table_args__ = (UniqueConstraint("version_id", "path", name="uq_skill_file_path"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version_id: Mapped[int] = mapped_column(ForeignKey("skill_versions.id", ondelete="CASCADE"), index=True)
+    path: Mapped[str] = mapped_column(String(500))
+    content_base64: Mapped[str] = mapped_column(LongText)
+    size: Mapped[int] = mapped_column(Integer)
+    digest: Mapped[str] = mapped_column(String(64))
+
+
+class AgentSkillBinding(Base):
+    __tablename__ = "agent_skill_bindings"
+    __table_args__ = (UniqueConstraint("agent_id", "skill_id", name="uq_agent_skill_binding"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    version_id: Mapped[int] = mapped_column(ForeignKey("skill_versions.id"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class McpServer(Base):
     """
     MCP(Model Context Protocol)server 配置。
@@ -500,11 +551,23 @@ class McpServer(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(80), default="通用")
     transport: Mapped[str] = mapped_column(String(20), default="stdio")
+    protocol_mode: Mapped[str] = mapped_column(String(20), default="legacy")
+    url: Mapped[str] = mapped_column(Text, default="")
     # command: 启动 server 的命令列表,如 ["python", "-m", "mymcp"] 或 ["npx", "server.js"]
     command: Mapped[list] = mapped_column(JSON, default=list)
     env: Mapped[dict] = mapped_column(JSON, default=dict)
+    encrypted_env: Mapped[str] = mapped_column(Text, default="")
+    auth_type: Mapped[str] = mapped_column(String(20), default="none")
+    oauth_scope: Mapped[str] = mapped_column(String(500), default="")
+    encrypted_auth: Mapped[str] = mapped_column(Text, default="")
+    is_listed: Mapped[bool] = mapped_column(Boolean, default=True)
+    catalog: Mapped[dict] = mapped_column(JSON, default=dict)
+    config_version: Mapped[int] = mapped_column(Integer, default=1)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
@@ -522,6 +585,20 @@ class AgentMcpBinding(Base):
     mcp_server_id: Mapped[int] = mapped_column(ForeignKey("mcp_servers.id", ondelete="CASCADE"), index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class McpOAuthAttempt(Base):
+    """Short-lived handoff between SDK OAuth authorization and HTTP callback."""
+
+    __tablename__ = "mcp_oauth_attempts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    server_id: Mapped[int] = mapped_column(ForeignKey("mcp_servers.id", ondelete="CASCADE"), index=True)
+    state: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    authorization_url: Mapped[str] = mapped_column(Text)
+    encrypted_code: Mapped[str] = mapped_column(Text, default="")
+    issuer: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

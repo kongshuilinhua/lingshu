@@ -4,7 +4,7 @@
  */
 import React, { useRef, useState, useEffect } from 'react';
 import {
-  SquarePen, ImagePlus, FileText, X, Search,
+  SquarePen, ImagePlus, FileText, X,
   AlertTriangle, Brain, Database, Send,
 } from 'lucide-react';
 import { uploadTypeFromContentType } from '../../utils.js';
@@ -58,16 +58,12 @@ export function ChatComposer({
   onNewChat,
   onSubmit,
   onToggleRag,
-  onToggleSearch,
   onToggleThinking,
   placeholder,
   removeAttachment,
   ragAvailable,
   ragEnabled,
   ragStatus,
-  searchAvailable,
-  searchEnabled,
-  searchStatus,
   submitDisabled,
   thinkingCapability,
   thinkingEnabled,
@@ -159,17 +155,6 @@ export function ChatComposer({
           >
             <Brain size={14} />
             <span>{CHAT_COPY.thinking}</span>
-          </button>
-          <button
-            type="button"
-            className={searchEnabled ? 'search-toggle on' : 'search-toggle'}
-            disabled={!searchAvailable}
-            title={searchStatus}
-            aria-pressed={searchEnabled}
-            onClick={onToggleSearch}
-          >
-            <Search size={14} />
-            <span>{CHAT_COPY.search}</span>
           </button>
           <button
             type="button"

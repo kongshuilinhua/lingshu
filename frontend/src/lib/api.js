@@ -17,12 +17,12 @@ class ApiError extends Error {
 }
 
 function isAuthError(error) {
-  return error?.status === 401 || error?.status === 403;
+  return error?.status === 401;
 }
 
-function notifyAuthExpired() {
+function notifyAuthExpired(token) {
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('lingshu-auth-expired'));
+    window.dispatchEvent(new CustomEvent('lingshu-auth-expired', { detail: { token } }));
   }
 }
 
@@ -38,7 +38,10 @@ function initialAuthToken() {
 function errorMessage(value) {
   if (!value) return '操作失败，请稍后重试。';
   if (value instanceof Error) return value.message;
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string') {
+    if (value === 'Invalid email or password') return '邮箱或密码不正确，请重新输入。';
+    return value;
+  }
   if (Array.isArray(value)) {
     return value
       .map((item) => {
@@ -66,7 +69,7 @@ async function api(path, { method = 'GET', token, body } = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new ApiError(errorMessage(data.detail || data.message || `HTTP ${response.status}`), response.status, data);
-    if (isAuthError(error)) notifyAuthExpired();
+    if (token && isAuthError(error)) notifyAuthExpired(token);
     throw error;
   }
   return data;

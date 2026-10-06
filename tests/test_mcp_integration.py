@@ -9,6 +9,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from core.db.models import AgentMcpBinding
 from core.runtime.workflow import WorkflowRunner
 from core.services.tools import execute_tool, tool_schema_for_llm
@@ -66,16 +68,17 @@ def test_execute_mcp_tool_calls_server_and_returns_text(monkeypatch):
 
 def test_runtime_tools_wraps_mcp_server_tools(monkeypatch):
     server = SimpleNamespace(id=1, command=["x"], env={}, enabled=True, name="echo")
-    binding = SimpleNamespace(agent_id=10, mcp_server_id=1, enabled=True)
+    binding = SimpleNamespace(agent_id=10, mcp_server_id=1, enabled=True, config={'selected_tools': ['echo']})
     fake_client = SimpleNamespace(
         list_tools=lambda: [
             {"name": "echo", "description": "回显", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}}},
         ]
     )
 
-    import core.runtime.workflow as wf_mod
 
-    monkeypatch.setattr(wf_mod, "get_mcp_client", lambda srv: fake_client)
+    server.catalog = {'tools': fake_client.list_tools()}
+    import core.integrations.mcp_client as client_module
+    monkeypatch.setattr(client_module, 'get_mcp_client', lambda srv: pytest.fail('Runtime catalog must not connect MCP'))
 
     def query(model, *a, **k):
         class _Q:
@@ -110,9 +113,9 @@ def test_runtime_tools_skips_unreachable_mcp_server(monkeypatch):
     binding = SimpleNamespace(agent_id=10, mcp_server_id=1, enabled=True)
     server = SimpleNamespace(id=1, command=["x"], env={}, enabled=True)
 
-    import core.runtime.workflow as wf_mod
 
-    monkeypatch.setattr(wf_mod, "get_mcp_client", lambda srv: (_ for _ in ()).throw(RuntimeError("unreachable")))
+    import core.integrations.mcp_client as client_module
+    monkeypatch.setattr(client_module, 'get_mcp_client', lambda srv: pytest.fail('Empty catalog must not connect MCP'))
 
     def query(model, *a, **k):
         class _Q:
@@ -140,9 +143,9 @@ def test_runtime_tools_skips_disabled_mcp_server(monkeypatch):
     binding = SimpleNamespace(agent_id=10, mcp_server_id=1, enabled=True)
     server = SimpleNamespace(id=1, command=["x"], env={}, enabled=False)  # server 被禁用
 
-    import core.runtime.workflow as wf_mod
 
-    monkeypatch.setattr(wf_mod, "get_mcp_client", lambda srv: (_ for _ in ()).throw(AssertionError("disabled server 不该连")))
+    import core.integrations.mcp_client as client_module
+    monkeypatch.setattr(client_module, 'get_mcp_client', lambda srv: pytest.fail('Disabled server must not connect MCP'))
 
     def query(model, *a, **k):
         class _Q:
@@ -164,3 +167,54 @@ def test_runtime_tools_skips_disabled_mcp_server(monkeypatch):
     runner = WorkflowRunner(db=stub_db)
     tools = runner._runtime_tools(SimpleNamespace(id=10, tool_ids=[]), {"type": "Tool"})
     assert not any(getattr(t, "type", None) == "mcp" for t in tools)
+
+
+def test_runtime_tools_respects_multiple_server_tool_selections(monkeypatch):
+    from core.runtime.workflow import WorkflowRunner
+
+    servers = {
+        1: SimpleNamespace(id=1, workspace_id=7, enabled=True),
+        2: SimpleNamespace(id=2, workspace_id=7, enabled=True),
+    }
+    for server in servers.values():
+        server.catalog = {'tools': [{'name': 'search/files', 'inputSchema': {'type': 'object'}},
+                                    {'name': 'other', 'inputSchema': {'type': 'object'}}]}
+
+    class EmptyQuery:
+        def filter(self, *args):
+            return self
+
+        def all(self):
+            return []
+
+    db = SimpleNamespace(query=lambda *args: EmptyQuery(), get=lambda model, sid: servers[sid])
+    agent = SimpleNamespace(id=10, workspace_id=7, tool_ids=[], mcp_bindings=[
+        {"server_id": 1, "selected_tools": ["search/files"], "enabled": True},
+        {"server_id": 2, "selected_tools": ["other"], "enabled": True},
+    ])
+    tools = WorkflowRunner(db)._runtime_tools(agent, {"type": "Tool"})
+    mcp_tools = [tool for tool in tools if tool.type == "mcp"]
+    assert len(mcp_tools) == 2
+    assert {tool.schema["tool_name"] for tool in mcp_tools} == {"search/files", "other"}
+    assert all(len(tool.name) <= 64 and "/" not in tool.name for tool in mcp_tools)
+
+
+def test_mcp_tool_preserves_structured_result_and_checks_workspace(monkeypatch):
+    import core.integrations.mcp_client as mcp_module
+    from core.services.tools import execute_tool
+
+    server = SimpleNamespace(id=3, workspace_id=7, enabled=True)
+    db = SimpleNamespace(get=lambda model, sid: server)
+    client = SimpleNamespace(call_tool_result=lambda name, args: {
+        "isError": False,
+        "content": [{"type": "text", "text": "found"}],
+        "structuredContent": {"count": 2},
+    })
+    monkeypatch.setattr(mcp_module, "get_mcp_client", lambda srv: client)
+    tool = SimpleNamespace(name="mcp_3_find", type="mcp", enabled=True,
+                           schema={"mcp_server_id": 3, "tool_name": "find"})
+    result = execute_tool(tool, {"_db": db, "_workspace_id": 7, "input": {"q": "a"}})
+    assert result["result_json"] == {"count": 2}
+    assert '"count": 2' in result["content"]
+    with pytest.raises(ValueError, match="workspace"):
+        execute_tool(tool, {"_db": db, "_workspace_id": 8, "input": {}})

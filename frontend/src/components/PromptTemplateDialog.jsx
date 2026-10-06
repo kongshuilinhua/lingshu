@@ -13,7 +13,7 @@ export function PromptTemplateDialog({ editingTemplate, form, onCancel, onChange
         </button>
         <header className="model-dialog-heading">
           <h3>{title}</h3>
-          <p>模板会保存到当前用户的私有资源库，资源库和 Builder 模板区共用同一份数据。</p>
+          <p>模板会保存到“我的资源”，并可在 Builder 中选择使用。</p>
         </header>
         <form className="prompt-template-form dialog-form" onSubmit={onSubmit}>
           <div className="resource-form-grid two">

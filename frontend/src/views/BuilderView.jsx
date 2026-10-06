@@ -24,6 +24,9 @@ import { PromptTemplateDialog } from '../components/PromptTemplateDialog.jsx';
 import { KnowledgeBaseDialog } from '../components/KnowledgeBaseDialog.jsx';
 import { KnowledgeDocumentList, KnowledgeUploadBox } from '../components/KnowledgeDocumentList.jsx';
 import { ChatComposer } from '../components/chat/ChatComposer.jsx';
+import { McpBindingPanel } from '../components/McpBindingPanel.jsx';
+import { SkillBindingPanel } from '../components/SkillBindingPanel.jsx';
+import { AgentSearchSetting } from '../components/AgentSearchSetting.jsx';
 import {
   findModelForForm,
   modelCapabilityWarning,
@@ -168,6 +171,8 @@ export function BuilderView(props) {
     sessions,
     setActiveAgentId,
     setActiveNav,
+    setMarketTab,
+    setMarketScope,
     setChatMode,
     setChatAttachments,
     setDocForm,
@@ -185,6 +190,7 @@ export function BuilderView(props) {
     submitFeedback,
     deleteMemoryProfile,
     tools,
+    token,
     toolDebugEvents,
     uploadChatAttachment,
     uploadingAttachment,
@@ -359,7 +365,7 @@ export function BuilderView(props) {
               <strong>提示词模板</strong>
               <div>
                 <button type="button" onClick={openPromptTemplateDialog}>保存当前 Prompt 为模板</button>
-                <button type="button" onClick={() => { setView('home'); setActiveNav('resources'); }}>进入资源库</button>
+                <button type="button" onClick={() => { setMarketScope('mine'); setMarketTab('prompts'); setView('home'); setActiveNav('market'); }}>我的提示词</button>
               </div>
             </div>
             <div className="template-grid">
@@ -451,6 +457,17 @@ export function BuilderView(props) {
               )}
             </div>
           </div>
+
+          <McpBindingPanel
+            agentId={activeAgentId}
+            token={token}
+            canEdit={canEditActive}
+            onOpenMarket={() => { setMarketScope('discover'); setMarketTab('mcp'); setView('home'); setActiveNav('market'); }}
+          />
+          <AgentSearchSetting policy={agentForm.tool_policy} disabled={!canEditActive}
+            onChange={(policy) => setAgentForm({ ...agentForm, tool_policy: policy })} />
+          <SkillBindingPanel agentId={activeAgentId} token={token} canEdit={canEditActive}
+            onOpenMarket={() => { setMarketScope('mine'); setMarketTab('skills'); setView('home'); setActiveNav('market'); }} />
 
           {/* ==================== 知识/文本 ==================== */}
           <div className="coze-group-title">知识</div>
@@ -1073,10 +1090,11 @@ function ModelConfigPanel({ agentForm, models, openMyModels, setAgentForm, setRa
             step="0.1"
             style={{ flex: 1, accentColor: '#4d43e6', height: '6px', background: '#dfe4ef', borderRadius: '4px', cursor: 'pointer' }}
             value={agentForm.temperature ?? 0.7}
+            disabled={selected?.provider === 'anthropic'}
             onChange={(e) => setAgentForm({ ...agentForm, temperature: Number(e.target.value) })}
           />
           <span style={{ minWidth: '32px', fontWeight: 'bold', color: '#4d43e6', fontSize: '14px', textAlign: 'right' }}>
-            {Number(agentForm.temperature ?? 0.7).toFixed(1)}
+            {selected?.provider === 'anthropic' ? '厂商默认' : Number(agentForm.temperature ?? 0.7).toFixed(1)}
           </span>
         </div>
       </ConfigRow>

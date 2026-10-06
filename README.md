@@ -22,10 +22,15 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 
 ### 模型配置
 - **系统模型**：管理员预设的模型配置，供所有用户选择
-- **用户私有模型**：每个用户可配置自己的模型供应商（base_url + api_key + 模型名），支持 OpenAI 兼容接口
+- **用户私有模型**：每个用户可配置连接协议、base_url、api_key 和模型名，支持 OpenAI-compatible Chat Completions 与 Anthropic Messages 原生接口
 - 模型能力标注：是否支持图片/文档/深度思考（reasoning），前端按能力展示对应 UI 开关
-- 支持 DashScope（通义千问）、DeepSeek 或公网 HTTPS 的 OpenAI 兼容接口
+- 支持 DashScope（通义千问）、DeepSeek 等公网 HTTPS 兼容接口；选择 Anthropic 协议时可接入 Claude 或提供 Messages 协议的网关
 - 用户可设置默认模型、测试模型连通性和多模态能力
+- OpenAI 协议继续使用 Bearer 与 `/chat/completions`；Anthropic 使用 `x-api-key`、`anthropic-version: 2023-06-01` 与 `/v1/messages`，Base URL 可填写根地址或 `/v1`。模型列表按协议拉取，Anthropic 支持分页。
+- 两种协议统一处理图片、工具调用及结果回填、文本流式输出；Anthropic 思考块和工具结果会保留协议所需的原始签名，记忆/查询理解等 LangChain 辅助调用也使用相同协议。
+- Anthropic 默认使用厂商温度，不发送温度覆盖；显式原生深度思考请求使用 adaptive thinking，需所选模型支持。Anthropic 预设默认关闭该能力，避免对旧模型作错误声明。
+- Anthropic 系统模型读取服务器 `ANTHROPIC_API_BASE` 与 `ANTHROPIC_API_KEY`；私有模型读取各自加密保存的连接信息。旧模型记录默认保持 OpenAI 协议，无需数据库迁移。
+- 协议依据：[Anthropic Messages](https://platform.claude.com/docs/en/api/http/messages/create)、[流式事件](https://platform.claude.com/docs/en/build-with-claude/streaming)。
 
 ### 智能体管理
 - 创建/编辑/删除智能体，配置名称、头像、开场白、系统提示词
@@ -83,6 +88,22 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 - 工具测试：填入参数即时测试工具连通性
 - 绑定到智能体，Agent 在对话中按需调用
 - 运行记录（Run/RunStep）追踪每次工具调用
+
+### 市场中的 MCP 服务
+- Agent 启动不会连接全部 MCP 或展开全部工具定义。模型调用内置 `tool_search`，在 Agent 已绑定的工具白名单内检索，命中工具的 Schema 加入下一轮请求，实际调用时才连接 MCP。搜索、加载、执行都检查当前工作区权限；配置或工具定义改变后需重新搜索。
+- Skill 在同一市场入口创建、导入 Markdown/ZIP、共享、停用和保存新版本。Agent 可绑定多个固定版本；启动上下文只注入名称、用途和版本，`load_skill` 按需加载正文，`read_skill_file` 再读取引用文件。发布快照固定 Skill 版本，发布后的引用可复制到智能体副本。
+- Skill 的 `scripts/` 文件不会在导入或加载时执行。管理员批准对应版本且部署了 `SKILL_SANDBOX_IMAGE` 后，`run_skill_script` 才能在 Docker 沙箱运行 Python/JavaScript：禁用网络、只读包目录、临时工作目录、资源和输出限制。未安装 Docker 或镜像未配置时返回明确错误，不直接执行后端主机上的脚本。
+- 侧栏统一使用「市场」入口，包含「发现」和「我的资源」两个视图。发现页提供智能体、MCP 和 Skill 能力；我的资源管理已接入 MCP、Skill、工具、知识库和提示词。Builder 的 MCP 和提示词入口都跳转到这里。
+- MCP 查询使用当前工作区已有服务、已发现的工具及部署者提供的模板。发现页在模板为空时仍显示已接入服务，支持按名称和工具搜索；不会自动导入外部公共目录。
+- 「发现」用于浏览能力摘要、查看模板和接入新服务；「我的资源」用于检测、认证、编辑、共享和移除已接入服务，以及管理 Skill 版本。两者引用同一资源记录，切换视图不会复制连接。认证标签区分未配置、待授权、已配置和检测已验证；最新检测失败时保留工具缓存，但不继续显示旧的认证已验证状态。
+- 工具管理统一在「市场 → 我的资源 → 工具」，侧栏不再重复提供工具页。平台联网搜索由 Agent 配置页的 `tool_policy.web_search_enabled` 开关控制，默认关闭，随发布快照固定；开启后模型按需调用 `web_search`，不会在每条消息开始时强制搜索。聊天页不再有临时开关，请求不能绕过 Agent 禁用设置。
+- 可添加公网 HTTPS 的 Streamable HTTP 或旧版 HTTP+SSE 服务；stdio 运行在后端所在机器。部署者设置 `MCP_ALLOW_CUSTOM_STDIO=true` 后，管理员可在网页填写启动命令、参数数组、环境变量，或导入 `{"mcpServers":{"name":{"command":"python","args":["server.py"],"env":{}}}}` 格式的配置。保存后检测连接即可获取工具。修改环境变量会加密保存；编辑时不回显变量值，未修改的值会沿用。
+- 自定义 stdio 是启动后端机器上的程序，只对受信任管理员开放，默认关闭；普通成员可在智能体中绑定已共享的服务。关闭自定义配置时，管理员仍可从部署者的 `MCP_STDIO_TEMPLATES_JSON` 中选择固定命令模板。程序、依赖和路径需要在后端所在机器上可用；登记本身不自动安装软件。
+- 服务登记后点击「检测连接」，缓存 Tools、Resources、Prompts 清单。智能体 Builder 可同时绑定多个 MCP 服务，并逐个勾选可交给模型使用的工具；现有内置/HTTP 工具继续并用。
+- 远程服务支持无认证、Bearer、管理员完成的浏览器 OAuth 授权和 Client Credentials。Bearer、stdio 环境变量、OAuth 客户端密钥及令牌使用 `API_KEY_ENCRYPTION_KEY` 加密，接口不回显密钥。浏览器 OAuth 支持动态注册，也可填写预注册应用的 Client ID/Secret。开发环境回调默认 `http://127.0.0.1:8000/api/mcp/oauth/callback`；生产需显式配置 `MCP_OAUTH_REDIRECT_URL`，并在应用提供方登记完全一致的地址。`MCP_CLIENT_METADATA_URL` 可选，启用时应指向本部署公开的 `/api/mcp/oauth/client-metadata` 地址。
+- [GitHub 远程 MCP](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md) 不支持动态客户端注册：使用 `https://api.githubcopilot.com/mcp/` 时，选择 Bearer 并填写有效 PAT，或选择 OAuth 并填写自己已注册 GitHub App/OAuth App 的 Client ID、Secret。仅选择 OAuth 不会自动创建 GitHub 应用。
+- 草稿使用当前 MCP 选择；发布快照记录服务及工具白名单。停用服务会立即停止调用。复制已发布智能体时，仅复制已共享、同工作区可用的 MCP 绑定。
+- 官方 MCP Python SDK v2 使用 Python 3.11；其依赖要求已同步升级 FastAPI/Pydantic。生产连接统一走官方 SDK，旧手写 stdio 客户端暂留作兼容测试。
 
 ### 会话记忆
 - Session Summary 记忆：最近窗口 + 旧轮次 LLM 增量摘要，超阈值时把较旧对话压成摘要、保留最近若干轮原文，摘要失败降级保留旧摘要（`MEMORY_SUMMARY_*`）
@@ -190,7 +211,7 @@ langchain/
 ```env
 # 安全密钥
 JWT_SECRET=replace-with-a-long-random-secret
-API_KEY_ENCRYPTION_KEY=          # 可选，用于加密存储用户 API Key
+API_KEY_ENCRYPTION_KEY=          # 保存用户模型/工具/MCP 密钥前必填；API 与 worker 使用同一固定密钥
 
 # 数据库
 DATABASE_URL=mysql+pymysql://lingshu:lingshu@192.168.150.101:3306/lingshu_agent
@@ -330,6 +351,9 @@ LINGSHU_DEPLOYMENT_MODE=production
 | Feedback | `POST /api/messages/{id}/feedback` | 消息反馈 |
 | Knowledge | `GET/POST /api/knowledge-bases` `POST .../{id}/documents` `POST .../{id}/index` `POST .../documents/{id}/reindex` `DELETE ...`| 知识库管理（含失败文档重试） |
 | Tools | `GET/POST /api/tools` `PATCH/DELETE /api/tools/{id}` `POST .../{id}/test` | 工具管理 |
+| MCP Catalog | `GET/POST /api/mcp/servers` `PATCH/DELETE /api/mcp/servers/{id}` `POST .../{id}/probe` | 市场中的 MCP 服务接入与能力检测 |
+| MCP Bindings | `GET/PUT /api/agents/{id}/mcp-bindings` | 为智能体选择多个 MCP 服务及其工具 |
+| MCP OAuth | `POST /api/mcp/servers/{id}/oauth/start` `GET /api/mcp/oauth/callback` | 管理员授权工作区远程服务 |
 | Prompt Templates | `GET/POST /api/prompt-templates` | 提示词模板 |
 | Uploads | `POST /api/uploads` | 文件上传 |
 | Search | `GET /api/search/test` | 网络搜索测试 |

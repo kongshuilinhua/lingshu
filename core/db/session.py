@@ -1,3 +1,4 @@
+import json
 import re
 
 from sqlalchemy import create_engine, inspect, text
@@ -82,12 +83,21 @@ def init_db() -> None:
     """
     from core.db import models  # noqa: F401
     from core.services.bootstrap import ensure_default_models
+    from core.db.models import McpServer
+    from core.security.api_keys import encrypt_api_key
 
     Base.metadata.create_all(bind=engine)
     _run_compat_migrations()
     db = SessionLocal()
     try:
         ensure_default_models(db)
+        # 旧版 stdio 环境变量曾以 JSON 明文存储；升级时加密并清空旧列。
+        for server in db.query(McpServer).all():
+            if server.env:
+                if not server.encrypted_env:
+                    server.encrypted_env = encrypt_api_key(json.dumps(server.env))
+                server.env = {}
+        db.commit()
     finally:
         db.close()
 
@@ -253,6 +263,24 @@ def _run_compat_migrations() -> None:
                     "CONCAT(NEW.workspace_id, ':', NEW.user_id, ':', NEW.name), NULL)",
                 },
             )
+    if "mcp_servers" in table_names:
+        _ensure_columns(
+            "mcp_servers",
+            {
+                "created_by": "INTEGER",
+                "description": "TEXT",
+                "category": "VARCHAR(80) DEFAULT '通用'",
+                "protocol_mode": "VARCHAR(20) DEFAULT 'legacy'",
+                "url": "TEXT",
+                "encrypted_env": "TEXT",
+                "auth_type": "VARCHAR(20) DEFAULT 'none'",
+                "oauth_scope": "VARCHAR(500) DEFAULT ''",
+                "encrypted_auth": "TEXT",
+                "is_listed": "BOOLEAN DEFAULT true",
+                "catalog": "JSON",
+                "config_version": "INTEGER DEFAULT 1",
+            },
+        )
     if "agent_tools" in table_names:
         _ensure_columns(
             "agent_tools",

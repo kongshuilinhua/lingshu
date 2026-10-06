@@ -1,0 +1,33 @@
+.mcp-binding-panel { margin: 12px 0 22px; padding: 18px; border: 1px solid #dbe6de; border-radius: 15px; background: #f8fbf8; color: #1d3326; }
+.mcp-binding-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.mcp-binding-label { color: #6b9a76; font-size: 9px; font-weight: 800; letter-spacing: .16em; }
+.mcp-binding-header h3 { display: flex; align-items: center; gap: 8px; margin: 5px 0 0; font-size: 15px; }
+.mcp-binding-header h3 small { color: #6b806f; font-size: 11px; font-weight: 500; }
+.mcp-binding-header button { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; color: #2a7050; background: #e9f3e9; white-space: nowrap; font-size: 11px; font-weight: 700; }
+.mcp-binding-intro { margin: 10px 0 17px; color: #758479; font-size: 11px; line-height: 1.5; }
+.mcp-binding-list { display: grid; gap: 9px; }
+.mcp-binding-service { border: 1px solid #deeadf; border-radius: 11px; background: #fff; overflow: hidden; }
+.mcp-binding-service summary { display: flex; align-items: center; gap: 10px; padding: 11px; cursor: pointer; list-style: none; }
+.mcp-binding-service summary::-webkit-details-marker { display: none; }
+.mcp-binding-service-mark { display: grid; place-items: center; width: 31px; height: 31px; flex: 0 0 auto; border-radius: 8px; background: #def0dd; color: #316b49; font-size: 13px; font-weight: 850; }
+.mcp-binding-service-name { display: grid; min-width: 0; gap: 3px; flex: 1; }
+.mcp-binding-service-name strong { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-binding-service-name small { color: #819085; font-size: 10px; }
+.mcp-binding-selected { color: #43815a; font-size: 10px; font-weight: 750; }
+.mcp-binding-tools { border-top: 1px solid #eef2eb; padding: 2px 11px 10px; }
+.mcp-binding-tools > p { margin: 12px 2px 3px; color: #859187; font-size: 11px; }
+.mcp-binding-tool { display: flex; align-items: start; gap: 9px; padding: 10px 2px; border-bottom: 1px solid #f0f3ee; cursor: pointer; }
+.mcp-binding-tool:last-child { border-bottom: 0; }
+.mcp-binding-tool input { flex: 0 0 auto; width: 15px; height: 15px; margin: 1px 0 0; accent-color: #3b8057; }
+.mcp-binding-tool span { display: grid; gap: 4px; min-width: 0; }
+.mcp-binding-tool strong { font-size: 11px; overflow-wrap: anywhere; }
+.mcp-binding-tool small { color: #809086; font-size: 10px; line-height: 1.45; }
+.mcp-binding-empty { display: grid; justify-items: center; gap: 6px; padding: 22px; border: 1px dashed #c8dccb; border-radius: 11px; text-align: center; color: #7c8c80; font-size: 11px; }
+.mcp-binding-empty button { background: transparent; color: #2b7751; font-weight: 750; }
+.mcp-binding-error, .mcp-binding-success { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.mcp-binding-error { color: #a5483f; }
+.mcp-binding-success { color: #2b7850; }
+.mcp-binding-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 17px; color: #89958a; font-size: 10px; }
+.mcp-binding-footer button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 11px; border-radius: 8px; background: #2c6d4d; color: #fff; font-size: 11px; font-weight: 750; white-space: nowrap; }
+.mcp-binding-footer button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 540px) { .mcp-binding-header h3 { flex-wrap: wrap; } .mcp-binding-header h3 small { width: 100%; } }

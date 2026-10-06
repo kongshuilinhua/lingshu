@@ -14,7 +14,7 @@ export const useAuthStore = create((set, get) => ({
   canManage: false,
   error: '',
 
-  setToken: (token) => set({ token }),
+  setToken: (token) => set({ token, me: null, workspace: null, canManage: false, error: '' }),
   setMe: (me) => set({ me }),
 
   logout: () => {
@@ -33,7 +33,9 @@ export const useAuthStore = create((set, get) => ({
     if (!token) return;
     try {
       const profile = await api('/api/auth/me', { token });
+      if (get().token !== token) return;
       const ws = await api('/api/workspaces/current', { token });
+      if (get().token !== token) return;
       set({
         me: profile.user,
         workspace: ws.workspace,
@@ -41,6 +43,7 @@ export const useAuthStore = create((set, get) => ({
         error: '',
       });
     } catch (err) {
+      if (get().token !== token) return;
       if (isAuthError(err)) {
         get().logout();
         set({ error: '登录已失效，请重新登录。' });

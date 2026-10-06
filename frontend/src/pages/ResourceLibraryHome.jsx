@@ -12,6 +12,7 @@ import {
 } from '../utils.js';
 
 export function ResourceLibraryHome({
+  embedded = false,
   activeAgentId,
   agentForm,
   copyBuiltinPromptTemplate,
@@ -21,14 +22,17 @@ export function ResourceLibraryHome({
   openBuilder,
   promptTemplates,
   requestDeleteConfirm,
+  resourceTab,
   setActiveNav,
+  setResourceTab,
   setAgentForm,
   setProfileError,
   setView,
   tools,
   updatePromptTemplate,
 }) {
-  const [tab, setTab] = useState('all');
+  const tab = resourceTab;
+  const setTab = setResourceTab;
   const [query, setQuery] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState(promptTemplates[0] || null);
   const [editingTemplate, setEditingTemplate] = useState(null);
@@ -127,7 +131,7 @@ export function ResourceLibraryHome({
     const confirmed = await requestDeleteConfirm({
       title: '删除提示词模板',
       message: `删除「${template.title}」？`,
-      detail: '删除后，资源库和 Builder 模板区都不再显示该模板。',
+      detail: '删除后，我的资源和 Builder 模板区都不再显示该模板。',
       confirmLabel: '删除模板',
     });
     if (!confirmed) return;
@@ -146,22 +150,22 @@ export function ResourceLibraryHome({
   }
 
   return (
-    <div className="content-page resource-page">
+    <div className={embedded ? 'market-resource-panel' : 'content-page resource-page'}>
       <header className="page-heading resource-heading">
-        <div>
+        {!embedded && <div>
           <h1>资源库</h1>
-          <p>管理当前可用资源。这里暂只展示已实现的插件、知识库和提示词。</p>
-        </div>
+          <p>管理工作区的插件、知识库和提示词，并把需要的资源交给智能体。</p>
+        </div>}
         <div className="resource-actions">
           <label className="resource-search">
             <Search size={16} />
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资源" />
           </label>
-          <button className="primary" type="button" onClick={() => openCreate()}><Plus size={15} />新建提示词</button>
+          {showPrompts && <button className="primary" type="button" onClick={() => openCreate()}><Plus size={15} />新建提示词</button>}
         </div>
       </header>
 
-      <div className="resource-tabs">
+      {!embedded && <div className="resource-tabs">
         {[
           ['all', '全部'],
           ['tools', '插件'],
@@ -170,7 +174,7 @@ export function ResourceLibraryHome({
         ].map(([key, label]) => (
           <button key={key} type="button" className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>
         ))}
-      </div>
+      </div>}
 
       <div className="resource-layout">
         <section className="resource-list-panel">
@@ -237,7 +241,7 @@ export function ResourceLibraryHome({
           )}
         </section>
 
-        <aside className="resource-detail-panel">
+        {showPrompts && <aside className="resource-detail-panel">
           <PromptTemplatePreview
             activeAgentId={activeAgentId}
             template={selectedTemplate}
@@ -251,7 +255,7 @@ export function ResourceLibraryHome({
             <button type="button" onClick={() => { setView('builder'); openBuilder(); }}>打开 Builder</button>
             <button className="primary-model-action" type="button" onClick={() => openCreate()}><Plus size={15} />新建模板</button>
           </section>
-        </aside>
+        </aside>}
       </div>
       {notice && <p className="model-row-warning floating-notice">{notice}</p>}
       {formOpen && (

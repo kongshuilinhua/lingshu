@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     access_token_minutes: int = 60 * 24
     # 🛡️ API 密钥加密密钥：用于 Fernet 对称加密存储用户的第三方 API Key，与 JWT Secret 解耦防止单点泄漏
     api_key_encryption_key: str | None = Field(default=None, alias="API_KEY_ENCRYPTION_KEY")
+    mcp_stdio_templates_json: str = Field(default="{}", alias="MCP_STDIO_TEMPLATES_JSON")
+    mcp_allow_custom_stdio: bool = Field(default=False, alias="MCP_ALLOW_CUSTOM_STDIO")
+    skill_sandbox_image: str = Field(default="", alias="SKILL_SANDBOX_IMAGE")
+    mcp_oauth_redirect_url: str = Field(default="", alias="MCP_OAUTH_REDIRECT_URL")
+    mcp_client_metadata_url: str = Field(default="", alias="MCP_CLIENT_METADATA_URL")
     # 邀请制注册开关：关闭时任何人可自由注册
     invite_api_enabled: bool = Field(default=False, alias="INVITE_API_ENABLED")
     # 🛡️ CORS 白名单：限制前端来源，防止跨站请求伪造
@@ -100,6 +105,8 @@ class Settings(BaseSettings):
     deepseek_api_base: str = Field(default="https://api.deepseek.com", alias="DEEPSEEK_API_BASE")
     deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
     deepseek_model: str = Field(default="deepseek-chat", alias="DEEPSEEK_MODEL")
+    anthropic_api_base: str = Field(default="https://api.anthropic.com/v1", alias="ANTHROPIC_API_BASE")
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     # 独立的 Embedding / Rerank 端点，允许将嵌入服务与聊天服务部署在不同集群
     embedding_api_base: str | None = Field(default=None, alias="EMBEDDING_API_BASE")
     embedding_api_key: str | None = Field(default=None, alias="EMBEDDING_API_KEY")

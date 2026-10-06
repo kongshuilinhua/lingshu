@@ -126,7 +126,7 @@ export const useChatStore = create((set, get) => ({
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         const err = new ApiError(errorMessage(data.detail || data.message || `HTTP ${response.status}`), response.status, data);
-        if (isAuthError(err)) notifyAuthExpired();
+        if (isAuthError(err)) notifyAuthExpired(token);
         throw err;
       }
       if (!response.body) throw new Error('当前浏览器不支持流式响应。');

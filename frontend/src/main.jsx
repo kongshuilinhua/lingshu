@@ -16,7 +16,6 @@ import {
   FileX2,
   ImagePlus,
   Home,
-  Layers,
   KeyRound,
   LogIn,
   LogOut,
@@ -35,7 +34,6 @@ import {
   ThumbsUp,
   Trash2,
   UploadCloud,
-  Wand2,
   X,
 } from 'lucide-react';
 import './styles.css';
@@ -54,8 +52,6 @@ const MarketHome = lazyNamed(() => import('./pages/MarketHome.jsx'), 'MarketHome
 const ReviewHome = lazyNamed(() => import('./pages/ReviewHome.jsx'), 'ReviewHome');
 const MembersHome = lazyNamed(() => import('./pages/MembersHome.jsx'), 'MembersHome');
 const KnowledgeHome = lazyNamed(() => import('./pages/KnowledgeHome.jsx'), 'KnowledgeHome');
-const ResourceLibraryHome = lazyNamed(() => import('./pages/ResourceLibraryHome.jsx'), 'ResourceLibraryHome');
-const ToolsHome = lazyNamed(() => import('./pages/ToolsHome.jsx'), 'ToolsHome');
 const UserModelsHome = lazyNamed(() => import('./pages/UserModelsHome.jsx'), 'UserModelsHome');
 
 function PageFallback() {
@@ -184,6 +180,8 @@ function App() {
   const [uploadingFileName, setUploadingFileName] = useState('');
   const [view, setView] = useState('home');
   const [activeNav, setActiveNav] = useState('chat');
+  const [marketTab, setMarketTab] = useState('agents');
+  const [marketScope, setMarketScope] = useState('discover');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   const [profileError, setProfileError] = useState('');
@@ -223,7 +221,9 @@ function App() {
   }
 
   useEffect(() => {
-    function handleAuthExpired() {
+    function handleAuthExpired(event) {
+      const currentToken = useAuthStore.getState().token;
+      if (!currentToken || (event.detail?.token && event.detail.token !== currentToken)) return;
       logout();
       setError('登录已失效，请重新登录。');
     }
@@ -341,8 +341,10 @@ function App() {
   }
 
   async function bootstrap() {
+    const requestedToken = useAuthStore.getState().token;
     await storeBootstrap();  // Phase 4: Zustand loads token/me/workspace
     const { token, me, workspace } = useAuthStore.getState();
+    if (!token || token !== requestedToken || !workspace) return;
     const [health, agentList, kbList, toolList, modelList, userModelList, marketList, reviewList, promptTemplateList, memberList] = await Promise.all([
       api('/api/health').catch(() => defaultRuntimeStatus()),
       fetchAgents(token).catch(() => []),
@@ -351,10 +353,11 @@ function App() {
       fetchModels(false, token).catch(() => []),
       fetchUserModels(token).catch(() => []),
       fetchMarketAgents(token).catch(() => []),
-      fetchReviews(token).catch(() => []),
+      isAdminRole(workspace.role) ? fetchReviews(token).catch(() => []) : Promise.resolve([]),
       fetchPromptTemplates(false, token).catch(() => []),
-      fetchMembers(token).catch(() => []),
+      isAdminRole(workspace.role) ? fetchMembers(token).catch(() => []) : Promise.resolve([]),
     ]);
+    if (useAuthStore.getState().token !== token) return;
     setAgents(agentList);
     setKnowledgeBases(kbList);
     setTools(toolList);
@@ -1068,7 +1071,6 @@ function App() {
     const effectiveRagEnabled = ragRuntime.available && ragEnabled;
     const thinkingCapability = reasoningCapabilityForModel(currentModel);
     const effectiveThinkingEnabled = thinkingEnabled && thinkingCapability.supported;
-    const effectiveSearchEnabled = webSearchRuntime.available && searchEnabled;
     if (thinkingEnabled && !thinkingCapability.supported) {
       setThinkingEnabled(false);
     }
@@ -1099,7 +1101,6 @@ function App() {
         ragEnabled: effectiveRagEnabled,
         ragOptions: agentForm.rag || undefined,
         thinkingEnabled: effectiveThinkingEnabled,
-        searchEnabled: effectiveSearchEnabled,
         variables: castVariables(agentForm.variables || [], chatVariables),
         chatAttachments: outgoingAttachments,
       });
@@ -1277,6 +1278,8 @@ function App() {
     loadSession,
     logout,
     marketAgents,
+    marketTab,
+    marketScope,
     me,
     members,
     messages,
@@ -1309,6 +1312,8 @@ function App() {
     setError,
     setActiveAgentId,
     setActiveNav,
+    setMarketTab,
+    setMarketScope,
     setAgentForm,
     setChatMode,
     setAccountMenuOpen,
@@ -1331,6 +1336,7 @@ function App() {
     toolDebugEvents,
     testToolConfig,
     testUserModelDraft,
+    probeUserModels,
     uploadChatAttachment,
     uploadingAttachment,
     uploadingKnowledgeFile,
@@ -1464,6 +1470,8 @@ function HomeView(props) {
     loadSession,
     logout,
     marketAgents,
+    marketTab,
+    marketScope,
     me,
     members,
     messages,
@@ -1477,6 +1485,8 @@ function HomeView(props) {
     setError,
     setActiveAgentId,
     setActiveNav,
+    setMarketTab,
+    setMarketScope,
     setAgentForm,
     setAccountMenuOpen,
     setChatMode,
@@ -1519,6 +1529,7 @@ function HomeView(props) {
     setProfileError,
     setProfileDialogOpen,
     testUserModelDraft,
+    probeUserModels,
     testUserModelConfig,
     token,
     userModels,
@@ -1605,8 +1616,6 @@ function HomeView(props) {
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
-          <NavButton icon={<Layers size={17} />} label="资源库" active={activeNav === 'resources'} onClick={() => setActiveNav('resources')} />
-          <NavButton icon={<Wand2 size={17} />} label="工具" active={activeNav === 'tools'} onClick={() => setActiveNav('tools')} />
           {canManage && <NavButton icon={<Shield size={17} />} label="审核" active={activeNav === 'reviews'} onClick={() => setActiveNav('reviews')} />}
           {canManage && <NavButton icon={<KeyRound size={17} />} label="成员" active={activeNav === 'members'} onClick={() => setActiveNav('members')} />}
           <NavButton icon={<Database size={17} />} label="知识库" active={activeNav === 'knowledge'} onClick={() => setActiveNav('knowledge')} />
@@ -1831,7 +1840,19 @@ function HomeView(props) {
         {activeNav === 'market' && (
           <MarketHome
             agents={marketAgents}
+            canManage={canManage}
             copyMarketAgent={copyMarketAgent}
+            marketTab={marketTab}
+            setMarketTab={setMarketTab}
+            marketScope={marketScope}
+            setMarketScope={setMarketScope}
+            token={token}
+            resourcesProps={{
+              activeAgentId, agentForm, copyBuiltinPromptTemplate, createPromptTemplate,
+              deletePromptTemplate, knowledgeBases, openBuilder, promptTemplates,
+              requestDeleteConfirm, setActiveNav, setAgentForm, setProfileError, setView,
+              tools, updatePromptTemplate,
+            }}
           />
         )}
 
@@ -1854,38 +1875,7 @@ function HomeView(props) {
           />
         )}
 
-        {activeNav === 'resources' && (
-          <ResourceLibraryHome
-            activeAgentId={activeAgentId}
-            agentForm={agentForm}
-            copyBuiltinPromptTemplate={copyBuiltinPromptTemplate}
-            createPromptTemplate={createPromptTemplate}
-            deletePromptTemplate={deletePromptTemplate}
-            knowledgeBases={knowledgeBases}
-            openBuilder={openBuilder}
-            promptTemplates={promptTemplates}
-            requestDeleteConfirm={requestDeleteConfirm}
-            setActiveNav={setActiveNav}
-            setAgentForm={setAgentForm}
-            setProfileError={setProfileError}
-            setView={setView}
-            tools={tools}
-            updatePromptTemplate={updatePromptTemplate}
-          />
-        )}
 
-        {activeNav === 'tools' && (
-          <ToolsHome
-            createToolConfig={createToolConfig}
-            deleteToolConfig={deleteToolConfig}
-            openBuilder={openBuilder}
-            requestDeleteConfirm={requestDeleteConfirm}
-            setProfileError={setProfileError}
-            testToolConfig={testToolConfig}
-            tools={tools}
-            updateToolConfig={updateToolConfig}
-          />
-        )}
 
         {activeNav === 'reviews' && canManage && (
           <ReviewHome

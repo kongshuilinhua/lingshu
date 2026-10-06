@@ -25,7 +25,7 @@ export const useAgentStore = create((set, get) => ({
     variables: [],
     memory: { enabled: false, strategy: 'session_summary', max_messages: 12 },
     rag: { enabled_by_default: true, top_k: 4 },
-    tool_policy: { mode: 'auto', allowed_tool_names: [] },
+    tool_policy: { mode: 'auto', allowed_tool_names: [], web_search_enabled: false },
   },
 
   setActiveAgentId: (id) => set({ activeAgentId: id }),

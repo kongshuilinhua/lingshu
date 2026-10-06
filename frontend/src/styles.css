@@ -773,6 +773,8 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .resource-tabs {
   display: flex;
   gap: 18px;
+  overflow-x: auto;
+  white-space: nowrap;
   margin: -8px 0 16px;
   border-bottom: 1px solid #e4e7ef;
 }

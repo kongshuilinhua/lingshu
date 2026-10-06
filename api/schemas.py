@@ -63,6 +63,7 @@ class AgentToolPolicy(BaseModel):
     """智能体工具路由策略，约束模型自动或指定执行特定工具集。"""
     mode: str = "auto"
     allowed_tool_names: list[str] = []
+    web_search_enabled: bool = False
 
 
 class RegisterRequest(BaseModel):
@@ -243,6 +244,64 @@ class ToolTestRequest(BaseModel):
     body: dict | list | str | int | float | bool | None = None
 
 
+class McpServerCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    category: str = Field(default="通用", max_length=80)
+    transport: str = Field(default="streamable_http", pattern="^(streamable_http|sse|stdio)$")
+    url: str = Field(default="", max_length=1000)
+    template_id: str = Field(default="", max_length=120)
+    command: str = Field(default="", max_length=1024)
+    args: list[str] = Field(default_factory=list, max_length=64)
+    env: dict[str, str] = Field(default_factory=dict)
+    auth_type: str = Field(default="none", pattern="^(none|bearer|oauth|client_credentials)$")
+    auth_secret: str = Field(default="", max_length=4096)
+    client_id: str = Field(default="", max_length=500)
+    client_secret: str = Field(default="", max_length=4096)
+    scope: str = Field(default="", max_length=500)
+    token_endpoint_auth_method: str = Field(default="client_secret_basic", pattern="^(client_secret_basic|client_secret_post)$")
+    is_listed: bool = False
+
+
+class McpServerUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    category: str | None = Field(default=None, max_length=80)
+    url: str | None = Field(default=None, max_length=1000)
+    template_id: str | None = Field(default=None, max_length=120)
+    command: str | None = Field(default=None, max_length=1024)
+    args: list[str] | None = Field(default=None, max_length=64)
+    env_remove: list[str] = Field(default_factory=list, max_length=128)
+    env: dict[str, str] | None = None
+    auth_type: str | None = Field(default=None, pattern="^(none|bearer|oauth|client_credentials)$")
+    auth_secret: str | None = Field(default=None, max_length=4096)
+    client_id: str | None = Field(default=None, max_length=500)
+    client_secret: str | None = Field(default=None, max_length=4096)
+    scope: str | None = Field(default=None, max_length=500)
+    token_endpoint_auth_method: str | None = Field(default=None, pattern="^(client_secret_basic|client_secret_post)$")
+    enabled: bool | None = None
+    is_listed: bool | None = None
+
+
+class AgentMcpBindingItem(BaseModel):
+    server_id: int = Field(gt=0)
+    selected_tools: list[str] = Field(min_length=1, max_length=400)
+    enabled: bool = True
+
+
+class AgentMcpBindingsRequest(BaseModel):
+    items: list[AgentMcpBindingItem] = Field(max_length=20)
+
+
+class McpResourceReadRequest(BaseModel):
+    uri: str = Field(min_length=1, max_length=1000)
+
+
+class McpPromptGetRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    arguments: dict[str, str] = Field(default_factory=dict)
+
+
 class PromptTemplateRequest(BaseModel):
     """
     创建 Prompt 模板参数契约。
@@ -322,7 +381,7 @@ class UserModelConfigRequest(BaseModel):
         - `max_context` 上下文窗口底线限制为 1 个 Token 以上，防恶意除零计算报错。
     """
     display_name: str = Field(min_length=1, max_length=160)
-    provider: str = Field(default="openai-compatible", min_length=1, max_length=80)
+    provider: str = Field(default="openai-compatible", pattern="^(openai-compatible|openai|anthropic)$")
     base_url: str = Field(min_length=1, max_length=500)
     api_key: str | None = Field(max_length=4096)
     chat_model: str = Field(min_length=1, max_length=160)
@@ -345,13 +404,14 @@ class UserModelCapabilityTestRequest(UserModelConfigRequest):
 class UserModelProbeModelsRequest(BaseModel):
     """拉取端点模型列表(GET /models)的请求契约:只需 base_url + api_key。"""
     base_url: str = Field(min_length=1, max_length=500)
+    provider: str = Field(default="openai-compatible", pattern="^(openai-compatible|openai|anthropic)$")
     api_key: str = Field(max_length=4096)
 
 
 class UserModelConfigUpdateRequest(BaseModel):
     """更新私有大模型连接参数契约。"""
     display_name: str | None = Field(default=None, min_length=1, max_length=160)
-    provider: str | None = Field(default=None, min_length=1, max_length=80)
+    provider: str | None = Field(default=None, pattern="^(openai-compatible|openai|anthropic)$")
     base_url: str | None = Field(default=None, min_length=1, max_length=500)
     api_key: str | None = Field(default=None, max_length=4096)
     chat_model: str | None = Field(default=None, min_length=1, max_length=160)

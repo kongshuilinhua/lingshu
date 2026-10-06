@@ -542,18 +542,46 @@ def _execute_mcp_tool(tool, context: dict) -> dict:
         raise ValueError("MCP server not found")
     if not server.enabled:
         raise ValueError("MCP server is disabled")
+    workspace_id = context.get("_workspace_id")
+    if workspace_id is not None and server.workspace_id not in {None, workspace_id}:
+        raise ValueError("MCP server is not available in this workspace")
 
     client = get_mcp_client(server)
     raw_input = context.get("input")
     arguments = raw_input if isinstance(raw_input, dict) else {"input": raw_input}
-    text = client.call_tool(tool_name, arguments)
+    try:
+        if hasattr(client, "call_tool_result"):
+            call_result = client.call_tool_result(tool_name, arguments)
+            if call_result.get("isError"):
+                raise ValueError("MCP tool reported an error")
+            texts = []
+            for part in call_result.get("content") or []:
+                if part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+                elif part.get("type") == "resource_link":
+                    texts.append(f"[MCP resource: {part.get('uri', '')}]")
+                elif part.get("type") in {"image", "audio"}:
+                    texts.append(f"[MCP {part['type']}: {part.get('mimeType', 'binary')}]")
+            structured = call_result.get("structuredContent")
+            text = "\n".join(item for item in texts if item)
+            if structured is not None:
+                structured_text = json.dumps(structured, ensure_ascii=False)
+                text = f"{text}\n{structured_text}".strip() if text else structured_text
+        else:
+            text = client.call_tool(tool_name, arguments)
+            structured = None
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("MCP tool call failed") from exc
+    text = text[:16000]
     return {
         "tool": tool.name,
         "tool_type": "mcp",
         "status_code": 200,
         "content": text,
         "result_preview": text,
-        "result_json": _safe_json(text),
+        "result_json": structured if structured is not None else _safe_json(text),
     }
 
 
@@ -1346,7 +1374,7 @@ def _tool_parameters_schema(tool: Tool) -> dict:
             },
             "required": ["input"],
         }
-    if tool.type == "mcp":
+    if tool.type in {"mcp", "capability"}:
         # 优先用 MCP server 声明的 inputSchema;缺失时退化为通用 input
         input_schema = (tool.schema or {}).get("input_schema")
         if isinstance(input_schema, dict) and input_schema:

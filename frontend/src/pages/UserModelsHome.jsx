@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Check, Plus, ServerCog, Trash2, Wand2, X } from 'lucide-react';
 import { SecretInputDialog } from '../components/SecretInputDialog.jsx';
 import {
@@ -18,7 +18,7 @@ export function UserModelsHome({ adminModels, canManage, createModelConfig, dele
       <header className="page-heading">
         <div>
           <h1>我的模型</h1>
-          <p>维护你自己的 OpenAI-compatible 模型连接，保存后可在智能体配置里选择。</p>
+          <p>维护 OpenAI-compatible 或 Anthropic Messages 模型连接，保存后可在智能体中选择。</p>
         </div>
       </header>
       <UserModelsPanel requestDeleteConfirm={requestDeleteConfirm} setProfileError={setProfileError} {...userModelProps} />
@@ -39,6 +39,13 @@ export function UserModelsHome({ adminModels, canManage, createModelConfig, dele
 
 
 const USER_MODEL_PRESETS = [
+  {
+    id: 'anthropic', label: 'Anthropic / Claude', modelHint: '从模型列表选择',
+    description: '使用 Anthropic Messages 原生协议。填入 API Key 后拉取模型列表；地址可填写 API 根地址或 /v1。使用厂商默认温度。',
+    values: { display_name: 'Claude', provider: 'anthropic', base_url: 'https://api.anthropic.com/v1',
+      chat_model: '', supports_image: false, supports_document: true, supports_reasoning: false,
+      reasoning_type: 'none', reasoning_label: '不支持', max_context: '200000', default_temperature: '1' },
+  },
   {
     id: 'qwen',
     label: 'DashScope / Qwen',
@@ -185,12 +192,12 @@ const USER_MODEL_PRESETS = [
   },
   {
     id: 'ollama',
-    label: 'Ollama 本机',
+    label: 'Ollama 网关',
     modelHint: 'qwen2.5:7b',
-    description: '本机开发可用。Docker 内运行 API 时，通常要把 127.0.0.1 改成 host.docker.internal。',
+    description: '需要填写已部署的公网 HTTPS 网关地址和网关令牌；当前不支持直接连接本机 HTTP 地址。模型名按 Ollama 实例设置。',
     values: {
-      display_name: 'Local Ollama',
-      base_url: 'http://127.0.0.1:11434/v1',
+      display_name: 'Ollama Model',
+      base_url: '',
       chat_model: 'qwen2.5:7b',
       supports_image: false,
       supports_document: true,
@@ -276,29 +283,43 @@ function UserModelsPanel({
   const [editForm, setEditForm] = useState(null);
   const [probedModels, setProbedModels] = useState([]);
   const [probing, setProbing] = useState(false);
+  const formVersion = useRef(0);
+  const modelProbeVersion = useRef(0);
   const activePreset = USER_MODEL_PRESET_MAP[form.preset_id] || USER_MODEL_PRESET_MAP.custom;
   const formReady = Boolean(form.display_name.trim() && form.base_url.trim() && form.chat_model.trim() && form.api_key.trim());
   const canSaveForm = formReady && draftTestResult?.ok;
   const imageProbeStatus = imageCapabilityFromTest(form, draftTestResult);
 
   function updateForm(patch) {
+    formVersion.current += 1;
+    if ('base_url' in patch || 'api_key' in patch || 'provider' in patch) resetModelProbe();
     setDraftTestResult(null);
     setForm((current) => ({ ...current, ...patch }));
   }
 
+  function resetModelProbe() {
+    modelProbeVersion.current += 1;
+    setProbedModels([]);
+    setProbing(false);
+  }
+
   function applyPreset(presetId) {
+    formVersion.current += 1;
+    resetModelProbe();
     const preset = USER_MODEL_PRESET_MAP[presetId] || USER_MODEL_PRESET_MAP.custom;
     setDraftTestResult(null);
     setForm((current) => ({
       ...current,
       ...preset.values,
-      provider: 'openai-compatible',
+      provider: preset.values.provider || 'openai-compatible',
       preset_id: preset.id,
       api_key: current.api_key || '',
     }));
   }
 
   function openCreateForm() {
+    formVersion.current += 1;
+    resetModelProbe();
     setForm(createUserModelForm());
     setDraftTestResult(null);
     setNotice('');
@@ -308,6 +329,8 @@ function UserModelsPanel({
 
   function closeCreateForm() {
     if (saving || draftTesting) return;
+    formVersion.current += 1;
+    resetModelProbe();
     setFormOpen(false);
     setDraftTestResult(null);
   }
@@ -331,6 +354,7 @@ function UserModelsPanel({
 
   async function submitUserModel(event) {
     event.preventDefault();
+    if (!canSaveForm || saving || draftTesting) return;
     setSaving(true);
     setNotice('');
     setProfileError('');
@@ -348,15 +372,16 @@ function UserModelsPanel({
   }
 
   async function testDraftModel() {
+    const version = formVersion.current;
     setDraftTesting(true);
     setNotice('');
     setProfileError('');
     setDraftTestResult(null);
     try {
       const result = await testUserModelDraft({ ...userModelFormPayload(form, { includeApiKey: true }), detect_image: true });
-      setDraftTestResult(result);
+      if (version === formVersion.current) setDraftTestResult(result);
     } catch (err) {
-      setProfileError(errorMessage(err));
+      if (version === formVersion.current) setProfileError(errorMessage(err));
     } finally {
       setDraftTesting(false);
     }
@@ -367,16 +392,20 @@ function UserModelsPanel({
       setNotice('请先填写 base_url 和 api_key');
       return;
     }
+    const version = ++modelProbeVersion.current;
     setProbing(true);
+    setProbedModels([]);
+    setProfileError('');
     setNotice('');
     try {
-      const result = await probeUserModels({ base_url: form.base_url, api_key: form.api_key });
+      const result = await probeUserModels({ provider: form.provider, base_url: form.base_url, api_key: form.api_key });
+      if (version !== modelProbeVersion.current) return;
       setProbedModels(result.models || []);
       if (!result.ok) setNotice(result.message || '拉取模型列表失败');
     } catch (err) {
-      setProfileError(errorMessage(err));
+      if (version === modelProbeVersion.current) setProfileError(errorMessage(err));
     } finally {
-      setProbing(false);
+      if (version === modelProbeVersion.current) setProbing(false);
     }
   }
 
@@ -530,6 +559,13 @@ function UserModelsPanel({
                   </div>
                   <div className="user-model-grid compact">
                     <label className="field-stack">
+                      <span>连接协议</span>
+                      <select value={form.provider} onChange={(event) => updateForm({ provider: event.target.value, preset_id: 'custom' })}>
+                        <option value="openai-compatible">OpenAI-compatible（Chat Completions）</option>
+                        <option value="anthropic">Anthropic（Messages）</option>
+                      </select>
+                    </label>
+                    <label className="field-stack">
                       <span>显示名称</span>
                        <input value={form.display_name} onChange={(event) => updateForm({ display_name: event.target.value, preset_id: form.preset_id || 'custom' })} placeholder="Qwen Plus" />
                     </label>
@@ -544,7 +580,7 @@ function UserModelsPanel({
                     <label className="field-stack">
                       <span>chat_model</span>
                       <div className="chat-model-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                        <input value={form.chat_model} onChange={(event) => updateForm({ chat_model: event.target.value, preset_id: form.preset_id || 'custom' })} placeholder="qwen-plus" list="probed-models" style={{ flex: 1 }} />
+                        <input value={form.chat_model} onChange={(event) => updateForm({ chat_model: event.target.value, preset_id: form.preset_id || 'custom' })} placeholder={form.provider === 'anthropic' ? '选择或填写模型 ID' : 'qwen-plus'} list="probed-models" style={{ flex: 1 }} />
                         <datalist id="probed-models">
                           {probedModels.map((m) => <option key={m} value={m} />)}
                         </datalist>
@@ -590,6 +626,7 @@ function UserModelsPanel({
                 <strong>{config.display_name || config.chat_model}</strong>
                 <small>{config.chat_model} · {config.base_url}</small>
                 <div className="model-row-tags">
+                  <span>{config.provider === 'anthropic' ? 'Anthropic Messages' : 'OpenAI-compatible'}</span>
                   <span className={config.enabled ? 'enabled' : ''}>{config.enabled ? '启用' : '停用'}</span>
                   <span className={config.is_default ? 'enabled' : ''}>{config.is_default ? '默认' : '非默认'}</span>
                   <span>{config.has_api_key ? 'Key 已保存' : '缺少 Key'}</span>
@@ -637,6 +674,13 @@ function UserModelsPanel({
                   <small>测试连接会检查 chat 和图片请求；运行参数由具体智能体决定。</small>
                 </div>
                 <div className="user-model-grid compact">
+                  <label className="field-stack">
+                    <span>连接协议</span>
+                    <select value={editForm.provider} onChange={(event) => updateEditForm({ provider: event.target.value })}>
+                      <option value="openai-compatible">OpenAI-compatible（Chat Completions）</option>
+                      <option value="anthropic">Anthropic（Messages）</option>
+                    </select>
+                  </label>
                   <label className="field-stack">
                     <span>显示名称</span>
                     <input value={editForm.display_name} onChange={(event) => updateEditForm({ display_name: event.target.value })} />
@@ -867,6 +911,13 @@ function ModelAdminPanel({ createModelConfig, deleteModelConfig, models, request
                   <span>普通管理员只需要确认名称、能力预设和启用状态。</span>
                 </div>
                 <div className="model-basic-grid">
+                  <label className="field-stack">
+                    <span>连接协议</span>
+                    <select value={form.provider} onChange={(event) => setForm({ ...form, provider: event.target.value })}>
+                      <option value="openai-compatible">OpenAI-compatible</option>
+                      <option value="anthropic">Anthropic Messages（使用服务器 Anthropic 配置）</option>
+                    </select>
+                  </label>
                   <label className="field-stack">
                     <span>显示名称</span>
                     <input value={form.display_name} onChange={(event) => setForm({ ...form, display_name: event.target.value })} placeholder="Qwen Plus" />

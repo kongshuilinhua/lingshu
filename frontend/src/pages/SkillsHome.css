@@ -1,0 +1,4 @@
+.skills-home .skill-source { min-height: 300px; font-family: Consolas, monospace; font-size: 13px; line-height: 1.6; }
+.skill-file-list { display: grid; gap: 8px; padding: 14px; border: 1px solid #dfe8e1; border-radius: 10px; }
+.skill-file-list span { font-size: 12px; color: #66766c; overflow-wrap: anywhere; }
+.skill-binding-version { width: 100%; margin: 8px 0; padding: 8px; border: 1px solid #dfe8e1; border-radius: 8px; background: #fff; }

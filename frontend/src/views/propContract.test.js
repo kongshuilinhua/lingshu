@@ -89,4 +89,19 @@ describe('prop 链契约', () => {
     const missing = [...required].filter((name) => !provided.has(name));
     expect(missing, `builderProps 未提供：${missing.join(', ')}`).toEqual([]);
   });
+
+  it('HomeView 解构的每个 prop 都有上游供给', () => {
+    const required = destructuredProps(mainSource, 'HomeView');
+    const provided = providedKeys(mainSource, 'shellProps');
+    expect([...required].filter((name) => !provided.has(name))).toEqual([]);
+  });
+
+  it('模型页面使用的变量都由 HomeView 接收，避免切换页面时崩溃', () => {
+    const modelPage = mainSource.match(/<UserModelsHome\b([\s\S]*?)\/>/)?.[1];
+    expect(modelPage).toBeTruthy();
+    const references = [...modelPage.matchAll(/=\{([A-Za-z_$][\w$]*)\}/g)].map((match) => match[1]);
+    expect(references.length).toBeGreaterThan(10);
+    const received = destructuredProps(mainSource, 'HomeView');
+    expect(references.filter((name) => !received.has(name))).toEqual([]);
+  });
 });

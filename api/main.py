@@ -50,6 +50,8 @@ from api.routes.models import router as models_router
 from api.routes.prompts import router as prompts_router
 from api.routes.admin import router as admin_router
 from api.routes.chat import router as chat_router
+from api.routes.mcp import router as mcp_router
+from api.routes.skills import router as skills_router
 from api.routes.search import router as search_router
 
 # ── 应用初始化 ────────────────────────────────────────────
@@ -159,6 +161,13 @@ def startup() -> None:
     except Exception as exc:
         startup_error = str(exc)[:500]
         logger.exception("Database initialization failed; API started in degraded mode")
+
+
+@app.on_event("shutdown")
+def shutdown_mcp_clients() -> None:
+    from core.integrations.mcp_client import close_all_mcp_clients
+
+    close_all_mcp_clients()
 
 
 # ── 健康检查 ──────────────────────────────────────────────
@@ -337,4 +346,6 @@ app.include_router(models_router)
 app.include_router(prompts_router)
 app.include_router(admin_router)
 app.include_router(chat_router)
+app.include_router(mcp_router)
+app.include_router(skills_router)
 app.include_router(search_router)

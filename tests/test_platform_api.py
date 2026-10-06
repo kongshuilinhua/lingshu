@@ -955,7 +955,7 @@ def test_tool_crud_http_security_and_secret_redaction(client, auth_headers):
         json={"type": "http", "name": "insecure", "label": "Insecure", "url": "http://example.com"},
     )
     assert insecure.status_code == 400
-    assert insecure.json()["detail"] == "HTTP tools require an HTTPS URL"
+    assert insecure.json()["detail"] == "Public HTTPS URL required"
 
     blocked = client.post(
         "/api/tools",
@@ -1003,7 +1003,7 @@ def test_tool_access_binding_runtime_and_tool_call_events(client, auth_headers):
     assert test_result.json()["ok"] is True
     assert test_result.json()["tool_type"] == "builtin_search"
 
-    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Tool Agent", "tool_ids": [tool_id]})
+    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Tool Agent", "tool_ids": [tool_id], "tool_policy": {"web_search_enabled": True}})
     assert agent.status_code == 200
     assert agent.json()["agent"]["tools"][0]["id"] == tool_id
     assert "encrypted_secret" not in agent.text
@@ -2315,7 +2315,7 @@ def test_document_attachment_and_rag_toggle(client, auth_headers):
     assert "attachment-token" in response.text
 
 
-def test_chat_web_search_toggle_emits_status_and_injects_sources(client, auth_headers):
+def test_agent_web_search_setting_emits_status_and_injects_sources(client, auth_headers):
     from core.services import web_search
 
     def fake_search(query, *, top_k=None, timeout_seconds=None):
@@ -2333,21 +2333,21 @@ def test_chat_web_search_toggle_emits_status_and_injects_sources(client, auth_he
         }
 
     web_search.search_web = fake_search
-    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Search Agent"})
+    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Search Agent", "tool_policy": {"web_search_enabled": True}})
     agent_id = agent.json()["agent"]["id"]
 
     response = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=auth_headers,
-        json={"message": "search current lingshu", "mode": "draft", "search_enabled": True, "rag_enabled": False},
+        json={"message": "search current lingshu", "mode": "draft", "rag_enabled": False},
     )
 
     assert response.status_code == 200
     status_events = _sse_payloads(response.text, "search_status")
     assert status_events
     assert status_events[0]["enabled"] is True
-    assert status_events[0]["matched_results"] == 1
-    assert status_events[0]["items"][0]["url"] == "https://example.com/lingshu-search"
+    assert status_events[-1]["matched_results"] == 1
+    assert status_events[-1]["items"][0]["url"] == "https://example.com/lingshu-search"
     assert "event: sources" in response.text
     assert "Web search results for this turn" in response.text
     run_steps = _sse_payloads(response.text, "run_step")
@@ -2358,6 +2358,20 @@ def test_chat_web_search_toggle_emits_status_and_injects_sources(client, auth_he
     assert llm_step["output"]["search_result_count"] == 1
 
 
+def test_agent_search_setting_is_persisted_and_published_snapshot_is_fixed(client, auth_headers):
+    created = client.post('/api/agents', headers=auth_headers, json={'name': 'Search config', 'tool_policy': {'web_search_enabled': True}})
+    aid = created.json()['agent']['id']
+    assert client.get(f'/api/agents/{aid}', headers=auth_headers).json()['agent']['tool_policy']['web_search_enabled'] is True
+    client.post(f'/api/agents/{aid}/publish', headers=auth_headers)
+    client.patch(f'/api/agents/{aid}', headers=auth_headers, json={'tool_policy': {'web_search_enabled': False}})
+    assert client.get(f'/api/agents/{aid}', headers=auth_headers).json()['agent']['tool_policy']['web_search_enabled'] is False
+    from core.db.models import Agent, AgentVersion
+    from core.db.session import SessionLocal
+    with SessionLocal() as db:
+        agent = db.get(Agent, aid)
+        assert db.get(AgentVersion, agent.published_version_id).snapshot['tool_policy']['web_search_enabled'] is True
+
+
 def test_chat_web_search_off_does_not_call_provider(client, auth_headers):
     from core.services import web_search
 
@@ -2365,7 +2379,7 @@ def test_chat_web_search_off_does_not_call_provider(client, auth_headers):
         raise AssertionError("search provider should not be called")
 
     web_search.search_web = forbidden_search
-    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Search Off Agent"})
+    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Search Off Agent", "tool_policy": {"web_search_enabled": True}})
     agent_id = agent.json()["agent"]["id"]
 
     response = client.post(
