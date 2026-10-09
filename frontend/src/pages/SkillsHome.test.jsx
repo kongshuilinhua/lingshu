@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { SkillsHome } from './SkillsHome.jsx';
 import { SkillBindingPanel } from '../components/SkillBindingPanel.jsx';
 import { api } from '../lib/api.js';
+import { UnsavedChangesProvider } from '../components/UnsavedChanges.jsx';
 
 vi.mock('../lib/api.js', () => ({ api: vi.fn() }));
 beforeEach(() => { api.mockReset(); });
@@ -11,6 +12,43 @@ const skill = { id: 1, name: '周报', slug: 'weekly-report', description: '整�
   current_version_id: 12, versions: [{ id: 12, version: 2 }, { id: 11, version: 1 }], can_edit: true };
 
 describe('Skill 管理及绑定', () => {
+  it('切换版本先确认未保存内容，取消保留输入，放弃后加载新版本并清理修改状态', async () => {
+    api.mockImplementation(async (path) => path === '/api/skills' ? { items: [skill] }
+      : { version: { source: path.endsWith('/12') ? '第二版说明' : '第一版说明', scripts_approved: false, files: [] } });
+    render(<UnsavedChangesProvider><SkillsHome token="test" canManage mode="mine" /></UnsavedChangesProvider>);
+    await screen.findByText('周报');
+    fireEvent.click(screen.getByRole('button', { name: '编辑', exact: true }));
+    await screen.findByDisplayValue('第二版说明');
+    fireEvent.change(screen.getByLabelText('SKILL.md'), { target: { value: '未保存的新内容' } });
+    fireEvent.change(screen.getByLabelText('查看版本'), { target: { value: '11' } });
+    expect(screen.getByRole('dialog', { name: '有未保存的修改' })).toBeInTheDocument();
+    expect(api).not.toHaveBeenCalledWith('/api/skills/1/versions/11', expect.anything());
+    fireEvent.click(screen.getByRole('button', { name: '继续编辑' }));
+    expect(screen.getByLabelText('SKILL.md')).toHaveValue('未保存的新内容');
+    expect(screen.getByLabelText('查看版本')).toHaveValue('12');
+    fireEvent.change(screen.getByLabelText('查看版本'), { target: { value: '11' } });
+    fireEvent.click(screen.getByRole('button', { name: '放弃修改' }));
+    await screen.findByDisplayValue('第一版说明');
+    fireEvent.click(screen.getByRole('button', { name: '关闭 Skill 配置' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+  it('放弃修改后版本加载失败时仍还原原内容，避免把未保存内容标成已保存', async () => {
+    api.mockImplementation(async (path) => {
+      if (path === '/api/skills') return { items: [skill] };
+      if (path.endsWith('/11')) throw new Error('版本加载失败');
+      return { version: { source: '原版本说明', scripts_approved: false, files: [] } };
+    });
+    render(<UnsavedChangesProvider><SkillsHome token="test" canManage mode="mine" /></UnsavedChangesProvider>);
+    await screen.findByText('周报');
+    fireEvent.click(screen.getByRole('button', { name: '编辑', exact: true }));
+    await screen.findByDisplayValue('原版本说明');
+    fireEvent.change(screen.getByLabelText('SKILL.md'), { target: { value: '未保存的修改' } });
+    fireEvent.change(screen.getByLabelText('查看版本'), { target: { value: '11' } });
+    fireEvent.click(screen.getByRole('button', { name: '放弃修改' }));
+    expect((await screen.findAllByText('版本加载失败')).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('SKILL.md')).toHaveValue('原版本说明');
+    expect(screen.getByLabelText('查看版本')).toHaveValue('12');
+  });
   it('支持创建 SKILL.md，显示元数据按需加载说明', async () => {
     api.mockResolvedValue({ items: [] });
     render(<SkillsHome token="test" canManage mode="mine" />);

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useUnsavedForm } from './UnsavedChanges.jsx';
 import { X, Plus, Save } from 'lucide-react';
 
 export function KnowledgeBaseDialog({
@@ -13,10 +14,13 @@ export function KnowledgeBaseDialog({
   savingText = "创建中...",
   isEdit = false
 }) {
+  const guard = useUnsavedForm({ value: form, label: title, busy: saving,
+    onSave: async () => form.name.trim() ? onSubmit({ preventDefault() {} }) : false });
+  const close = () => guard.confirmLeave(onCancel);
   return (
     <div className="profile-dialog-backdrop">
       <section className="resource-form-dialog knowledge-base-dialog" role="dialog" aria-modal="true" aria-label={title} onClick={(event) => event.stopPropagation()}>
-        <button className="profile-dialog-close" type="button" title="关闭" aria-label="关闭知识库表单" onClick={onCancel} disabled={saving}>
+        <button className="profile-dialog-close" type="button" title="关闭" aria-label="关闭知识库表单" onClick={close} disabled={saving}>
           <X size={16} />
         </button>
         <header className="model-dialog-heading">
@@ -33,7 +37,7 @@ export function KnowledgeBaseDialog({
             <textarea value={form.description} onChange={(event) => onChange({ ...form, description: event.target.value })} placeholder="说明知识库内容、适用智能体或维护范围" />
           </label>
           <footer className="dialog-actions">
-            <button type="button" onClick={onCancel} disabled={saving}>取消</button>
+            <button type="button" onClick={close} disabled={saving}>取消</button>
             <button className="primary-model-action" type="submit" disabled={saving || !form.name.trim()}>
               {isEdit ? <Save size={15} /> : <Plus size={15} />}
               {saving ? savingText : submitText}

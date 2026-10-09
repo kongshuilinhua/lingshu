@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useUnsavedForm } from './UnsavedChanges.jsx';
 import { Check, CircleAlert, PlugZap, RefreshCw, Settings2 } from 'lucide-react';
 import { api } from '../lib/api.js';
 import './McpBindingPanel.css';
@@ -12,6 +13,7 @@ export function McpBindingPanel({ agentId, token, canEdit, onOpenMarket }) {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const generation = useRef(0);
+  const savedBindings = useRef([]);
 
   useEffect(() => {
     const current = ++generation.current;
@@ -31,6 +33,7 @@ export function McpBindingPanel({ agentId, token, canEdit, onOpenMarket }) {
       if (!live) return;
       setServers(serverData.items || []);
       setBindings(bindingData.items || []);
+      savedBindings.current = bindingData.items || [];
       setDirty(false);
     }).catch((err) => live && setError(err.message || 'MCP 配置加载失败'))
       .finally(() => live && setLoading(false));
@@ -53,6 +56,22 @@ export function McpBindingPanel({ agentId, token, canEdit, onOpenMarket }) {
     setError('');
   }
 
+  function toggleAll(serverId, tools) {
+    const names = [...new Set(tools.map((tool) => tool.name))];
+    const existing = bindings.find((item) => item.server_id === serverId);
+    const selected = new Set(existing?.selected_tools || []);
+    const allSelected = names.every((name) => selected.has(name));
+    const remaining = bindings.filter((item) => item.server_id !== serverId);
+    if (!allSelected && (remaining.length >= 20 || remaining.reduce((total, item) => total + item.selected_tools.length, 0) + names.length > 400)) {
+      setError('每个智能体最多绑定 20 个 MCP 服务、400 个工具，请先减少其他选择。');
+      return;
+    }
+    setBindings(allSelected ? remaining : [...remaining, { server_id: serverId, selected_tools: names, enabled: true }]);
+    setDirty(true);
+    setMessage('');
+    setError('');
+  }
+
   async function save() {
     const current = generation.current;
     setSaving(true);
@@ -63,14 +82,23 @@ export function McpBindingPanel({ agentId, token, canEdit, onOpenMarket }) {
       });
       if (generation.current !== current) return;
       setBindings(response.items || []);
+      savedBindings.current = response.items || [];
+      bindingGuard.markSaved();
       setDirty(false);
       setMessage('MCP 工具配置已保存。');
+      return true;
     } catch (err) {
       if (generation.current === current) setError(err.message || '保存失败');
+      return false;
     } finally {
       if (generation.current === current) setSaving(false);
     }
   }
+
+  const bindingGuard = useUnsavedForm({ label: 'MCP 工具选择', enabled: canEdit && !loading, busy: saving,
+    value: [...bindings].map((binding) => ({ server_id: binding.server_id, enabled: binding.enabled !== false,
+      selected_tools: [...(binding.selected_tools || [])].sort() })).sort((a, b) => a.server_id - b.server_id), onSave: save,
+    onDiscard: () => { setBindings(savedBindings.current); setDirty(false); } });
 
   return <section className="mcp-binding-panel">
     <div className="mcp-binding-header">
@@ -86,9 +114,12 @@ export function McpBindingPanel({ agentId, token, canEdit, onOpenMarket }) {
       {servers.filter((server) => server.enabled).map((server) => {
         const tools = server.catalog?.tools || [];
         const selected = new Set(bindings.find((item) => item.server_id === server.id)?.selected_tools || []);
+        const selectedAvailable = tools.filter((tool) => selected.has(tool.name)).length;
+        const allSelected = tools.length > 0 && selectedAvailable === tools.length;
         return <details className="mcp-binding-service" key={server.id} open={selected.size > 0 || undefined}>
           <summary><span className="mcp-binding-service-mark">{server.name.slice(0, 1).toUpperCase()}</span><span className="mcp-binding-service-name"><strong>{server.name}</strong><small>{server.transport === 'stdio' ? '本地服务' : '远程服务'} · {tools.length} 个工具</small></span><span className="mcp-binding-selected">{selected.size ? `已选 ${selected.size}` : '未选择'}</span></summary>
           <div className="mcp-binding-tools">
+            {tools.length > 0 && <div className="mcp-binding-bulk"><span>已选 {selectedAvailable} / {tools.length}</span><button type="button" aria-label={`${allSelected ? '取消全选' : '全选'} ${server.name} 工具`} disabled={!canEdit || saving} onClick={() => toggleAll(server.id, tools)}>{allSelected ? '取消全选' : '全选'}</button></div>}
             {tools.length ? tools.map((tool) => <label key={tool.name} className="mcp-binding-tool">
               <input type="checkbox" disabled={!canEdit || saving} checked={selected.has(tool.name)} onChange={() => toggleTool(server.id, tool.name)} />
               <span><strong>{tool.title || tool.name}</strong><small>{tool.description || tool.name}</small></span>

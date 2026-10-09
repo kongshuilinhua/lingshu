@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
 import { Boxes, Check, ChevronDown, ChevronRight, CircleAlert, ExternalLink, KeyRound, Plus, RefreshCw, Search, Server, ShieldCheck, Trash2, X } from 'lucide-react';
 import { api } from '../lib/api.js';
 import { parseStdioConfigs } from '../lib/mcpConfig.js';
@@ -140,7 +141,7 @@ export function McpResourceCatalog({ token, canManage, onCatalogChange, mode = '
   }
 
   async function save(event) {
-    event.preventDefault();
+    event?.preventDefault();
     setError('');
     setWorkingId('save');
     try {
@@ -187,11 +188,14 @@ export function McpResourceCatalog({ token, canManage, onCatalogChange, mode = '
         await api('/api/mcp/servers', { token, method: 'POST', body: payload });
         setNotice('服务已接入工作区。检测连接后即可在智能体中选择工具。');
       }
-      await refresh();
+      formGuard.markSaved();
       setDrawerOpen(false);
       if (!editingId) onConnected?.();
+      await refresh().catch((err) => setError(`配置已保存，目录刷新失败：${err.message}`));
+      return true;
     } catch (err) {
       setError(err.message || '保存失败');
+      return false;
     } finally {
       setWorkingId(null);
     }
@@ -264,6 +268,14 @@ export function McpResourceCatalog({ token, canManage, onCatalogChange, mode = '
   }
 
   const selectedTemplate = templates.find((item) => item.id === form.template_id);
+  const editFormRef = useRef(null);
+  const formGuard = useUnsavedForm({ enabled: drawerOpen, value: { form, importJson }, label: 'MCP 服务配置',
+    busy: workingId != null, onSave: async () => {
+      if (importJson.trim()) { setError('请先导入配置 JSON，再保存。'); return false; }
+      if (!editFormRef.current?.reportValidity()) return false;
+      return save();
+    } });
+  const closeForm = () => formGuard.confirmLeave(() => setDrawerOpen(false));
   const githubRemote = (() => { try { return new URL(form.url).hostname === 'api.githubcopilot.com'; } catch { return false; } })();
 
   return (
@@ -350,10 +362,10 @@ export function McpResourceCatalog({ token, canManage, onCatalogChange, mode = '
         )}
       </section>
 
-      {drawerOpen && <div className="mcp-drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setDrawerOpen(false); }}>
+      {drawerOpen && <div className="mcp-drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeForm(); }}>
         <aside className="mcp-drawer" role="dialog" aria-modal="true" aria-label={editingId ? '编辑 MCP 服务' : '登记 MCP 服务'}>
-          <div className="mcp-drawer-head"><div><span className="mcp-section-kicker">REGISTER</span><h2>{editingId ? '编辑服务' : '登记 MCP 服务'}</h2></div><button type="button" aria-label="关闭" onClick={() => setDrawerOpen(false)}><X size={19} /></button></div>
-          <form onSubmit={save} className="mcp-form">
+          <div className="mcp-drawer-head"><div><span className="mcp-section-kicker">REGISTER</span><h2>{editingId ? '编辑服务' : '登记 MCP 服务'}</h2></div><button type="button" aria-label="关闭" onClick={closeForm} disabled={workingId != null}><X size={19} /></button></div>
+          <form ref={editFormRef} onSubmit={save} className="mcp-form">
             <label>服务名称<input required maxLength={120} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：知识库检索" /></label>
             <label>简介<textarea maxLength={2000} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="告诉团队它能完成什么" /></label>
             <label>分类<input maxLength={80} value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder="开发 / 数据 / 办公" /></label>
@@ -397,7 +409,7 @@ export function McpResourceCatalog({ token, canManage, onCatalogChange, mode = '
             </>}
             {canManage && <label className="mcp-check"><input type="checkbox" checked={form.is_listed} onChange={(event) => setForm({ ...form, is_listed: event.target.checked })} /><span>在当前工作区共享，供其他成员的智能体选择</span></label>}
             {error && <p className="mcp-alert"><CircleAlert size={16} />{error}</p>}
-            <div className="mcp-form-actions"><button type="button" onClick={() => setDrawerOpen(false)}>取消</button><button type="submit" className="mcp-primary" disabled={workingId != null || (form.transport === 'stdio' && (!canManage || (!editingId && !(form.stdio_source === 'custom' && connectionOptions.can_configure_stdio) && !selectedTemplate)))}>{workingId === 'save' ? '保存中…' : editingId ? '保存修改' : '登记服务'}</button></div>
+            <div className="mcp-form-actions"><button type="button" disabled={workingId != null} onClick={closeForm}>取消</button><button type="submit" className="mcp-primary" disabled={workingId != null || (form.transport === 'stdio' && (!canManage || (!editingId && !(form.stdio_source === 'custom' && connectionOptions.can_configure_stdio) && !selectedTemplate)))}>{workingId === 'save' ? '保存中…' : editingId ? '保存修改' : '登记服务'}</button></div>
           </form>
         </aside>
       </div>}

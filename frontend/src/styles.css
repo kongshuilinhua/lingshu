@@ -3499,6 +3499,41 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .composer-action-right {
   flex: 0 0 auto;
 }
+.composer-model-picker {
+  position: relative;
+  min-width: 0;
+  max-width: min(230px, 100%);
+  color: #344054;
+}
+.composer-model-picker select {
+  appearance: none;
+  width: 100%;
+  height: 30px;
+  padding: 0 28px 0 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 16px;
+  background: #f9fafb;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.composer-model-picker select:focus-visible {
+  outline: 2px solid var(--primary, #6255ff);
+  outline-offset: 2px;
+}
+.composer-model-picker select:disabled { cursor: wait; opacity: .55; }
+.composer-model-picker svg {
+  position: absolute;
+  right: 10px;
+  top: 9px;
+  pointer-events: none;
+}
+.confirm-dialog-backdrop.unsaved-backdrop { z-index: 10000; }
+.confirm-dialog.unsaved-dialog header { display: block; }
+.confirm-dialog.unsaved-dialog header > div { min-width: 0; width: auto; }
+.confirm-dialog.unsaved-dialog footer { flex-wrap: wrap; }
 .rich-composer .attachment-button,
 .rich-composer .composer-icon-button,
 .rich-composer .composer-send-button {

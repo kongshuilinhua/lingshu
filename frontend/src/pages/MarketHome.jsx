@@ -5,6 +5,7 @@ import { McpResourceCatalog } from './McpResourceCatalog.jsx';
 import { ResourceLibraryHome } from './ResourceLibraryHome.jsx';
 import { SkillsHome } from './SkillsHome.jsx';
 import './MarketHome.css';
+import { useUnsavedNavigation } from '../components/UnsavedChanges.jsx';
 
 const MARKET_SECTIONS = [
   { id: 'agents', label: '智能体', description: '复用已发布的智能体', icon: Bot, scopes: ['discover'] },
@@ -17,6 +18,7 @@ const MARKET_SECTIONS = [
 
 export function MarketHome({ agents, canManage, copyMarketAgent, marketTab, setMarketTab,
   marketScope = 'discover', setMarketScope, resourcesProps, token }) {
+  const confirmNavigation = useUnsavedNavigation();
   function changeScope(scope) {
     setMarketScope(scope);
     if (!MARKET_SECTIONS.some((item) => item.id === marketTab && item.scopes.includes(scope))) {
@@ -32,8 +34,8 @@ export function MarketHome({ agents, canManage, copyMarketAgent, marketTab, setM
       </header>
 
       <nav className="market-scopes" aria-label="资源视图">
-        <button type="button" className={marketScope === 'discover' ? 'active' : ''} aria-pressed={marketScope === 'discover'} onClick={() => changeScope('discover')}>发现</button>
-        <button type="button" className={marketScope === 'mine' ? 'active' : ''} aria-pressed={marketScope === 'mine'} onClick={() => changeScope('mine')}>我的资源</button>
+        <button type="button" className={marketScope === 'discover' ? 'active' : ''} aria-pressed={marketScope === 'discover'} onClick={() => marketScope !== 'discover' && confirmNavigation(() => changeScope('discover'))}>发现</button>
+        <button type="button" className={marketScope === 'mine' ? 'active' : ''} aria-pressed={marketScope === 'mine'} onClick={() => marketScope !== 'mine' && confirmNavigation(() => changeScope('mine'))}>我的资源</button>
       </nav>
 
       <nav className="market-sections" aria-label="市场分类">
@@ -44,7 +46,7 @@ export function MarketHome({ agents, canManage, copyMarketAgent, marketTab, setM
             className={`market-section ${marketTab === id ? 'active' : ''}`}
             aria-current={marketTab === id ? 'page' : undefined}
             disabled={disabled}
-            onClick={() => setMarketTab(id)}
+            onClick={() => marketTab !== id && confirmNavigation(() => setMarketTab(id))}
           >
             <span className="market-section-icon"><Icon size={19} strokeWidth={1.8} /></span>
             <span className="market-section-copy"><strong>{label}</strong><small>{disabled ? '即将开放' : description}</small></span>

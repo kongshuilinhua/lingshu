@@ -1,14 +1,18 @@
 import React from 'react';
+import { useUnsavedForm } from './UnsavedChanges.jsx';
 import { X, Check } from 'lucide-react';
 
 export function PromptTemplateDialog({ editingTemplate, form, onCancel, onChange, onSubmit, saving }) {
   const title = editingTemplate ? '编辑我的模板' : '新建我的模板';
   const submitLabel = editingTemplate ? '保存修改' : '保存模板';
+  const guard = useUnsavedForm({ value: form, label: '提示词模板', busy: saving,
+    onSave: () => form.title.trim() && form.content.trim() ? onSubmit({ preventDefault() {} }) : false });
+  const close = () => guard.confirmLeave(onCancel);
 
   return (
     <div className="profile-dialog-backdrop">
       <section className="resource-form-dialog prompt-template-dialog" role="dialog" aria-modal="true" aria-label={title} onClick={(event) => event.stopPropagation()}>
-        <button className="profile-dialog-close" type="button" title="关闭" aria-label="关闭模板表单" onClick={onCancel} disabled={saving}>
+        <button className="profile-dialog-close" type="button" title="关闭" aria-label="关闭模板表单" onClick={close} disabled={saving}>
           <X size={16} />
         </button>
         <header className="model-dialog-heading">
@@ -43,7 +47,7 @@ export function PromptTemplateDialog({ editingTemplate, form, onCancel, onChange
             启用
           </label>
           <footer className="dialog-actions">
-            <button type="button" onClick={onCancel} disabled={saving}>取消</button>
+            <button type="button" onClick={close} disabled={saving}>取消</button>
             <button className="primary-model-action" type="submit" disabled={saving || !form.title.trim() || !form.content.trim()}>
               <Check size={15} />{saving ? '保存中...' : submitLabel}
             </button>

@@ -24,6 +24,7 @@ LIGHTWEIGHT_PYTEST_TARGETS = [
     "tests/test_mcp_sdk_client.py",
     "tests/test_mcp_registry.py",
     "tests/test_skills_dynamic.py",
+    "tests/test_conversation_context.py",
     "tests/test_skills_api.py",
     "tests/test_agent_search_config.py",
     "tests/test_mcp_api.py",

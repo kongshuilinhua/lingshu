@@ -109,8 +109,10 @@ def test_existing_tools_with_control_names_remain_callable(skill_db, name, dynam
     exposed = router.tools()
     assert len({tool.name for tool in exposed}) == len(exposed)
     if dynamic:
-        assert SEARCH_TOOL in exposed
-        assert exposed[0].name not in {'tool_search', 'load_skill', 'read_skill_file', 'run_skill_script'}
+        assert LOAD_SKILL in exposed
+        assert SEARCH_TOOL not in exposed
+        if name != 'tool_search':
+            assert exposed[0].name not in {'load_skill', 'read_skill_file', 'run_skill_script'}
     assert router.invoke(exposed[0], {'text': 'hello'})['content'] == 'resource result'
     assert calls == [(ordinary, {'text': 'hello'})]
 
@@ -120,6 +122,47 @@ def test_nonfinite_skill_metadata_is_rejected(value):
     source = SOURCE.replace('description: Generate weekly reports', f'description: Generate weekly reports\ncustom: {value}')
     with pytest.raises(ValueError, match='JSON'):
         skills.parse_instructions(source)
+
+
+@pytest.mark.parametrize('query', ['看看我的仓库', '我的仓库', 'list repositories', 'GitHub', 'authenticated user', 'get_me'])
+def test_tool_search_finds_identity_and_repository_capabilities(skill_db, monkeypatch, query):
+    db, member, agent = skill_db
+    definitions = [
+        {'name': 'get_me', 'description': 'Get details of the authenticated GitHub user.', 'annotations': {'readOnlyHint': True}, 'inputSchema': {'type': 'object'}},
+        {'name': 'search_repositories', 'description': 'Find GitHub repositories by name or metadata.', 'annotations': {'readOnlyHint': True}, 'inputSchema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},
+        *[{'name': f'add_comment_{index}', 'description': 'Add a comment to a GitHub repository.', 'inputSchema': {'type': 'object', 'required': ['owner', 'repo']}} for index in range(47)],
+        {'name': 'hidden_tool', 'description': 'Hidden repository tool', 'inputSchema': {'type': 'object'}},
+    ]
+    server = McpServer(workspace_id=member.workspace_id, created_by=member.user_id, name='g', transport='streamable_http', is_listed=False,
+                       url='https://api.githubcopilot.com/mcp/', catalog={'tools': definitions})
+    db.add(server)
+    db.commit()
+    import core.integrations.mcp_client as mcp_client
+    monkeypatch.setattr(mcp_client, 'get_mcp_client', lambda *args: pytest.fail('Discovery must not connect to MCP'))
+    runtime = SimpleNamespace(id=agent.id, workspace_id=member.workspace_id, settings={}, skill_bindings=[], tool_ids=[],
+                              mcp_bindings=[{'server_id': server.id, 'selected_tools': [item['name'] for item in definitions[:-1]]}])
+    candidates = WorkflowRunner(db)._runtime_tools(runtime, {'type': 'Tool'})
+    router = CapabilityRouter(db, runtime, {'user_id': member.user_id}, candidates)
+    metadata = router.mcp_metadata()
+    assert metadata == [{'id': server.id, 'name': 'g', 'description': '', 'host': 'api.githubcopilot.com', 'tool_count': 49}]
+    assert 'inputSchema' not in json.dumps(metadata)
+    assert 'get_me' not in json.dumps(metadata)
+    names = [item['name'] for item in router.search({'query': query})['tools']]
+    assert 'input_schema' not in json.dumps(router.search({'query': query}))
+    assert all(tool.schema['input_schema'] for tool in router.active.values())
+    if query not in {'authenticated user', 'get_me'}:
+        assert f'mcp_{server.id}_search_repositories' in names[:2]
+    if query in {'GitHub', 'authenticated user', 'get_me'}:
+        assert f'mcp_{server.id}_get_me' in names[:2]
+    if query in {'authenticated user', 'get_me'}:
+        assert names[0] == f'mcp_{server.id}_get_me'
+    assert f'mcp_{server.id}_hidden_tool' not in names
+    assert names[0] in {f'mcp_{server.id}_get_me', f'mcp_{server.id}_search_repositories'}
+    member.role = 'user'
+    server.created_by = 999
+    db.commit()
+    assert router.mcp_metadata() == []
+    assert router.search({'query': query})['tools'] == []
 
 
 def test_script_loading_never_executes_and_requires_approval(skill_db, monkeypatch):
@@ -204,13 +247,132 @@ def test_model_searches_then_loads_skill_then_calls_mcp(skill_db, monkeypatch, p
         assert names(captured[0]) == {'tool_search', 'load_skill'}
         assert alias not in json.dumps(captured[0])
         assert 'Weekly report' in json.dumps(captured[0])
+        assert 'Available MCP service metadata' in json.dumps(captured[0])
+        assert 'Echo service' in json.dumps(captured[0])
         assert 'INSTRUCTION_BODY_SENTINEL' not in json.dumps(captured[0])
         assert alias in names(captured[1])
         assert 'hidden_tool' not in json.dumps(captured)
         assert 'INSTRUCTION_BODY_SENTINEL' in json.dumps(captured[2])
+        assert len(captured) == 4
         assert calls == [('echo', {'text': 'hello'})]
         if provider == 'anthropic':
             assert captured[1]['messages'][1]['content'][0]['signature'] == 'signed-0'
         assert any('Weekly report' in event['data']['result_preview'] for event in result['events'])
     finally:
         get_settings.cache_clear()
+
+
+def test_tool_trace_redacts_credentials():
+    from core.runtime.workflow import _tool_trace
+    trace = _tool_trace([{'event': 'tool_call', 'data': {'tool_name': 'example', 'status': 'success',
+        'input_preview': json.dumps({'query': 'user:Alice', 'api_key': 'secret-key', 'nested': {'password': 'secret-password'}})}}])
+    assert trace[0]['arguments']['query'] == 'user:Alice'
+    assert 'secret-key' not in json.dumps(trace)
+    assert 'secret-password' not in json.dumps(trace)
+
+
+def test_mcp_adapter_preserves_declared_name_arguments_and_result(skill_db):
+    db, member, agent = skill_db
+    server = McpServer(workspace_id=member.workspace_id, created_by=member.user_id, name='External service', transport='streamable_http',
+        url='https://api.githubcopilot.com/mcp/', catalog={'tools': [{'name': 'search_repositories', 'description': 'Search repositories',
+        'inputSchema': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}}]})
+    db.add(server)
+    db.commit()
+    runtime = SimpleNamespace(id=agent.id, workspace_id=member.workspace_id, settings={}, tool_ids=[], skill_bindings=[],
+                              mcp_bindings=[{'server_id': server.id, 'selected_tools': ['search_repositories']}])
+    calls = []
+    original_result = {'content': '{"items":[]}', 'result_json': {'items': []}}
+    def execute(tool, context):
+        calls.append((tool.schema['tool_name'], context['input']))
+        return original_result
+    router = CapabilityRouter(db, runtime, {'user_id': member.user_id, 'input': 'List my repositories'},
+        WorkflowRunner(db)._runtime_tools(runtime, {'type': 'Tool'}), executor=execute)
+    assert [tool.name for tool in router.tools()] == ['tool_search']
+    router.search({'query': 'repository'})
+    arguments = {'query': 'user:current'}
+    assert router.invoke(router.active[f'mcp_{server.id}_search_repositories'], arguments) is original_result
+    assert calls == [('search_repositories', arguments)]
+
+
+def test_discovery_lists_deferred_metadata_without_loading_schema(skill_db):
+    db, member, agent = skill_db
+    server = McpServer(workspace_id=member.workspace_id, created_by=member.user_id, name='Workspace', transport='stdio', command=['fixture'], catalog={'tools': [
+        {'name': 'project_report', 'description': 'Read project report', 'inputSchema': {'type': 'object', 'properties': {'project_id': {'type': 'string'}}, 'required': ['project_id']}},
+        {'name': 'workspace_context', 'description': 'Read current workspace context', 'inputSchema': {'type': 'object'}},
+        {'name': 'unbound_private', 'description': 'Not authorized', 'inputSchema': {'type': 'object'}},
+    ]})
+    db.add(server)
+    db.commit()
+    runtime = SimpleNamespace(id=agent.id, workspace_id=member.workspace_id, settings={}, tool_ids=[], skill_bindings=[],
+        mcp_bindings=[{'server_id': server.id, 'selected_tools': ['project_report', 'workspace_context']}])
+    router = CapabilityRouter(db, runtime, {'user_id': member.user_id}, WorkflowRunner(db)._runtime_tools(runtime, {'type': 'Tool'}))
+    result = router.search({'query': 'report'})
+    assert [tool['name'] for tool in result['tools']] == [f'mcp_{server.id}_project_report']
+    assert {tool['name'] for tool in result['available_tool_metadata']} == {f'mcp_{server.id}_project_report', f'mcp_{server.id}_workspace_context'}
+    assert 'input_schema' not in str(result)
+    assert 'unbound_private' not in str(result)
+    assert f'mcp_{server.id}_workspace_context' not in {tool.name for tool in router.tools()}
+    assert router.known_mcp_tool(f'mcp_{server.id}_workspace_context')
+    assert not router.known_mcp_tool(f'mcp_{server.id}_unbound_private')
+    router.search({'query': f'mcp_{server.id}_workspace_context'})
+    assert f'mcp_{server.id}_workspace_context' in {tool.name for tool in router.tools()}
+
+
+def test_discovery_does_not_force_execution_or_rewrite_answer(skill_db):
+    db, member, agent = skill_db
+    server = McpServer(workspace_id=member.workspace_id, created_by=member.user_id, name='Echo', transport='stdio',
+        command=['fixture'], catalog={'tools': [{'name': 'echo', 'inputSchema': {'type': 'object'}}]})
+    db.add(server)
+    db.commit()
+    runtime = SimpleNamespace(id=agent.id, workspace_id=member.workspace_id, system_prompt='Help.', settings={},
+        tool_ids=[], skill_bindings=[], mcp_bindings=[{'server_id': server.id, 'selected_tools': ['echo']}],
+        model='fixture', temperature=0.2, runtime_config=None)
+    requests = []
+    def chat(messages, **kwargs):
+        requests.append(messages)
+        return llm.ChatResponse(tool_calls=[{'id': 'search', 'function': {'name': 'tool_search', 'arguments': '{"query":"echo"}'}}]) if len(requests) == 1 else llm.ChatResponse(content='The service provides an echo tool.')
+    runner = WorkflowRunner(db)
+    runner.provider = SimpleNamespace(chat=chat)
+    result = runner._execute_node(runtime, {'type': 'Tool'}, {'user_id': member.user_id, 'input': 'What tools are available?'})
+    assert len(requests) == 2
+    assert result['draft'] == 'The service provides an echo tool.'
+    assert result['tool_trace'][0]['arguments'] == {'query': 'echo'}
+
+
+def test_deferred_tool_is_discovered_then_invoked_with_context(skill_db, monkeypatch):
+    db, member, agent = skill_db
+    server = McpServer(workspace_id=member.workspace_id, created_by=member.user_id, name='Workspace', transport='stdio', command=['fixture'], catalog={'tools': [
+        {'name': 'project_report', 'description': 'Read project report', 'inputSchema': {'type': 'object', 'properties': {'project_id': {'type': 'string'}}, 'required': ['project_id']}},
+        {'name': 'workspace_context', 'description': 'Read current workspace context', 'inputSchema': {'type': 'object'}},
+    ]})
+    db.add(server)
+    db.commit()
+    runtime = SimpleNamespace(id=agent.id, workspace_id=member.workspace_id, system_prompt='Help.', settings={}, tool_ids=[], skill_bindings=[],
+        mcp_bindings=[{'server_id': server.id, 'selected_tools': ['project_report', 'workspace_context']}], model='fixture', temperature=0.2, runtime_config=None)
+    import core.runtime.workflow as workflow
+    calls = []
+    def execute(tool, context):
+        calls.append((tool.schema['tool_name'], context['input']))
+        return {'content': '{"project_id":"PROJECT_17"}' if tool.schema['tool_name'] == 'workspace_context' else 'Real report'}
+    monkeypatch.setattr(workflow, 'execute_tool', execute)
+    sequence = [('tool_search', {'query': 'report'}), (f'mcp_{server.id}_workspace_context', {}),
+                ('tool_search', {'query': f'mcp_{server.id}_workspace_context'}), (f'mcp_{server.id}_workspace_context', {}),
+                (f'mcp_{server.id}_project_report', {'project_id': 'PROJECT_17'})]
+    packets = []
+    def chat(messages, **kwargs):
+        index = len(packets)
+        packets.append(json.dumps(messages))
+        if index >= len(sequence):
+            return llm.ChatResponse(content='Real report')
+        name, args = sequence[index]
+        return llm.ChatResponse(tool_calls=[{'id': str(index), 'function': {'name': name, 'arguments': json.dumps(args)}}])
+    runner = WorkflowRunner(db)
+    runner.provider = SimpleNamespace(chat=chat)
+    result = runner._execute_node(runtime, {'type': 'Tool'}, {'user_id': member.user_id, 'input': 'Continue that report.',
+        'conversation_history': [{'role': 'user', 'content': 'Use the current workspace.'}, {'role': 'assistant', 'content': 'I will discover its project id.'}]})
+    assert result['draft'] == 'Real report'
+    assert calls == [('workspace_context', {}), ('project_report', {'project_id': 'PROJECT_17'})]
+    assert 'available_tool_metadata' in packets[1]
+    assert 'authorized but not registered' in packets[2]
+    assert 'Use the current workspace.' in packets[0]
+    assert result['tool_trace'][1]['error_code'] == 'tool_not_loaded'

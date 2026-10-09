@@ -47,6 +47,10 @@ const CHAT_COPY = {
 };
 
 export function ChatView({
+  modelOptions,
+  modelSelection,
+  onModelChange,
+  currentChatModel,
   activeAgent,
   activeAgentId,
   activeSummary,
@@ -114,6 +118,10 @@ export function ChatView({
       </header>
 
       <ChatHomeV2
+        modelOptions={modelOptions}
+        modelSelection={modelSelection}
+        onModelChange={onModelChange}
+        currentChatModel={currentChatModel}
         activeAgent={activeAgent}
         activeSessionId={activeSessionId}
         agentForm={agentForm}
@@ -148,6 +156,10 @@ export function ChatView({
 }
 
 function ChatHomeV2({
+  modelOptions,
+  modelSelection,
+  onModelChange,
+  currentChatModel,
   activeAgent,
   activeSessionId,
   agentForm,
@@ -177,7 +189,7 @@ function ChatHomeV2({
   uploadingAttachment,
   updateChatVariable,
 }) {
-  const currentModel = activeAgent?.user_model_config || activeAgent?.model_config || null;
+  const currentModel = currentChatModel;
   const ragAvailable = ragRuntime.available;
   const effectiveRagEnabled = ragAvailable && ragEnabled;
   const ragStatus = ragStatusText(ragRuntime, effectiveRagEnabled);
@@ -243,6 +255,10 @@ function ChatHomeV2({
             attachmentDisabled={attachmentDisabled}
             attachmentHint={attachmentHint}
             currentModel={currentModel}
+            modelOptions={modelOptions}
+            modelSelection={modelSelection}
+            onModelChange={onModelChange}
+            modelSelectionDisabled={busy}
             onAttachmentInput={(event) => handleAttachmentInput(event, uploadChatAttachment)}
             onAttachmentPaste={(event) => handleAttachmentPaste(event, uploadChatAttachment)}
             attachments={chatAttachments}

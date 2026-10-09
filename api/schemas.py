@@ -175,6 +175,11 @@ class WorkflowUpdateRequest(BaseModel):
     nodes: list[dict]
 
 
+class ChatModelSelection(BaseModel):
+    source: str = Field(pattern="^(system|user)$")
+    id: int = Field(gt=0)
+
+
 class ChatRequest(BaseModel):
     """
     智能体统一对话请求核心契约（SSE 会话驱动的弹头）。
@@ -193,6 +198,7 @@ class ChatRequest(BaseModel):
     variables: dict[str, str | int | float | bool | None] = {}
     attachments: list[dict] = []
     is_debug: bool = False
+    model_override: ChatModelSelection | None = None
 
 
 class ToolRequest(BaseModel):

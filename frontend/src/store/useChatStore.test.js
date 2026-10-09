@@ -36,6 +36,13 @@ function sse(event, data) {
 const BASE_ARGS = { text: '你好', activeAgentId: 1, token: 't', sessionId: null };
 
 describe('useChatStore 流式聊天', () => {
+  it('将所选模型传给聊天接口，默认选择不覆盖智能体模型', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => streamResponse([]).response));
+    await useChatStore.getState().sendMessage({ ...BASE_ARGS, modelOverride: { source: 'user', id: 3 } });
+    expect(JSON.parse(fetch.mock.calls[0][1].body).model_override).toEqual({ source: 'user', id: 3 });
+    await useChatStore.getState().sendMessage(BASE_ARGS);
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).not.toHaveProperty('model_override');
+  });
   beforeEach(() => {
     useChatStore.setState({ messages: [], busy: false, error: '', sources: [], toolDebugEvents: [] });
   });

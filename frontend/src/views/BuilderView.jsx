@@ -133,6 +133,7 @@ export function BuilderView(props) {
     busy,
     canManage,
     canEditActive,
+    confirmNavigation,
     chatMode,
     chatAttachments,
     chatVariables,
@@ -283,8 +284,10 @@ export function BuilderView(props) {
       await createPromptTemplate(promptTemplateFormPayload(promptTemplateForm));
       setPromptTemplateDialogOpen(false);
       setPromptTemplateForm(defaultPromptTemplateForm());
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setPromptTemplateSaving(false);
     }
@@ -317,8 +320,10 @@ export function BuilderView(props) {
       }
       setKnowledgeDialogOpen(false);
       setKnowledgeForm(defaultKnowledgeBaseForm());
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setKnowledgeSaving(false);
     }
@@ -365,7 +370,7 @@ export function BuilderView(props) {
               <strong>提示词模板</strong>
               <div>
                 <button type="button" onClick={openPromptTemplateDialog}>保存当前 Prompt 为模板</button>
-                <button type="button" onClick={() => { setMarketScope('mine'); setMarketTab('prompts'); setView('home'); setActiveNav('market'); }}>我的提示词</button>
+                <button type="button" onClick={() => confirmNavigation(() => { setMarketScope('mine'); setMarketTab('prompts'); setView('home'); setActiveNav('market'); })}>我的提示词</button>
               </div>
             </div>
             <div className="template-grid">
@@ -402,10 +407,10 @@ export function BuilderView(props) {
           <ModelConfigPanel
             agentForm={agentForm}
             models={models}
-            openMyModels={() => {
+            openMyModels={() => confirmNavigation(() => {
               setView('home');
               setActiveNav('my-models');
-            }}
+            })}
             setAgentForm={setAgentForm}
             setRagEnabled={setRagEnabled}
             ragRuntime={ragRuntime}
@@ -462,12 +467,12 @@ export function BuilderView(props) {
             agentId={activeAgentId}
             token={token}
             canEdit={canEditActive}
-            onOpenMarket={() => { setMarketScope('discover'); setMarketTab('mcp'); setView('home'); setActiveNav('market'); }}
+            onOpenMarket={() => confirmNavigation(() => { setMarketScope('discover'); setMarketTab('mcp'); setView('home'); setActiveNav('market'); })}
           />
           <AgentSearchSetting policy={agentForm.tool_policy} disabled={!canEditActive}
             onChange={(policy) => setAgentForm({ ...agentForm, tool_policy: policy })} />
           <SkillBindingPanel agentId={activeAgentId} token={token} canEdit={canEditActive}
-            onOpenMarket={() => { setMarketScope('mine'); setMarketTab('skills'); setView('home'); setActiveNav('market'); }} />
+            onOpenMarket={() => confirmNavigation(() => { setMarketScope('mine'); setMarketTab('skills'); setView('home'); setActiveNav('market'); })} />
 
           {/* ==================== 知识/文本 ==================== */}
           <div className="coze-group-title">知识</div>
@@ -558,19 +563,19 @@ export function BuilderView(props) {
             <div className="coze-accordion-header" onClick={() => toggleSection('memorySession')}>
               <div className="coze-header-left">
                 <ChevronRight size={14} className="coze-caret-icon" />
-                <span>会话记忆</span>
+                <span>对话上下文</span>
               </div>
             </div>
             <div className="coze-accordion-body">
-              <ConfigRow label="会话记忆">
+              <p className="mcp-binding-intro">近期对话始终作为上下文传入。开启摘要压缩后，更早对话可压缩保留；与用户长期画像分开管理。</p>
+              <ConfigRow label="历史摘要压缩">
                 <Toggle
                   checked={!!agentForm.memory?.enabled}
                   label={agentForm.memory?.enabled ? '开启' : '关闭'}
                   onChange={(value) => setAgentForm({ ...agentForm, memory: { ...(agentForm.memory || {}), enabled: value, strategy: 'session_summary' } })}
                 />
               </ConfigRow>
-              {!!agentForm.memory?.enabled && (
-                <ConfigRow label="记忆消息上限">
+                <ConfigRow label="近期上下文消息数">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', width: '100%' }}>
                     <input
                       type="range"
@@ -586,7 +591,6 @@ export function BuilderView(props) {
                     </span>
                   </div>
                 </ConfigRow>
-              )}
             </div>
           </div>
 

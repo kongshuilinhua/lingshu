@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useUnsavedForm } from './UnsavedChanges.jsx';
 import { api } from '../lib/api.js';
 import './McpBindingPanel.css';
 import '../pages/SkillsHome.css';
@@ -11,13 +12,14 @@ export function SkillBindingPanel({ agentId, token, canEdit, onOpenMarket }) {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const generation = useRef(0);
+  const savedBindings = useRef([]);
   useEffect(() => {
     const current = ++generation.current;
     let live = true;
     setSkills([]); setBindings([]); setDirty(false); setError(''); setBusy(false); setLoading(true);
     if (!agentId || !token) { setLoading(false); return undefined; }
     Promise.all([api('/api/skills', { token }), api(`/api/agents/${agentId}/skill-bindings`, { token })])
-      .then(([data, saved]) => { if (live) { setSkills(data.items || []); setBindings(saved.items || []); setDirty(false); setError(''); } })
+      .then(([data, saved]) => { if (live) { setSkills(data.items || []); setBindings(saved.items || []); savedBindings.current = saved.items || []; setDirty(false); setError(''); } })
       .catch((err) => live && setError(err.message))
       .finally(() => live && setLoading(false));
     return () => { live = false; if (generation.current === current) generation.current++; };
@@ -32,10 +34,15 @@ export function SkillBindingPanel({ agentId, token, canEdit, onOpenMarket }) {
     setBusy(true); setError('');
     try {
       const result = await api(`/api/agents/${agentId}/skill-bindings`, { token, method: 'PUT', body: { items: bindings } });
-      if (generation.current === current) { setBindings(result.items || []); setDirty(false); }
-    } catch (err) { if (generation.current === current) setError(err.message); }
+      if (generation.current === current) { setBindings(result.items || []); savedBindings.current = result.items || []; bindingGuard.markSaved(); setDirty(false); }
+      return generation.current === current;
+    } catch (err) { if (generation.current === current) setError(err.message); return false; }
     finally { if (generation.current === current) setBusy(false); }
   }
+  const bindingGuard = useUnsavedForm({ label: 'Skill 绑定', enabled: canEdit && !loading, busy,
+    value: [...bindings].map((binding) => ({ skill_id: binding.skill_id, version_id: binding.version_id,
+      enabled: binding.enabled !== false })).sort((a, b) => a.skill_id - b.skill_id), onSave: save,
+    onDiscard: () => { setBindings(savedBindings.current); setDirty(false); } });
   return <section className="mcp-binding-panel"><header className="mcp-binding-heading"><div><h3>Skill · 按需加载</h3><p>启动时提供名称和用途；模型调用 load_skill 后加载说明。</p></div><button type="button" onClick={onOpenMarket}>管理 Skill</button></header>
     {error && <p className="mcp-binding-error">{error}</p>}
     {loading ? <p className="mcp-binding-empty">正在读取 Skill…</p> : !skills.length ? <p className="mcp-binding-empty">还没有可绑定的 Skill。<button type="button" onClick={onOpenMarket}>去市场创建</button></p> : <div className="mcp-binding-list">{skills.map((skill) => {

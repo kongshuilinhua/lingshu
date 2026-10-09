@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
 import { Bot, Check, KeyRound, Layers, Plus, Shield, Sparkles, SquarePen, Trash2, X } from 'lucide-react';
 import { SecretInputDialog } from '../components/SecretInputDialog.jsx';
 import { errorMessage } from '../utils.js';
@@ -216,6 +217,8 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
   const [notice, setNotice] = useState('');
   const [testingId, setTestingId] = useState(null);
   const [testingTool, setTestingTool] = useState(null);
+  const formGuard = useUnsavedForm({ enabled: formOpen, value: form, label: '工具配置', busy: saving,
+    onSave: () => form.name.trim() && form.label.trim() ? submitTool() : false });
   const [testInputById, setTestInputById] = useState({});
   const [testBodyById, setTestBodyById] = useState({});
   const [testResults, setTestResults] = useState({});
@@ -304,12 +307,11 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
 
   function closeToolForm() {
     if (saving) return;
-    setFormOpen(false);
-    setEditingTool(null);
+    formGuard.confirmLeave(() => { setFormOpen(false); setEditingTool(null); });
   }
 
   async function submitTool(event) {
-    event.preventDefault();
+    event?.preventDefault();
     setSaving(true);
     setNotice('');
     setProfileError('');
@@ -321,11 +323,14 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
         await createToolConfig(payload);
       }
       setForm(createToolForm(form.type));
+      formGuard.markSaved();
       setEditingTool(null);
       setFormOpen(false);
       setNotice(editingTool ? '工具已更新。' : '工具已保存，密钥不会在页面或接口响应中回显。');
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -337,8 +342,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
     setProfileError('');
     try {
       await updateToolConfig(tool.id, patch);
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -349,7 +356,7 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
       setProfileError('Secret cannot be empty');
       return;
     }
-    await patchTool(tool, {
+    const saved = await patchTool(tool, {
       auth: {
         type: tool.auth?.type || tool.auth_type || 'bearer',
         header_name: tool.auth?.header_name || tool.auth_header_name || 'Authorization',
@@ -357,8 +364,10 @@ function ToolsPanel({ createToolConfig, deleteToolConfig, requestDeleteConfirm, 
         secret: String(nextSecret).trim(),
       },
     });
+    if (!saved) return false;
     setSecretDialogTool(null);
     setNotice('工具密钥已替换，页面仅保留 has_secret 状态。');
+    return true;
   }
 
   function openToolTest(tool) {

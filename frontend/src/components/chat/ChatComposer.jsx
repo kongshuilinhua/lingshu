@@ -5,7 +5,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
   SquarePen, ImagePlus, FileText, X,
-  AlertTriangle, Brain, Database, Send,
+  AlertTriangle, Brain, Database, Send, ChevronDown,
 } from 'lucide-react';
 import { uploadTypeFromContentType } from '../../utils.js';
 
@@ -50,6 +50,10 @@ export function ChatComposer({
   attachments = [],
   className,
   currentModel,
+  modelOptions = [],
+  modelSelection = '',
+  onModelChange,
+  modelSelectionDisabled = false,
   includeNewChat = false,
   onAttachmentInput,
   onAttachmentPaste,
@@ -140,6 +144,28 @@ export function ChatComposer({
       />
       <div className="composer-actions">
         <div className="composer-action-left">
+          {onModelChange && (
+            <div className="composer-model-picker" title="选择本次聊天使用的模型">
+              <select
+                aria-label="聊天模型"
+                value={modelSelection}
+                disabled={modelSelectionDisabled}
+                onChange={(event) => onModelChange(event.target.value)}
+              >
+                <option value="">智能体默认模型</option>
+                {['我的模型', '平台模型'].map((group) => (
+                  modelOptions.some((option) => option.group === group) && (
+                    <optgroup label={group} key={group}>
+                      {modelOptions.filter((option) => option.group === group).map((option) => (
+                        <option value={option.value} key={option.value}>{option.label}</option>
+                      ))}
+                    </optgroup>
+                  )
+                ))}
+              </select>
+              <ChevronDown size={13} aria-hidden="true" />
+            </div>
+          )}
           {includeNewChat && (
             <button type="button" className="composer-icon-button" title={CHAT_COPY.newChat} onClick={onNewChat}>
               <SquarePen size={16} />

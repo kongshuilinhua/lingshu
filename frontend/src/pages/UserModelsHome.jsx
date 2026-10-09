@@ -1,4 +1,5 @@
 import React, { useRef, useState } from 'react';
+import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
 import { Check, Plus, ServerCog, Trash2, Wand2, X } from 'lucide-react';
 import { SecretInputDialog } from '../components/SecretInputDialog.jsx';
 import {
@@ -289,6 +290,10 @@ function UserModelsPanel({
   const formReady = Boolean(form.display_name.trim() && form.base_url.trim() && form.chat_model.trim() && form.api_key.trim());
   const canSaveForm = formReady && draftTestResult?.ok;
   const imageProbeStatus = imageCapabilityFromTest(form, draftTestResult);
+  const createGuard = useUnsavedForm({ enabled: formOpen, value: form, label: '新增模型配置',
+    busy: saving || draftTesting, onSave: () => submitUserModel() });
+  const editGuard = useUnsavedForm({ enabled: Boolean(editConfig), value: editForm, label: '模型配置',
+    busy: saving, onSave: () => submitEditUserModel() });
 
   function updateForm(patch) {
     formVersion.current += 1;
@@ -329,10 +334,12 @@ function UserModelsPanel({
 
   function closeCreateForm() {
     if (saving || draftTesting) return;
-    formVersion.current += 1;
-    resetModelProbe();
-    setFormOpen(false);
-    setDraftTestResult(null);
+    createGuard.confirmLeave(() => {
+      formVersion.current += 1;
+      resetModelProbe();
+      setFormOpen(false);
+      setDraftTestResult(null);
+    });
   }
 
   function openEditForm(config) {
@@ -344,8 +351,7 @@ function UserModelsPanel({
 
   function closeEditForm() {
     if (saving) return;
-    setEditConfig(null);
-    setEditForm(null);
+    editGuard.confirmLeave(() => { setEditConfig(null); setEditForm(null); });
   }
 
   function updateEditForm(patch) {
@@ -353,19 +359,22 @@ function UserModelsPanel({
   }
 
   async function submitUserModel(event) {
-    event.preventDefault();
-    if (!canSaveForm || saving || draftTesting) return;
+    event?.preventDefault();
+    if (!canSaveForm || saving || draftTesting) return false;
     setSaving(true);
     setNotice('');
     setProfileError('');
     try {
       const saved = await createUserModelConfig(userModelFormPayload(form, { includeApiKey: true }));
+      createGuard.markSaved();
       setForm(createUserModelForm());
       setFormOpen(false);
       setDraftTestResult(null);
       setNotice(saved?.supports_image ? '模型连接已保存，图片探测通过。' : '模型连接已保存；图片探测未通过，但聊天发送不会被前端拦截。');
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -418,26 +427,31 @@ function UserModelsPanel({
       if (updated?.image_detection?.tested) {
         setNotice(updated.supports_image ? '图片探测通过。' : '图片探测未通过；这只是诊断结果，不会拦截图片发送。');
       }
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
   }
 
   async function submitEditUserModel(event) {
-    event.preventDefault();
-    if (!editConfig || !editForm) return;
+    event?.preventDefault();
+    if (!editConfig || !editForm || !editForm.display_name.trim() || !editForm.chat_model.trim() || !editForm.base_url.trim()) return false;
     setSaving(true);
     setNotice('');
     setProfileError('');
     try {
       const updated = await updateUserModelConfig(editConfig.id, userModelEditPayload(editForm));
+      editGuard.markSaved();
       setEditConfig(null);
       setEditForm(null);
       setNotice(updated?.supports_image ? '模型已保存，图片探测通过。' : '模型已保存；图片探测未通过，但聊天发送不会被前端拦截。');
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -448,9 +462,10 @@ function UserModelsPanel({
       setProfileError('API key cannot be empty');
       return;
     }
-    await patchUserModel(config, { api_key: String(apiKey).trim() });
+    if (await patchUserModel(config, { api_key: String(apiKey).trim() }) !== true) return false;
     setKeyDialogConfig(null);
     setNotice('API Key 已替换，页面不会显示已保存的密钥。');
+    return true;
   }
 
   async function deleteUserModel(config) {
@@ -805,6 +820,8 @@ function ModelAdminPanel({ createModelConfig, deleteModelConfig, models, request
   const [formOpen, setFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [rowNotice, setRowNotice] = useState({ modelId: null, message: '' });
+  const formGuard = useUnsavedForm({ enabled: formOpen, value: form, label: '系统模型配置', busy: saving,
+    onSave: () => createModel() });
 
   function applyPreset(preset) {
     const values = MODEL_CAPABILITY_PRESETS[preset]?.values || {};
@@ -816,16 +833,20 @@ function ModelAdminPanel({ createModelConfig, deleteModelConfig, models, request
   }
 
   async function createModel(event) {
-    event.preventDefault();
+    event?.preventDefault();
+    if (!form.display_name.trim() || !form.model_name.trim()) return false;
     setSaving(true);
     setProfileError('');
     setRowNotice({ modelId: null, message: '' });
     try {
       await createModelConfig(modelFormPayload(form));
+      formGuard.markSaved();
       setForm(createModelForm());
       setFormOpen(false);
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -840,7 +861,7 @@ function ModelAdminPanel({ createModelConfig, deleteModelConfig, models, request
 
   function closeCreateModel() {
     if (saving) return;
-    setFormOpen(false);
+    formGuard.confirmLeave(() => setFormOpen(false));
   }
 
   async function patchModel(model, patch) {

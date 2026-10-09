@@ -91,7 +91,7 @@ def _error_code(message: str) -> str:
 def get_or_create_session(db: Session, agent: Agent, user_id: int, session_id: int | None, title_seed: str, is_debug: bool = False) -> ChatSession:
     if session_id:
         session = db.get(ChatSession, session_id)
-        if session and session.agent_id == agent.id and session.user_id == user_id:
+        if session and session.agent_id == agent.id and session.workspace_id == agent.workspace_id and session.user_id == user_id and session.is_debug == is_debug:
             return session
     session = ChatSession(workspace_id=agent.workspace_id, agent_id=agent.id, user_id=user_id, title=title_seed[:60] or "新对话", is_debug=is_debug)
     db.add(session)
@@ -115,8 +115,10 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             variables=request.variables, rag_enabled=request.rag_enabled,
             rag_options=request.rag_options.model_dump(exclude_none=True) if request.rag_options else None,
             thinking_enabled=request.thinking_enabled, search_enabled=request.search_enabled,
+            model_override=request.model_override.model_dump() if request.model_override else None,
             attachments=request.attachments,
             async_memory=True,
+            current_message_id=user_message.id,
         ):
             if event["event"] == "token":
                 yield sse_event("token", {"content": event.get("content", "")})
@@ -171,6 +173,11 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
 def chat_stream(agent_id: int, request: ChatRequest, background_tasks: BackgroundTasks, membership: WorkspaceMember = Depends(get_current_membership), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
     require_agent_read_access(agent, membership)
+    if request.model_override:
+        try:
+            WorkflowRunner(db).resolve_chat_model(request.model_override.model_dump(), current_user.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="所选模型不可用或无权访问，请重新选择。") from exc
     return StreamingResponse(stream_chat_events(db, agent, current_user.id, request, background_tasks), media_type="text/event-stream")
 
 

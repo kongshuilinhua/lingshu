@@ -43,6 +43,8 @@ import { fetchKnowledgeBases, fetchTools, fetchModels, fetchUserModels, fetchPro
 import { useAuthStore } from './store/useAuthStore.js';
 import { useAgentStore } from './store/useAgentStore.js';
 import { useChatStore } from './store/useChatStore.js';
+import { chatModelOptions, chatModelOverride } from './lib/models.js';
+import { UnsavedChangesProvider, useUnsavedForm, useUnsavedNavigation } from './components/UnsavedChanges.jsx';
 
 const lazyNamed = (loader, exportName) => lazy(() => loader().then((module) => ({ default: module[exportName] })));
 const ChatView = lazyNamed(() => import('./views/ChatView.jsx'), 'ChatView');
@@ -152,6 +154,7 @@ function App() {
   const [models, setModels] = useState([]);
   const [adminModels, setAdminModels] = useState([]);
   const [userModels, setUserModels] = useState([]);
+  const [chatModelSelection, setChatModelSelection] = useState('');
   const [runtimeStatus, setRuntimeStatus] = useState(() => defaultRuntimeStatus());
   const [marketAgents, setMarketAgents] = useState([]);
   const [reviewItems, setReviewItems] = useState([]);
@@ -204,15 +207,31 @@ function App() {
     () => findModelForForm(models, userModels, agentForm),
     [models, userModels, agentForm.model_id, agentForm.user_model_config_id, agentForm.model],
   );
+  const chatModels = useMemo(() => chatModelOptions(models, userModels), [models, userModels]);
+  const currentChatModel = chatModelSelection
+    ? chatModels.find((option) => option.value === chatModelSelection)?.model || null
+    : activeAgent?.user_model_config || activeAgent?.model_config || null;
   const currentThinkingModel = useMemo(
-    () => (view === 'builder' ? selectedDraftModel : activeAgent?.user_model_config || activeAgent?.model_config || null),
-    [view, selectedDraftModel, activeAgent],
+    () => (view === 'builder' ? selectedDraftModel : currentChatModel),
+    [view, selectedDraftModel, currentChatModel],
   );
   const ragRuntime = useMemo(() => getRagRuntime(runtimeStatus), [runtimeStatus]);
   const webSearchRuntime = useMemo(() => getWebSearchRuntime(runtimeStatus), [runtimeStatus]);
   const activeKbId = Number(docForm.kb_id || knowledgeBases[0]?.id || 0);
   const canManage = isAdminRole(workspace?.role);
   const canEditActive = !!activeAgent && (canManage || activeAgent.created_by === me?.id);
+  const confirmNavigation = useUnsavedNavigation();
+  const agentGuard = useUnsavedForm({ enabled: view === 'builder' && canEditActive && Boolean(activeAgentId),
+    value: agentForm, label: '智能体配置', resetOnEnable: false, saveOrder: 100,
+    getCurrentValue: () => useAgentStore.getState().agentForm, onSave: saveAgent, onDiscard: (saved) => setAgentForm(saved) });
+  const memoryGuard = useUnsavedForm({ enabled: view === 'builder' && Boolean(activeAgentId) && !memoryProfileLoading,
+    value: memoryProfileDraft, label: '用户记忆', resetOnEnable: false, saveOrder: 90, busy: memoryProfileSaving,
+    onSave: saveMemoryProfile, onDiscard: (saved) => setMemoryProfileDraft(saved) });
+
+  useEffect(() => { setChatModelSelection(''); }, [activeAgentId, token]);
+  useEffect(() => {
+    if (chatModelSelection && !chatModels.some((option) => option.value === chatModelSelection)) setChatModelSelection('');
+  }, [chatModels, chatModelSelection]);
 
   async function loadDocuments(kbId) {
     if (!kbId || !token) return;
@@ -449,9 +468,10 @@ function App() {
     }
   }
 
-  async function loadAgent(agentId) {
+  async function loadAgent(agentId, { preserveMemoryProfile = false } = {}) {
     await storeLoadAgent(agentId, token);  // Phase 4: Zustand loads agent + agentForm
     const { activeAgent: agent, agentForm: form } = useAgentStore.getState();
+    agentGuard.markSaved(form);
     setRagEnabled(form.rag?.enabled_by_default ?? true);
     setThinkingEnabled(false);
     setSearchEnabled(false);
@@ -461,7 +481,7 @@ function App() {
     setSources([]);
     setToolDebugEvents([]);
     setFeedbackByMessage({});
-    await loadMemoryProfile(agentId);
+    if (!preserveMemoryProfile) await loadMemoryProfile(agentId);
     await loadSessions(agentId);
   }
 
@@ -479,10 +499,12 @@ function App() {
       const profile = normalizeMemoryProfile(data.profile, agentId);
       setMemoryProfile(profile);
       setMemoryProfileDraft(profileToDraft(profile));
+      memoryGuard.markSaved(profileToDraft(profile));
       return profile;
     } catch (err) {
       setMemoryProfile(defaultMemoryProfile(agentId));
       setMemoryProfileDraft(profileToDraft(defaultMemoryProfile(agentId)));
+      memoryGuard.markSaved(profileToDraft(defaultMemoryProfile(agentId)));
       setMemoryProfileError(errorMessage(err));
       return null;
     } finally {
@@ -500,6 +522,8 @@ function App() {
       const profile = normalizeMemoryProfile(data.profile, activeAgentId);
       setMemoryProfile(profile);
       setMemoryProfileDraft(profileToDraft(profile));
+      memoryGuard.markSaved(profileToDraft(profile));
+      return true;
     } catch (err) {
       setMemoryProfileError(errorMessage(err));
       throw err;
@@ -524,6 +548,7 @@ function App() {
       const profile = defaultMemoryProfile(activeAgentId);
       setMemoryProfile(profile);
       setMemoryProfileDraft(profileToDraft(profile));
+      memoryGuard.markSaved(profileToDraft(profile));
     } catch (err) {
       setMemoryProfileError(errorMessage(err));
       throw err;
@@ -755,8 +780,10 @@ function App() {
         await loadAgent(activeAgentId);
       }
       setAgentIdentityDialog(null);
+      return true;
     } catch (err) {
       setAgentIdentityError(errorMessage(err));
+      return false;
     } finally {
       setAgentIdentitySaving(false);
     }
@@ -774,13 +801,14 @@ function App() {
 
   async function saveAgent() {
     if (!activeAgentId) return true;
-    const body = agentPayload(agentForm, { model: selectedDraftModel });
+    const currentForm = useAgentStore.getState().agentForm;
+    const body = agentPayload(currentForm, { model: findModelForForm(models, userModels, currentForm) });
     try {
       await api(`/api/agents/${activeAgentId}`, { token, method: 'PATCH', body });
       // 与预览前自动保存共用同一签名基线，手动保存后预览不再重复 PATCH
       lastDraftSaveSigRef.current = JSON.stringify(body);
       await bootstrap();
-      await loadAgent(activeAgentId);
+      await loadAgent(activeAgentId, { preserveMemoryProfile: true });
       return true;
     } catch (err) {
       // 之前保存失败是静默的（按钮无 catch），导致「改了以为存了」。必须用 toast 暴露。
@@ -997,6 +1025,7 @@ function App() {
   }
 
   function startNewChat() {
+    setChatModelSelection('');
     setActiveSessionId(null);
     setSessionTitleDraft('');
     setMessages(activeAgent?.opening_message ? [{ role: 'assistant', content: activeAgent.opening_message }] : []);
@@ -1062,7 +1091,7 @@ function App() {
       setError('对话只能使用已经过审核并上架的智能体。');
       return;
     }
-    const currentModel = viewRef.current === 'builder' ? selectedDraftModel : activeAgent?.user_model_config || activeAgent?.model_config || null;
+    const currentModel = viewRef.current === 'builder' ? selectedDraftModel : currentChatModel;
     const modelWarning = modelCapabilityWarning(currentModel, outgoingAttachments);
     if (modelWarning) {
       setError(modelWarning);
@@ -1084,6 +1113,7 @@ function App() {
         try {
           await api(`/api/agents/${activeAgentId}`, { token, method: 'PATCH', body: draftPayload });
           lastDraftSaveSigRef.current = sig;
+          agentGuard.markSaved(agentForm);
         } catch (err) {
           setError(errorMessage(err));
           return;
@@ -1101,6 +1131,7 @@ function App() {
         ragEnabled: effectiveRagEnabled,
         ragOptions: agentForm.rag || undefined,
         thinkingEnabled: effectiveThinkingEnabled,
+        modelOverride: viewRef.current === 'builder' ? undefined : chatModelOverride(chatModelSelection),
         variables: castVariables(agentForm.variables || [], chatVariables),
         chatAttachments: outgoingAttachments,
       });
@@ -1236,6 +1267,11 @@ function App() {
   }
 
   const shellProps = {
+    confirmNavigation,
+    chatModels,
+    chatModelSelection,
+    setChatModelSelection,
+    currentChatModel,
     activeAgent,
     activeAgentId,
     activeNav,
@@ -1252,7 +1288,7 @@ function App() {
     chatVariables,
     copyMarketAgent,
     copyBuiltinPromptTemplate,
-    createAgent,
+    createAgent: (...args) => confirmNavigation(() => createAgent(...args)),
     createKnowledgeBase,
     updateKnowledgeBase,
     createModelConfig,
@@ -1275,8 +1311,8 @@ function App() {
     feedbackByMessage,
     homePrompt,
     knowledgeBases,
-    loadSession,
-    logout,
+    loadSession: (id, options) => confirmNavigation(() => loadSession(id, options)),
+    logout: () => confirmNavigation(logout),
     marketAgents,
     marketTab,
     marketScope,
@@ -1284,7 +1320,7 @@ function App() {
     members,
     messages,
     models,
-    openBuilder,
+    openBuilder: (id) => confirmNavigation(() => openBuilder(id)),
     publishAgent,
     promptTemplates,
     memoryProfile,
@@ -1310,8 +1346,8 @@ function App() {
     sendSuggestedQuestion,
     sessions,
     setError,
-    setActiveAgentId,
-    setActiveNav,
+    setActiveAgentId: (id) => id === activeAgentId ? undefined : confirmNavigation(() => setActiveAgentId(id)),
+    setActiveNav: (nav) => nav === activeNav ? undefined : confirmNavigation(() => setActiveNav(nav)),
     setMarketTab,
     setMarketScope,
     setAgentForm,
@@ -1324,9 +1360,9 @@ function App() {
     setRagEnabled,
     setSearchEnabled,
     setThinkingEnabled,
-    setView,
+    setView: (next) => next === view ? undefined : confirmNavigation(() => setView(next)),
     sources,
-    startNewChat,
+    startNewChat: () => confirmNavigation(startNewChat),
     submitFeedback,
     deleteMemoryProfile,
     approveReview,
@@ -1428,6 +1464,10 @@ function NavButton({ active, icon, label, onClick }) {
 
 function HomeView(props) {
   const {
+    chatModels,
+    chatModelSelection,
+    setChatModelSelection,
+    currentChatModel,
     activeAgent,
     activeAgentId,
     activeNav,
@@ -1762,6 +1802,10 @@ function HomeView(props) {
         <Suspense fallback={<PageFallback />}>
          {activeNav === 'chat' && (
           <ChatView
+            modelOptions={chatModels}
+            modelSelection={chatModelSelection}
+            onModelChange={setChatModelSelection}
+            currentChatModel={currentChatModel}
             activeAgent={activeAgent}
             activeAgentId={activeAgentId}
             activeSummary={activeSummary}
@@ -1905,6 +1949,9 @@ function HomeView(props) {
 function AgentIdentityDialog({ error, initialForm, mode, onCancel, onSubmit, saving }) {
   const [form, setForm] = useState(() => normalizeAgentIdentity(initialForm));
   const title = mode === 'create' ? '创建智能体' : '编辑智能体';
+  const guard = useUnsavedForm({ value: form, label: title, busy: saving,
+    onSave: () => form.name.trim() ? onSubmit(form) : false });
+  const close = () => guard.confirmLeave(onCancel);
 
   useEffect(() => {
     setForm(normalizeAgentIdentity(initialForm));
@@ -1933,7 +1980,7 @@ function AgentIdentityDialog({ error, initialForm, mode, onCancel, onSubmit, sav
       <form className="agent-identity-modal" onSubmit={submit}>
         <header>
           <h2>{title}</h2>
-          <button type="button" aria-label="关闭" onClick={onCancel} disabled={saving}><X size={18} /></button>
+          <button type="button" aria-label="关闭" onClick={close} disabled={saving}><X size={18} /></button>
         </header>
         <label className="field-stack">
           <span>智能体名称<b>*</b></span>
@@ -1968,7 +2015,7 @@ function AgentIdentityDialog({ error, initialForm, mode, onCancel, onSubmit, sav
         </div>
         {(error || form.localError) && <p className="error">{error || form.localError}</p>}
         <footer>
-          <button type="button" onClick={onCancel} disabled={saving}>取消</button>
+          <button type="button" onClick={close} disabled={saving}>取消</button>
           <button className="primary" type="submit" disabled={saving || !form.name.trim()}>
             {saving ? '保存中...' : '确认'}
           </button>
@@ -1991,6 +2038,8 @@ function ProfileDialog({
 }) {
   const [nameDraft, setNameDraft] = useState(me?.name || '');
   const [savingProfile, setSavingProfile] = useState(false);
+  const guard = useUnsavedForm({ value: nameDraft, label: '个人资料', busy: savingProfile, onSave: saveName });
+  const closeProfile = () => guard.confirmLeave(onClose);
 
   useEffect(() => {
     setNameDraft(me?.name || '');
@@ -1998,20 +2047,24 @@ function ProfileDialog({
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') closeProfile();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  }, [closeProfile]);
 
   async function saveName() {
     const nextName = nameDraft.trim();
-    if (!nextName || nextName === me?.name) return;
+    if (!nextName) return false;
+    if (nextName === me?.name) return true;
     setSavingProfile(true);
     try {
       await updateProfile({ name: nextName });
+      guard.markSaved(nextName);
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSavingProfile(false);
     }
@@ -2043,7 +2096,7 @@ function ProfileDialog({
   return (
     <div className="profile-dialog-backdrop">
       <section className="profile-dialog" role="dialog" aria-modal="true" aria-label="个人资料" onClick={(event) => event.stopPropagation()}>
-        <button className="profile-dialog-close" type="button" title="关闭" aria-label="关闭个人资料" onClick={onClose}>
+        <button className="profile-dialog-close" type="button" title="关闭" aria-label="关闭个人资料" disabled={savingProfile} onClick={closeProfile}>
           <X size={16} />
         </button>
         <div className="profile-card">
@@ -2072,7 +2125,7 @@ function ProfileDialog({
           <span>账号状态</span>
           <strong>已登录</strong>
         </div>
-        <button className="danger-action" type="button" onClick={() => { onClose(); logout(); }}><LogOut size={15} />退出登录</button>
+        <button className="danger-action" type="button" onClick={() => guard.confirmLeave(() => { onClose(); logout(); })}><LogOut size={15} />退出登录</button>
       </section>
     </div>
   );
@@ -2109,4 +2162,4 @@ class AppErrorBoundary extends Component {
   }
 }
 
-createRoot(document.getElementById('root')).render(<AppErrorBoundary><App /></AppErrorBoundary>);
+createRoot(document.getElementById('root')).render(<AppErrorBoundary><UnsavedChangesProvider><App /></UnsavedChangesProvider></AppErrorBoundary>);

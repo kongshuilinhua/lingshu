@@ -92,6 +92,7 @@ export const useChatStore = create((set, get) => ({
     ragOptions,
     thinkingEnabled,
     searchEnabled,
+    modelOverride,
     variables = {},
     chatAttachments = [],
   }) => {
@@ -119,6 +120,7 @@ export const useChatStore = create((set, get) => ({
           rag_options: ragOptions || undefined,
           thinking_enabled: thinkingEnabled,
           search_enabled: searchEnabled,
+          model_override: modelOverride,
           variables,
           attachments: outgoingAttachments.map((item) => ({ id: item.id, type: item.type, mime_type: item.content_type })),
         }),

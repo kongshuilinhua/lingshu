@@ -2,6 +2,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 import base64
 import json
+import pytest
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -1976,7 +1977,7 @@ def test_memory_used_reports_session_summary_without_merging_long_term_memory(cl
     assert events[0]["enabled"] is True
     assert events[0]["profile_found"] is True
     assert events[0]["summary_used"] is True
-    assert events[0]["session_summary_used"] is True
+    assert events[0]["session_summary_used"] is False
     assert '"used_memory": true' in second.text
     assert '"used_profile_memory": true' in second.text
 
@@ -2483,6 +2484,59 @@ def test_text_only_chat_model_can_use_backend_default_rag(client, auth_headers):
     assert "event: sources" in response.text
 
 
+@pytest.mark.parametrize('source', ['user', 'system'])
+@pytest.mark.parametrize('mode', ['draft', 'published'])
+def test_chat_model_selection_is_request_scoped(client, auth_headers, monkeypatch, source, mode):
+    from core.integrations.llm import OpenAICompatibleProvider
+    override = (_create_user_model(client, auth_headers, 'Chat choice', chat_model='override-chat') if source == 'user'
+                else _create_custom_model(client, auth_headers, 'override-chat'))
+    agent = client.post('/api/agents', headers=auth_headers, json={'name': 'Model picker'}).json()['agent']
+    agent_id = agent['id']
+    client.post(f'/api/agents/{agent_id}/publish', headers=auth_headers)
+    before = client.get(f'/api/agents/{agent_id}', headers=auth_headers).json()['agent']
+    packets = []
+    def stream(self, messages, **kwargs):
+        packets.append(kwargs)
+        yield {'type': 'content', 'text': 'Selected model answer'}
+    monkeypatch.setattr(OpenAICompatibleProvider, 'chat_stream', stream)
+    response = client.post(f'/api/agents/{agent_id}/chat/stream', headers=auth_headers,
+        json={'message': 'Use the selected model', 'mode': mode, 'rag_enabled': False,
+              'model_override': {'source': source, 'id': override['id']}})
+    assert response.status_code == 200
+    assert not _sse_payloads(response.text, 'error')
+    assert packets[0]['model'] == 'override-chat'
+    assert bool(packets[0]['runtime_config']) == (source == 'user')
+    llm_step = next(step for step in _sse_payloads(response.text, 'run_step') if step['node_type'] == 'LLM')
+    assert llm_step['output']['model'] == 'override-chat'
+    after = client.get(f'/api/agents/{agent_id}', headers=auth_headers).json()['agent']
+    for key in ['model', 'model_id', 'user_model_config_id', 'system_prompt', 'published_version_id', 'mcp_bindings', 'skill_bindings']:
+        assert after[key] == before[key]
+    default = client.post(f'/api/agents/{agent_id}/chat/stream', headers=auth_headers,
+        json={'message': 'Use default again', 'mode': mode, 'rag_enabled': False})
+    assert not _sse_payloads(default.text, 'error')
+    assert packets[-1]['model'] == before['model']
+
+
+def test_chat_model_selection_rejects_inaccessible_disabled_and_invalid_models(client, auth_headers):
+    private = _create_user_model(client, auth_headers, 'Private model')
+    disabled = _create_custom_model(client, auth_headers, 'disabled-chat', enabled=False)
+    _, other_headers = _register_regular_user(client, email='picker-other@example.com', name='Other')
+    agent_id = client.post('/api/agents', headers=other_headers, json={'name': 'Other picker'}).json()['agent']['id']
+    for choice in [{'source': 'user', 'id': private['id']}, {'source': 'system', 'id': disabled['id']},
+                   {'source': 'system', 'id': 999999}, {'source': 'user', 'id': 999999}]:
+        response = client.post(f'/api/agents/{agent_id}/chat/stream', headers=other_headers,
+            json={'message': 'Must be rejected', 'model_override': choice})
+        assert response.status_code == 400
+        assert 'sk-' not in response.text
+    for choice in [{'source': 'user', 'id': 0}, {'source': 'http', 'id': private['id']}, {'source': 'user'}]:
+        response = client.post(f'/api/agents/{agent_id}/chat/stream', headers=other_headers,
+            json={'message': 'Invalid selection', 'model_override': choice})
+        assert response.status_code == 422
+    sessions = client.get(f'/api/agents/{agent_id}/sessions', headers=other_headers)
+    assert sessions.status_code == 200
+    assert sessions.json()['items'] == []
+
+
 def test_chat_thinking_status_respects_model_reasoning_capability(client, auth_headers):
     unsupported_model = _create_user_model(
         client,
@@ -2660,6 +2714,33 @@ def test_published_chat_uses_snapshot_model_rag_and_memory_after_draft_changes(c
     assert response.status_code == 200
     assert "Selected model does not support image input" not in response.text
     assert "event: done" in response.text
+
+
+def test_chat_preserves_recent_roles_when_summary_is_disabled(client, auth_headers, monkeypatch):
+    from core.integrations.llm import OpenAICompatibleProvider
+    captured = []
+    def stream(self, messages, **kwargs):
+        captured.append(messages)
+        self.last_chat_mock = True
+        yield {'type': 'content', 'text': 'The project is CONTEXT_PROJECT.'}
+    monkeypatch.setattr(OpenAICompatibleProvider, 'chat_stream', stream)
+    agent = client.post('/api/agents', headers=auth_headers, json={'name': 'Recent context', 'memory': {'enabled': False, 'max_messages': 12}}).json()['agent']
+    first = client.post(f"/api/agents/{agent['id']}/chat/stream", headers=auth_headers,
+                        json={'message': 'My project is CONTEXT_PROJECT.', 'mode': 'draft'})
+    assert first.status_code == 200
+    session_id = _sse_payloads(first.text, 'done')[0]['session_id']
+    second = client.post(f"/api/agents/{agent['id']}/chat/stream", headers=auth_headers,
+        json={'message': 'Continue that project.', 'mode': 'draft', 'session_id': session_id})
+    assert second.status_code == 200
+    assert 'event: done' in second.text
+    assert [message['role'] for message in captured[1]] == ['system', 'user', 'assistant', 'user']
+    assert captured[1][1]['content'] == 'My project is CONTEXT_PROJECT.'
+    assert captured[1][-1]['content'] == 'Continue that project.'
+    assert 'CONTEXT_PROJECT' not in captured[1][0]['content']
+    new_session = client.post(f"/api/agents/{agent['id']}/chat/stream", headers=auth_headers,
+                             json={'message': 'New session.', 'mode': 'draft'})
+    assert 'event: done' in new_session.text
+    assert [message['role'] for message in captured[2]] == ['system', 'user']
 
 
 def test_published_chat_uses_snapshot_knowledge_bindings_after_draft_changes(client, auth_headers):

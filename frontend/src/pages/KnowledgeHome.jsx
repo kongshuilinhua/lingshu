@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { ResegmentModal } from '../components/ResegmentModal.jsx';
 import { KnowledgeBaseDialog } from '../components/KnowledgeBaseDialog.jsx';
+import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
 import { KnowledgeDocumentList, KnowledgeUploadBox } from '../components/KnowledgeDocumentList.jsx';
 import {
   KNOWLEDGE_FILE_ACCEPT,
@@ -86,8 +87,10 @@ export function KnowledgeHome({
       }
       setForm(defaultKnowledgeBaseForm());
       setCreateOpen(false);
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -364,9 +367,11 @@ function KnowledgeWorkspace({
         description: editForm.description.trim()
       });
       setEditDialogOpen(false);
+      return true;
     } catch (err) {
       console.error(err);
       notify?.(`保存失败：${errorMessage(err)}`);
+      return false;
     } finally {
       setSavingEdit(false);
     }
@@ -440,10 +445,13 @@ function KnowledgeWorkspace({
   const [pasteFilename, setPasteFilename] = useState('粘贴文档.txt');
   const [pasteText, setPasteText] = useState('');
   const [pasteSubmitting, setPasteSubmitting] = useState(false);
+  const pasteGuard = useUnsavedForm({ enabled: customInputOpen, value: { pasteFilename, pasteText }, label: '粘贴文档',
+    busy: pasteSubmitting, onSave: () => handlePasteSubmit() });
+  const closePaste = () => pasteGuard.confirmLeave(() => setCustomInputOpen(false));
 
   async function handlePasteSubmit(e) {
-    e.preventDefault();
-    if (!pasteText.trim()) return;
+    e?.preventDefault();
+    if (!pasteText.trim()) return false;
     setPasteSubmitting(true);
     try {
       const payload = {
@@ -459,15 +467,18 @@ function KnowledgeWorkspace({
         body: payload,
       });
       // Clear inputs
+      pasteGuard.markSaved();
       setPasteText('');
       setCustomInputOpen(false);
       // Wait a moment and force reload
       if (setDocForm) {
         setDocForm((form) => ({ ...form, kb_id: String(kb.id) })); // triggers re-fetch in parent!
       }
+      return true;
     } catch (err) {
       console.error(err);
       notify?.(`写入知识库失败：${errorMessage(err)}`);
+      return false;
     } finally {
       setPasteSubmitting(false);
     }
@@ -728,7 +739,7 @@ function KnowledgeWorkspace({
               className="profile-dialog-close"
               type="button"
               title="关闭"
-              onClick={() => setCustomInputOpen(false)}
+              onClick={closePaste}
             >
               <X size={16} />
             </button>
@@ -758,7 +769,7 @@ function KnowledgeWorkspace({
                 />
               </label>
               <footer className="dialog-actions">
-                <button type="button" onClick={() => setCustomInputOpen(false)}>
+                <button type="button" onClick={closePaste} disabled={pasteSubmitting}>
                   取消
                 </button>
                 <button className="primary-model-action" type="submit" disabled={pasteSubmitting}>

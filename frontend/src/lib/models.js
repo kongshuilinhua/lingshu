@@ -55,6 +55,26 @@ function normalizeUserModelForUi(config) {
   return { ...config, source: 'user', model_name: config.chat_model, supports_text: true };
 }
 
+function chatModelOptions(models = [], userModels = []) {
+  return [
+    ...userModels.filter((model) => model.enabled).map((model) => ({
+      value: `user:${model.id}`, label: model.display_name || model.chat_model,
+      group: '我的模型', model: normalizeUserModelForUi(model),
+    })),
+    ...models.filter((model) => model.enabled !== false && model.supports_text !== false).map((model) => ({
+      value: `system:${model.id}`, label: model.display_name || model.model_name,
+      group: '平台模型', model: { ...model, source: 'system' },
+    })),
+  ];
+}
+
+function chatModelOverride(selection) {
+  if (!selection) return undefined;
+  const match = /^(user|system):([1-9]\d*)$/.exec(selection);
+  if (!match) throw new Error('请选择有效的聊天模型。');
+  return { source: match[1], id: Number(match[2]) };
+}
+
 function attachmentAcceptForModel(_model) {
   return '.txt,.md,.markdown,.csv,.pdf,.docx,image/*';
 }
@@ -82,6 +102,8 @@ export {
   thinkingStatusText,
   findModelForForm,
   normalizeUserModelForUi,
+  chatModelOptions,
+  chatModelOverride,
   attachmentAcceptForModel,
   attachmentHintForModel,
   modelCapabilityWarning,

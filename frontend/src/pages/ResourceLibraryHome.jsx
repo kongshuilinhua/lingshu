@@ -100,8 +100,10 @@ export function ResourceLibraryHome({
       setFormOpen(false);
       setSelectedTemplate(saved);
       setNotice('提示词模板已保存。');
+      return true;
     } catch (err) {
       setProfileError(errorMessage(err));
+      return false;
     } finally {
       setSaving(false);
     }

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import re
+from urllib.parse import urlsplit
 from collections import OrderedDict
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -26,7 +27,8 @@ def control_tool(name: str, description: str, properties: dict, required: list[s
 
 
 SEARCH_TOOL = control_tool('tool_search', 'Search authorized MCP tools by service name or task keywords, e.g. pull request, repository, file. Matching tools become available in the next model request. Search only when external tools are needed.',
-                           {'query': {'type': 'string', 'maxLength': 200}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 8}}, ['query'])
+                           {'query': {'type': 'string', 'maxLength': 200}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 8},
+                            'catalog_cursor': {'type': 'integer', 'minimum': 0, 'maximum': 400}}, ['query'])
 LOAD_SKILL = control_tool('load_skill', 'Load the complete instructions for a Skill listed in the available Skill metadata. Loading does not execute scripts.',
                           {'skill_id': {'type': 'integer'}}, ['skill_id'])
 READ_FILE = control_tool('read_skill_file', 'Read a file belonging to an already loaded Skill. File content is loaded only on demand.',
@@ -58,6 +60,34 @@ def validate_arguments(schema: dict, arguments: dict) -> None:
         raise ValueError('工具参数不符合已加载的定义，或定义包含不可访问的外部引用。') from exc
 
 
+def search_terms(query: str) -> list[tuple[set[str], float]]:
+    aliases = {'pr': 'request', 'repositories': 'repository', 'repos': 'repository', 'repo': 'repository',
+               'files': 'file', 'users': 'user', 'issues': 'issue', 'requests': 'request'}
+    operations = {'list', 'search', 'find', 'query', 'get', 'read'}
+    terms = {}
+    for token in re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]+', query):
+        token = aliases.get(token, token)
+        if token in operations:
+            terms['operation'] = (operations, 0.25)
+        elif token not in {'the', 'a', 'an', 'please', 'of', 'for', 'to', 'and', 'my', 'me'}:
+            terms[token] = ({token}, 1.0)
+    for keyword, token in {'仓库': 'repository', '文件': 'file', '用户': 'user', '问题': 'issue',
+                           '拉取请求': 'request'}.items():
+        if keyword in query:
+            terms[token] = ({token}, 1.0)
+    if any(word in query for word in ('身份', '账号', '账户')):
+        terms['identity'] = ({'authenticated', 'identity', 'profile', 'user'}, 1.0)
+    if any(word in query for word in ('查询', '搜索', '读取', '列出')):
+        terms['operation'] = (operations, 0.25)
+    return list(terms.values())
+
+
+def search_words(text: str) -> set[str]:
+    aliases = {'repositories': 'repository', 'repos': 'repository', 'repo': 'repository',
+               'files': 'file', 'users': 'user', 'issues': 'issue', 'requests': 'request'}
+    return {aliases.get(word, word) for word in re.findall(r'[a-z0-9]+|[\u4e00-\u9fff]+', text.lower())}
+
+
 class CapabilityRouter:
     def __init__(self, db, agent, context: dict, candidates: list, executor=execute_tool):
         self.db, self.agent, self.context = db, agent, context
@@ -68,7 +98,7 @@ class CapabilityRouter:
         self.loaded_skills: dict[int, int] = {}
         self.bindings = {item['skill_id']: item for item in (getattr(agent, 'skill_bindings', None) or []) if item.get('enabled', True)}
         if self.candidates or self.bindings:
-            reserved = {item.name for item in (SEARCH_TOOL, LOAD_SKILL, READ_FILE, RUN_SCRIPT)}
+            reserved = ({SEARCH_TOOL.name} if self.candidates else set()) | ({LOAD_SKILL.name, READ_FILE.name, RUN_SCRIPT.name} if self.bindings else set())
             used = reserved | {item.name for item in candidates}
             for index, tool in enumerate(self.base_tools):
                 if tool.name in reserved:
@@ -118,10 +148,28 @@ class CapabilityRouter:
                                'description': version.metadata_json.get('description', ''), 'version': version.version})
         return result
 
+    def mcp_metadata(self) -> list[dict]:
+        services = {}
+        if not self.candidates:
+            return []
+        with self.fresh() as (db, member):
+            for candidate in self.candidates:
+                try:
+                    tool, server = self._mcp(db, member, candidate)
+                except ValueError:
+                    continue
+                entry = services.setdefault(server.id, {'id': server.id, 'name': server.name,
+                    'description': (server.description or '')[:500], 'host': urlsplit(server.url or '').hostname or '', 'tools': set()})
+                entry['tools'].add(tool.name)
+        return [{key: value for key, value in entry.items() if key != 'tools'} | {'tool_count': len(entry['tools'])}
+                for entry in services.values()]
+
     def tools(self) -> list:
         tools = list(self.base_tools)
-        if self.candidates or self.bindings:
-            tools.extend([SEARCH_TOOL, LOAD_SKILL])
+        if self.candidates:
+            tools.append(SEARCH_TOOL)
+        if self.bindings:
+            tools.append(LOAD_SKILL)
         tools.extend(self.active.values())
         if self.loaded_skills:
             tools.append(READ_FILE)
@@ -148,22 +196,30 @@ class CapabilityRouter:
         if not query or len(query) > 200:
             raise ValueError('请输入 1 到 200 字符的工具搜索关键词。')
         limit = max(1, min(int(arguments.get('limit') or 5), 8))
-        terms = re.findall(r'[a-z0-9_]+|[\u4e00-\u9fff]+', query)
-        for term, aliases in {'pr': ['pull', 'request'], '仓库': ['repository'], '搜索': ['search'], '查询': ['list'], '文件': ['file'], '读取': ['read']}.items():
-            if term in terms:
-                terms.extend(aliases)
+        terms = search_terms(query)
         matches = []
+        catalog = []
         with self.fresh() as (db, member):
             for candidate in self.candidates:
                 try:
                     tool, server = self._mcp(db, member, candidate)
                 except ValueError:
                     continue
-                text = f'{tool.name} {tool.description} {server.name} {server.description or ""} {server.url or ""}'.lower()
-                score = sum(1 for term in set(terms) if term in text)
-                if score:
-                    matches.append((score, tool))
-        found = [tool for _, tool in sorted(matches, key=lambda item: (-item[0], item[1].name))[:limit]]
+                name_words = search_words(tool.schema['tool_name'])
+                catalog.append({'name': tool.name, 'description': tool.description[:180], 'service': server.name,
+                                'required_parameters': [str(name)[:80] for name in list(tool.schema['input_schema'].get('required') or [])[:12]]})
+                description_words = search_words(tool.description)
+                service_text = f'{server.name} {server.description or ""} {urlsplit(server.url or "").hostname or ""}'.lower()
+                exact = query in {tool.name.lower(), tool.schema['tool_name'].lower()}
+                coverage = sum(bool(words & (name_words | description_words)) or any(word in service_text for word in words)
+                               for words, _ in terms)
+                score = sum(weight * (4 * bool(words & name_words) + bool(words & description_words)
+                            + 0.5 * any(word in service_text for word in words)) for words, weight in terms)
+                if exact or score:
+                    definition = next(item for item in server.catalog['tools'] if item.get('name') == tool.schema['tool_name'])
+                    readonly = (definition.get('annotations') or {}).get('readOnlyHint') is True
+                    matches.append((exact, coverage, score, readonly, len(tool.schema['input_schema'].get('required') or []), tool))
+        found = [item[5] for item in sorted(matches, key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4], item[5].name))[:limit]]
         oversized = False
         found = [tool for tool in found if len(json.dumps(tool.schema, ensure_ascii=False).encode()) <= 32768]
         if matches and not found:
@@ -174,8 +230,35 @@ class CapabilityRouter:
         while len(self.active) > 12 or sum(len(json.dumps(item.schema, ensure_ascii=False).encode()) for item in self.active.values()) > 65536:
             self.active.popitem(last=False)
         found = [tool for tool in found if tool.name in self.active]
-        return {'tools': [{'name': item.name, 'description': item.description, 'input_schema': item.schema['input_schema']} for item in found],
+        cursor = max(0, min(int(arguments.get('catalog_cursor') or 0), 400))
+        catalog.sort(key=lambda item: (item['service'], item['name']))
+        overview = []
+        size = 0
+        for entry in catalog[cursor:cursor + 50]:
+            entry_size = len(json.dumps(entry, ensure_ascii=False).encode())
+            if size + entry_size > 12000:
+                break
+            overview.append(entry)
+            size += entry_size
+        next_cursor = cursor + len(overview)
+        # Schemas are already supplied as tools in the next request; duplicating
+        # them in conversation history wastes context on every later round.
+        return {'tools': [{'name': item.name, 'description': item.description} for item in found],
+                'available_tool_metadata': overview,
+                'next_catalog_cursor': next_cursor if next_cursor < len(catalog) else None,
+                'discovery_note': '能力索引仅包含已授权工具的名称、用途和必填参数名，不代表工具定义已加载。需要其他能力或缺少参数时，从索引选择合适工具，用 tool_search 搜索其确切 name 加载定义，再继续原任务。不要因为一次搜索没返回某项能力就要求用户提供关键词或假定它不存在。',
                 'message': '命中的工具已加入下一轮模型请求。' if found else '匹配工具的定义超过加载预算。' if oversized else '未找到获准使用的匹配工具，请尝试更具体的关键词。'}
+
+    def known_mcp_tool(self, name: str) -> bool:
+        candidate = next((item for item in self.candidates if item.name == name), None)
+        if candidate is None:
+            return False
+        try:
+            with self.fresh() as (db, member):
+                self._mcp(db, member, candidate)
+            return True
+        except ValueError:
+            return False
 
     def invoke(self, tool, arguments: dict) -> dict:
         if not isinstance(arguments, dict):
@@ -243,7 +326,7 @@ class CapabilityRouter:
                     self.active.pop(tool.name, None)
                     raise ValueError('MCP 工具定义已变化，请重新调用 tool_search。')
                 return self.executor(current, {**self.context, 'input': arguments, '_db': db, '_user_id': member.user_id,
-                                              '_workspace_id': member.workspace_id})
+                                               '_workspace_id': member.workspace_id})
         else:
             raise ValueError('未知的内置能力工具。')
         return {'tool': tool.name, 'tool_type': 'capability', 'content': json.dumps(result, ensure_ascii=False),
