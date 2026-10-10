@@ -342,3 +342,29 @@ def test_has_evidence_logic():
     ]
     assert _has_evidence(sources_low_dense, "你好，请问你是谁") is False
 
+    # 5. 关键回归：BM25 单路命中但 query 全是停用词 —— 旧实现因 `bm25_score > 0` 恒真而误判为有证据。
+    #    典型场景：用户问「你好呀」，jieba 切出「你好/呀」全被停用词表拦掉，
+    #    但 BM25 仍因字符交叠给出正分，于是知识库被强制注入，诱发幻觉。
+    sources_bm25_stopword_only = [
+        {
+            "snippet": "你好，这是产品使用说明的第一段。",
+            "retrieval_channel": "rrf:dense+bm25",
+            "dense_score": 0.12,
+            "bm25_score": 3.7,
+            "score": 0.016,
+        }
+    ]
+    assert _has_evidence(sources_bm25_stopword_only, "你好呀") is False
+
+    # 6. 仅凭 BM25 微弱正分（无 rerank、dense 低于阈值）不足以构成证据。
+    sources_bm25_weak = [
+        {
+            "snippet": "系统采用向量检索与词频检索双通道融合。",
+            "retrieval_channel": "rrf:dense+bm25",
+            "dense_score": 0.18,
+            "bm25_score": 1.02,
+            "score": 0.016,
+        }
+    ]
+    assert _has_evidence(sources_bm25_weak, "量子隧穿效应如何解释") is False
+

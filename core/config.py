@@ -187,6 +187,8 @@ class Settings(BaseSettings):
     embedding_cache_enabled: bool = Field(default=True, alias="EMBEDDING_CACHE_ENABLED")
     # 🧠 TTL 默认 7 天：embedding 不会因文档变更而改变，TTL 仅为给 Redis 内存占用设上限。
     embedding_cache_ttl_seconds: int = Field(default=7 * 24 * 3600, alias="EMBEDDING_CACHE_TTL_SECONDS")
+    rag_evidence_rerank_min: float = Field(default=0.40, alias="RAG_EVIDENCE_RERANK_MIN")
+    rag_evidence_dense_min: float = Field(default=0.40, alias="RAG_EVIDENCE_DENSE_MIN")
     # 🛡️ 无证据时拒绝回答：防止 LLM 在知识库无相关内容时产生幻觉
     rag_refuse_when_no_evidence: bool = Field(default=True, alias="RAG_REFUSE_WHEN_NO_EVIDENCE")
     # 🎯 父块扩展（small-to-big 检索）：用 child 小块精准命中、排序，最终喂给 LLM 时换成对应父块全文。

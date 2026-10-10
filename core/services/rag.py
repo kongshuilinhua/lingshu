@@ -504,43 +504,53 @@ RAG_CONVERSATIONAL_STOPWORDS = {
 
 def _has_evidence(sources: list[dict], query: str) -> bool:
     """
-    RAG 核心守门人：判断召回是否属于“有效证据”。
+    RAG 核心守门人：判断召回是否属于"有效证据"。
 
     🛡️ 防御性设计：
         - 为什么要做证据判定？
-          如果用户发“早上好！”，向量检索会因为密度的余弦相似度计算特征，强制返回一篇含有“早上”或字面上最接近的完全不相干的文章作为上下文。
+          如果用户发"早上好！"，向量检索会因为密度的余弦相似度计算特征，强制返回一篇含有"早上"或字面上最接近的完全不相干的文章作为上下文。
           这会诱发严重的 LLM 生成幻觉（大模型被喂入无意义文章后，可能会强行把问候语同产品说明文缝合在一起）。
-        
-    🧠 判断阈值逻辑：
-        1. 前置清扫过滤停用词，检查 Query 的实质词是否真的包含在返回的 Snippet 原文中。
-        2. 如果词汇层面无交集，严格检查三大通道的评分底线：
-           - BM25 Score > 0 （确认存在精确的分词交叠）。
-           - Dense Channel 余弦分值 >= 0.40 （向量距离底线线）。
-           - Rerank 重排打分值 >= 0.40 （高保真重排重估得分阈值）。
-           一旦均低于上述底线，本方法将返回 `False` 触发拒答或使用大模型本能兜底。
+
+    🧠 判断阈值逻辑（三档，任一命中即为有证据）：
+        1. 词面证据：前置清扫停用词后，Query 的实质词出现在返回的 Snippet 原文中。
+        2. Rerank 证据：精排模型的 relevance_score >= RAG_EVIDENCE_RERANK_MIN。
+           Rerank 分数在同一次查询内可比，是最可靠的信号。
+        3. Dense 证据：向量余弦分值 >= RAG_EVIDENCE_DENSE_MIN。
+
+    ⚠️ 已移除的判据：「BM25 Score > 0」。
+        BM25 对任何词元交叠都给出正分（含"你好""请问"这类停用词），该条件近乎恒真，
+        会让"知识库里根本没有的问题"被判为有证据，从而使拒答能力失效。
+        BM25 的价值已在词面证据档（第 1 档）通过非停用词交叠间接体现。
+
+    ⚠️ 两档阈值默认值 0.40 是**保守初值**，用于保持既有行为可比；
+       正式取值待 P1 评测基线标定后调整（见设计文档 §6.3）。
     """
     if not sources:
         return False
-        
+
+    settings = get_settings()
+    rerank_min = float(getattr(settings, "rag_evidence_rerank_min", 0.40))
+    dense_min = float(getattr(settings, "rag_evidence_dense_min", 0.40))
+
     tokens = [
-        token for token in _tokenize(query) 
+        token for token in _tokenize(query)
         if len(token) > 1 and token.lower() not in RAG_CONVERSATIONAL_STOPWORDS
     ]
-    
+
     snippets = " ".join(source.get("snippet", "") for source in sources).lower()
-    
+
     if tokens and any(token.lower() in snippets for token in tokens):
         return True
-        
+
     for source in sources:
-        channel = source.get("retrieval_channel", "")
-        if "bm25" in channel and source.get("bm25_score", 0.0) > 0:
+        channel = source.get("retrieval_channel") or ""
+        dense_score = float(source.get("dense_score") or 0.0)
+        score = float(source.get("score") or 0.0)
+        if "rerank" in channel and score >= rerank_min:
             return True
-        if "dense" in channel and source.get("dense_score", 0.0) >= 0.40:
+        if dense_score >= dense_min:
             return True
-        if "rerank" in channel and (source.get("score", 0.0) >= 0.40 or source.get("dense_score", 0.0) >= 0.40):
-            return True
-            
+
     return False
 
 
