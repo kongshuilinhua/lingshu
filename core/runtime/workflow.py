@@ -51,7 +51,7 @@ from core.services.memory_summary import (
     parse_memory,
     summarize_turns,
 )
-from core.services.rag import retrieve
+from core.services.rag import RAG_NO_EVIDENCE_ANSWER, retrieve
 
 try:
     from langchain_core.messages.utils import count_tokens_approximately
@@ -590,6 +590,51 @@ class WorkflowRunner:
                 rag_result = retrieve(self.db, **retrieve_kwargs)
             sources = rag_result.sources
             status = {**rag_result.status, "effective_source": effective_source}
+
+            # 🛡️ 无证据拒答：接通此前只计算不使用的 no_evidence。
+            # 机制：写入 context["draft"] —— 下游 LLM 节点（_execute_node 的 LLM 分支
+            # 与 _stream_llm_node）均有「若已有 draft 则不再调用模型」的短路分支，
+            # 因此拒答不需要新增节点类型，且拒答文本会以 token 事件流式下发。
+            # 同时清空 sources：既然判定无证据，就不得把低相关片段塞进上下文诱发幻觉。
+            rag_config = context.get("rag_config") or {}
+            # 注意：默认值必须惰性求值，且用 getattr 防御性读取 Settings——
+            # 直接写 status.get(k, get_settings().xxx) 会在 k 存在时也提前访问
+            # Settings 属性；而部分单测（如 test_self_correct_retrieval）把
+            # get_settings 换成精简 SimpleNamespace，会因此 AttributeError。
+            # 兜底默认 True，与 core/config.py 中该字段的默认值保持一致。
+            # 另外，retrieve() 的「未绑定知识库」提前返回路径不带
+            # refuse_when_no_evidence，故这里再读一次本轮 rag_config，
+            # 否则 agent 显式设置的 refuse_when_no_evidence=False 在该路径上失效。
+            refusal_enabled = bool(
+                status["refuse_when_no_evidence"]
+                if "refuse_when_no_evidence" in status
+                else rag_config.get(
+                    "refuse_when_no_evidence",
+                    getattr(get_settings(), "rag_refuse_when_no_evidence", True),
+                )
+            )
+            # 🛡️ 仅当「本轮确实有知识库参与检索」且无证据时才拒答。
+            # 未绑定知识库的 agent（status["knowledge_base_ids"] 为空）属「无 KB 可搜」，
+            # 不是「检索不到证据」——那种情况必须正常走模型，否则所有纯聊天 agent 会被无差别拒答。
+            if status.get("no_evidence") and status.get("knowledge_base_ids") and refusal_enabled:
+                refusal_status = {
+                    **status,
+                    "reason": "no_evidence_refused",
+                    "sources_emitted": False,
+                    "matched_chunks": 0,
+                }
+                return {
+                    "sources": [],
+                    "draft": RAG_NO_EVIDENCE_ANSWER,
+                    "rag_enabled": True,
+                    "rag_refusal": True,
+                    "rag_status": refusal_status,
+                    "events": [
+                        {"event": "rag_status", "data": refusal_status},
+                        {"event": "rag_refusal", "data": {"reason": "no_evidence"}},
+                    ],
+                }
+
             return {"sources": sources, "rag_enabled": True, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
             
         # ==========================================

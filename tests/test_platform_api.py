@@ -731,7 +731,12 @@ def test_system_model_runtime_ignores_default_private_model(client, auth_headers
     assert default_private["chat_model"] not in published_chat.text
 
 
-def test_rag_no_evidence_still_uses_model_answer(client, auth_headers):
+def test_rag_no_evidence_refuses_instead_of_guessing(client, auth_headers):
+    """无证据时必须拒答，且不得调用模型生成（防幻觉）。
+
+    这是本仓此前最严重的语义反转：refuse_when_no_evidence 配置项默认 True，
+    全链路却只计算不使用；而旧测试反向断言拒答文案不能出现，把错误行为锁死。
+    """
     kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "No Evidence KB"})
     assert kb.status_code == 200
     agent = client.post(
@@ -754,9 +759,39 @@ def test_rag_no_evidence_still_uses_model_answer(client, auth_headers):
     assert response.status_code == 200
     assert "event: rag_status" in response.text
     assert '"no_evidence": true' in response.text
+    assert '"rag_refusal": true' in response.text
     assert "event: token" in response.text
     assert "event: done" in response.text
+    # 拒答文案必须出现（与旧断言方向相反）
+    assert "No reliable evidence was found" in response.text
+
+
+def test_agent_without_knowledge_base_is_not_refused(client, auth_headers):
+    """未绑定知识库的 agent 不得被无证据拒答（回归护栏）。
+
+    背景：`retrieve()` 的「未绑定知识库」提前返回路径硬编码 `no_evidence: True`
+    （core/services/rag.py，reason=no_knowledge_base）。接通拒答后若只看
+    `no_evidence`，所有纯聊天 agent 会被无差别拒答。设计意图（设计文档 §5.1）
+    是「检索执行了但没找到相关证据」才拒答，不是「没配知识库」。
+    故拒答条件必须同时要求本轮确有知识库参与检索（knowledge_base_ids 非空）。
+    """
+    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Plain Chat Agent"})
+    assert agent.status_code == 200
+
+    response = client.post(
+        f"/api/agents/{agent.json()['agent']['id']}/chat/stream",
+        headers=auth_headers,
+        json={"message": "what can you do", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert "event: rag_status" in response.text
+    # 不得拒答：既不出现拒答事件，也不出现拒答文案。
+    assert '"rag_refusal": true' not in response.text
     assert "No reliable evidence was found" not in response.text
+    # 正常走模型生成（而非被拒答短路），因此有 token 与 done。
+    assert "event: token" in response.text
+    assert "event: done" in response.text
 
 
 def test_user_model_provider_test_is_sanitized(client, auth_headers):

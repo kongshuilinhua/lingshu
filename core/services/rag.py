@@ -491,6 +491,16 @@ def _bm25_scores(corpus: list[list[str]], query_tokens: list[str]) -> list[float
         return scores
 
 
+# 🛡️ 无证据拒答文案。
+# 工程约束：必须包含子串 "No reliable evidence was found" ——
+# 既有测试（tests/test_platform_api.py）与前端引用均以该措辞判定拒答。
+# 如需本地化，请在前端按下发语言渲染，不要改动这里的英文基准串。
+RAG_NO_EVIDENCE_ANSWER = (
+    "No reliable evidence was found in the knowledge base for this question. "
+    "请补充相关资料后重试，或换个更具体的问法。"
+)
+
+
 # 🎯 坚固的 RAG 拒答词过滤机制。
 # 阻止那些无实质含义的问候句、语气助词或系统指代词（如“帮我”、“你好”）无端激活 RAG 匹配分，防止把无关的随机向量碎片灌给 LLM 导致胡言乱语。
 RAG_CONVERSATIONAL_STOPWORDS = {
