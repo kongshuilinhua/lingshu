@@ -641,6 +641,18 @@ class WorkflowRunner:
         # 3. Tool 节点：极硬核 ReAct 自适应工具决策迭代循环 (The Core Brain of Agent)
         # ==========================================
         if node_type == "Tool":
+            # 🛡️ 上游 Knowledge 节点已判定无证据并写入拒答草稿时，工具节点必须让行。
+            # 默认节点序是 start → knowledge → tool → llm → answer，工具节点会在
+            # 「模型返回纯文本、无 tool_calls」与「多轮工具轮次用尽」两处返回 draft，
+            # 覆盖掉 Knowledge 节点写入的拒答草稿——拒答契约对「知识库 + 工具」组合的
+            # agent 会失效（sources 虽已清空，拒答这半却不成立）。
+            # 判据用 rag_refusal 而非裸 draft：自定义工作流若为 LLM → Tool（先出草稿
+            # 再用工具增强），裸 draft 会让工具全部跳过，改变既有语义；rag_refusal 只在
+            # Knowledge 真的拒答时为真，不碰其它路径。
+            # 返回 {} 是干净的 no-op：context 不变，draft 保留，下游 LLM 节点走自己的
+            # 短路分支，Answer 节点从 context["draft"] 取到拒答文本。
+            if context.get("rag_refusal"):
+                return {}
             bound_tools = self._runtime_tools(agent, node)
             if not context.get('search_enabled', bool((agent.settings.get('tool_policy') or {}).get('web_search_enabled'))):
                 bound_tools = [tool for tool in bound_tools if tool.type != 'builtin_search']

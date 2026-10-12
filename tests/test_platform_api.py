@@ -794,6 +794,72 @@ def test_agent_without_knowledge_base_is_not_refused(client, auth_headers):
     assert "event: done" in response.text
 
 
+def test_rag_refusal_short_circuits_tool_node(client, auth_headers):
+    """「知识库 + 工具」组合下，拒答不得被 Tool 节点的模型回答覆盖（回归护栏）。
+
+    背景：默认节点序是 start → knowledge → tool → llm → answer。Knowledge 节点
+    写入拒答草稿后，Tool 节点会在「模型返回纯文本、无 tool_calls」与「多轮工具轮次
+    用尽」两处返回 draft，覆盖掉拒答草稿——于是用户看到的是正常作答，拒答契约
+    对带工具的 agent 失效。sources 虽已清空，拒答这半却不成立。
+    纯聊天 agent 走「无可用工具」早退，其返回 dict 不含 draft，掩盖了这个洞；
+    本用例是当前唯一覆盖「KB + 工具」组合的方向。
+    """
+    from core.services import web_search
+
+    def fake_search(query, *, top_k=None, timeout_seconds=None):
+        return {
+            "query": query,
+            "provider": "fake",
+            "latency_ms": 7,
+            "items": [{"title": "T", "url": "https://example.com/x", "snippet": "S."}],
+        }
+
+    web_search.search_web = fake_search
+
+    # 空知识库（无文档）：knowledge_base_ids 非空 → 检索确实执行 → no_evidence 为真。
+    kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Refusal With Tool KB"})
+    assert kb.status_code == 200
+    tool = client.post(
+        "/api/tools",
+        headers=auth_headers,
+        json={
+            "type": "builtin_search",
+            "name": "refusal_search",
+            "label": "Refusal Search",
+            "description": "Search test",
+            "search_options": {"top_k": 2},
+        },
+    )
+    assert tool.status_code == 200
+    tool_id = tool.json()["tool"]["id"]
+
+    agent = client.post(
+        "/api/agents",
+        headers=auth_headers,
+        json={
+            "name": "KB Plus Tool Agent",
+            "knowledge_base_ids": [kb.json()["knowledge_base"]["id"]],
+            "tool_ids": [tool_id],
+            "tool_policy": {"web_search_enabled": True},
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+        },
+    )
+    assert agent.status_code == 200
+
+    response = client.post(
+        f"/api/agents/{agent.json()['agent']['id']}/chat/stream",
+        headers=auth_headers,
+        json={"message": "what can you do", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert '"no_evidence": true' in response.text
+    # 拒答契约成立：文案出现，且 Tool 节点确实让行（未产生任何工具调用）。
+    assert "No reliable evidence was found" in response.text
+    assert "event: tool_call" not in response.text
+    assert "event: done" in response.text
+
+
 def test_user_model_provider_test_is_sanitized(client, auth_headers):
     config = _create_user_model(client, auth_headers)
 
