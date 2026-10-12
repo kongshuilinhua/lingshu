@@ -4225,16 +4225,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   margin-top: 4px;
 }
 
-.kb-type-badge {
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  color: #047857;
-  padding: 4px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
 .kb-time-cell {
   color: #64748b;
   font-size: 13px;
