@@ -1,5 +1,6 @@
 import json
 
+from core.db.models import Agent
 from core.services.agents import normalize_rag
 from core.services.knowledge import split_parent_child
 from core.services.rag import _rrf
@@ -179,6 +180,86 @@ def test_recover_interrupted_ingestion_resets_stuck_indexing():
     empty_db = _DB([])
     assert recover_interrupted_ingestion(empty_db) == 0
     assert empty_db.committed is False
+
+
+def test_all_disabled_knowledge_bases_refuse_without_rewriting_ids(client, auth_headers):
+    """全部知识库停用：rag.retrieve() 如实报 all_knowledge_bases_disabled，且端到端拒答。
+
+    core/services/rag.py 的 all_knowledge_bases_disabled 支路此前零覆盖。该支路的
+    正确性依赖两件事同时成立：
+      1. reason/no_evidence 如实反映「有 KB 绑定但一个都没启用」；
+      2. knowledge_base_ids **保持原始非空值**——workflow 的拒答条件是
+         `status.get("no_evidence") and status.get("knowledge_base_ids")`，
+         若这里把 ids 改写成空（或直接复用剔除后的 enabled_ids），
+         停用 KB 的 agent 就会像「没配 KB」一样静默放行，拒答契约失效。
+
+    断言分两层，各查各的东西，不混：
+      - retrieve() 原始返回：查 rag.py 支路本身（reason/no_evidence/ids 未被改写）。
+        不能只查端到端事件流——workflow 会在拒答时把 reason 覆盖成
+        no_evidence_refused，那层看不到 all_knowledge_bases_disabled 这个原值。
+      - 端到端：查该 status 确实触发了拒答（用户侧可见），因为第二层依赖的
+        knowledge_base_ids 非空只有走完 workflow 才被真正消费。
+
+    注：`refuse_when_no_evidence` 必须在 agent 创建时报成显式 True。该字段在
+    api/schemas.py 的 AgentRagConfig 里默认 None，而 normalize_rag 只透传报文里
+    实际给出的键（`data.get(k, settings.rag_xxx)` 的默认值仅在键缺失时生效），
+    于是 agent 落库的 rag 字典里根本不含这个键，workflow 侧读到 None → 不拒答。
+    这与 test_platform_api.py::test_rag_no_evidence_refuses_instead_of_guessing
+    的既有写法一致（那边同样显式传了 True）。
+    """
+    from core.db.session import SessionLocal
+    from core.services.rag import retrieve
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Disabled KB"}).json()[
+        "knowledge_base"
+    ]["id"]
+    patched = client.patch(f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"enabled": False})
+    assert patched.status_code == 200
+    assert patched.json()["knowledge_base"]["enabled"] is False
+
+    agent_id = client.post(
+        "/api/agents",
+        headers=auth_headers,
+        json={
+            "name": "Disabled KB Agent",
+            "knowledge_base_ids": [kb_id],
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+        },
+    ).json()["agent"]["id"]
+
+    # 第 1 层：rag.py 支路原始输出（未被 workflow 覆写过的 reason）。
+    db = SessionLocal()
+    try:
+        agent = db.get(Agent, agent_id)
+        result = retrieve(
+            db,
+            workspace_id=agent.workspace_id,
+            knowledge_base_ids=[kb_id],
+            query="hello there",
+            config={},
+        )
+    finally:
+        db.close()
+
+    assert result.sources == []
+    assert result.status["reason"] == "all_knowledge_bases_disabled"
+    assert result.status["no_evidence"] is True
+    # 护栏：原始 knowledge_base_ids 必须原样保留（拒答条件依赖它非空）。
+    assert result.status["knowledge_base_ids"] == [kb_id]
+
+    # 第 2 层：端到端确实拒答（而非静默放行给模型）。
+    response = client.post(
+        f"/api/agents/{agent_id}/chat/stream",
+        headers=auth_headers,
+        json={"message": "hello there", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    rag_status = _events(response.text, "rag_status")[-1]
+    assert rag_status["no_evidence"] is True
+    assert rag_status["knowledge_base_ids"] == [kb_id]
+    assert '"rag_refusal": true' in response.text
+    assert "No reliable evidence was found" in response.text
 
 
 def test_chat_rag_options_emit_hybrid_status(client, auth_headers):

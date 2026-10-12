@@ -510,7 +510,9 @@ def _bm25_scores(corpus: list[list[str]], query_tokens: list[str]) -> list[float
 
 # 🛡️ 无证据拒答文案。
 # 工程约束：必须包含子串 "No reliable evidence was found" ——
-# 既有测试（tests/test_platform_api.py）与前端引用均以该措辞判定拒答。
+# 后端测试（tests/test_platform_api.py）以该措辞判定拒答，改动会直接挂测试。
+# 前端不解析这段文案：它消费的是下发的 rag_status / rag_refusal 事件
+#（见 frontend/src/store/useChatStore.js、BuilderView.jsx），其中 rag_refusal 目前尚无消费者。
 # 如需本地化，请在前端按下发语言渲染，不要改动这里的英文基准串。
 RAG_NO_EVIDENCE_ANSWER = (
     "No reliable evidence was found in the knowledge base for this question. "
