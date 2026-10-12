@@ -4,7 +4,9 @@
 1. ttl_with_jitter 抖动范围与下限保护；
 2. store 的 get_embedding / set_embedding 往返与 key 隔离；
 3. embed() 第二次命中缓存、不再打外部 API；
-4. 关闭缓存开关时每次都打 API（不回退误命中）。
+4. 关闭缓存开关时每次都打 API（不回退误命中）；
+5. embed_batch 对瞬时故障重试、对确定性故障不重试、重试耗尽后抛出；
+6. _post_json 给异常打的 retryable 标记符合 5xx/408/429 分档规则。
 """
 
 import time
@@ -117,8 +119,6 @@ def test_embed_batch_retries_on_transient_failure(monkeypatch):
     旧行为：批量 embedding 无重试，一次网络抖动导致 indexing→failed 终态，
     用户必须重新上传整篇文档。
     """
-    from core.integrations import llm as llm_module
-
     provider = llm_module.OpenAICompatibleProvider()
     settings = llm_module.get_settings()
     monkeypatch.setattr(settings, "mock_llm", False, raising=False)
@@ -147,8 +147,6 @@ def test_embed_batch_retries_on_transient_failure(monkeypatch):
 
 def test_embed_batch_does_not_retry_on_client_error(monkeypatch):
     """4xx 属确定性失败，重试无意义，必须立即抛出（只调用一次）。"""
-    from core.integrations import llm as llm_module
-
     provider = llm_module.OpenAICompatibleProvider()
     settings = llm_module.get_settings()
     monkeypatch.setattr(settings, "mock_llm", False, raising=False)
@@ -170,3 +168,60 @@ def test_embed_batch_does_not_retry_on_client_error(monkeypatch):
     with pytest.raises(RuntimeError):
         provider.embed_batch(["a"])
     assert calls["n"] == 1
+
+
+def test_embed_batch_raises_after_exhausting_retries(monkeypatch):
+    """可重试但三次全失败，必须抛出而不是静默返回空结果。"""
+    provider = llm_module.OpenAICompatibleProvider()
+    settings = llm_module.get_settings()
+    monkeypatch.setattr(settings, "mock_llm", False, raising=False)
+    monkeypatch.setattr(provider, "_api_key", lambda *a, **k: "test-key")
+    monkeypatch.setattr(provider, "_api_base", lambda *a, **k: "https://example.invalid/v1")
+    monkeypatch.setattr(llm_module, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    calls = {"n": 0}
+
+    def always_flaky(url, payload, api_key, **kwargs):
+        calls["n"] += 1
+        err = RuntimeError("Model call failed: HTTP 429. rate limited")
+        err.retryable = True
+        raise err
+
+    monkeypatch.setattr(provider, "_post_json", always_flaky)
+
+    with pytest.raises(RuntimeError):
+        provider.embed_batch(["a"])
+    assert calls["n"] == llm_module._EMBED_MAX_ATTEMPTS == 3
+
+
+def test_post_json_marks_retryability(monkeypatch):
+    """核实 _post_json 给异常打的 retryable 标记符合分档规则。
+
+    既有两条重试用例都 monkeypatch 掉了 _post_json、直接伪造 retryable 属性，
+    因此标记逻辑本身无测试覆盖——改错判定（如把 >=500 写成 >=400）套件仍全绿。
+    本用例驱动真实 _post_json，用 stub 的 urlopen 抛真实 HTTPError。
+
+    📌 stub 目标：`_post_json` 在 `public_only=False`（默认）时走
+       `urllib.request.urlopen`（模块级 urllib 引用），故 patch
+       `llm_module.urllib.request.urlopen` 即可命中。
+    """
+    import urllib.error
+
+    provider = llm_module.OpenAICompatibleProvider()
+
+    def raise_http(code):
+        def fake_urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, code, "err", {}, None)
+        return fake_urlopen
+
+    for code in (500, 503, 429, 408):
+        monkeypatch.setattr(llm_module.urllib.request, "urlopen", raise_http(code))
+        with pytest.raises(RuntimeError) as exc_info:
+            provider._post_json("https://example.invalid/v1/embeddings", {"input": ["a"]}, "k")
+        assert getattr(exc_info.value, "retryable", False) is True, f"HTTP {code} 应为可重试"
+
+    for code in (400, 401, 404):
+        monkeypatch.setattr(llm_module.urllib.request, "urlopen", raise_http(code))
+        with pytest.raises(RuntimeError) as exc_info:
+            provider._post_json("https://example.invalid/v1/embeddings", {"input": ["a"]}, "k")
+        assert getattr(exc_info.value, "retryable", False) is False, f"HTTP {code} 应为不可重试"

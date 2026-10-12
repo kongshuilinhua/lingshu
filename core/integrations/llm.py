@@ -24,7 +24,8 @@ DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 OPENAI_COMPATIBLE_DEFAULT_BASE = DASHSCOPE_COMPATIBLE_BASE
 
 # 🛡️ 批量 embedding 的瞬时故障重试策略。
-# 只对网络类与 5xx 异常重试；4xx（请求体超限、鉴权失败、模型不存在）不重试——重试必然再次失败。
+# 只对网络类、5xx、以及语义上属瞬时的 408/429 重试；其余 4xx
+#（请求体超限、鉴权失败、模型不存在）不重试——重试必然再次失败。
 _EMBED_MAX_ATTEMPTS = 3
 _EMBED_RETRY_BACKOFF_SECONDS = 0.5
 
@@ -34,8 +35,8 @@ def _is_retryable_embedding_error(exc: Exception) -> bool:
 
     🎯 依赖 `_post_json` 打上的 `retryable` 标记：
       - 网络类异常（连接失败/超时/SSL）→ retryable=True
-      - HTTP 5xx → retryable=True
-      - HTTP 4xx（请求体超限、鉴权失败、模型不存在）→ retryable=False
+      - HTTP 5xx / 408 / 429 → retryable=True
+      - 其余 HTTP 4xx（请求体超限、鉴权失败、模型不存在）→ retryable=False
 
     🛡️ 未打标记的异常（如响应体过大、JSON 解析失败）按不可重试处理，
         避免在确定性故障上做无谓的重试与等待。
@@ -661,8 +662,11 @@ class OpenAICompatibleProvider:
             error = RuntimeError(
                 f"Model call failed: HTTP {exc.code}. Check endpoint, API key and model name. {detail}"
             )
-            # 🛡️ 5xx 视为瞬时故障（可重试）；4xx 是确定性失败，重试无意义。
-            error.retryable = exc.code >= 500
+            # 🛡️ 可重试的 HTTP 状态：5xx 上游故障 + 408 请求超时 + 429 限流。
+            # 408/429 属 4xx 但语义上是瞬时故障（OpenAI 兼容网关的限流尤其常见），
+            # 与 core/services/user_models.py:508 的既有判定保持一致。
+            # 其余 4xx（请求体超限、鉴权失败、模型不存在）是确定性失败，重试无意义。
+            error.retryable = exc.code >= 500 or exc.code in {408, 429}
             raise error from exc
         except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
             error = RuntimeError(
