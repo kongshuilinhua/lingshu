@@ -290,7 +290,11 @@ class Settings(BaseSettings):
             # 等于所有新入库文档的向量在进程重启后静默消失。
             from core.integrations.vector_store import vector_store as _vector_store
 
-            if _vector_store.using_fallback:
+            # 🛡️ 仅当向量库单例确实由「本 Settings 实例」驱动时才检查其运行期状态。
+            # 单例在构造时执行 `self.settings = get_settings()`，与调用方 self 可能不是同一对象
+            # （单元测试构造独立 Settings 即属此情形）；不加此守卫会误报，且使结果依赖用例执行顺序。
+            # 生产启动路径（api/main.py）两侧都取自 get_settings()，故守卫成立、拦截能力不受影响。
+            if _vector_store.settings is self and _vector_store.using_fallback:
                 issues.append(
                     "LINGSHU_VECTOR_BACKEND=milvus but the Milvus connection is unavailable "
                     f"({_vector_store.status().get('error') or 'unknown error'}); "

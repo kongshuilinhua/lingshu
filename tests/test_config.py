@@ -63,3 +63,39 @@ def test_production_readiness_accepts_hardened_config(monkeypatch):
     )
 
     assert settings.production_readiness_issues() == []
+
+
+def test_production_readiness_blocks_runtime_vector_fallback(monkeypatch):
+    """运行期降级必须在生产就绪检查里被拦下。
+
+    🛡️ 守卫 `_vector_store.settings is self` 只在向量库单例确由「本 Settings 实例」驱动时才检查其状态，
+    本例正是该情形：把单例的 settings 指向本实例，模拟「生产配置 milvus 但连不上、已回落到内存」。
+    若把该守卫写成恒假，这条用例会失败 —— 保证拦截能力没有被守卫顺手改没。
+    """
+    from core.integrations import vector_store as vs_module
+
+    settings = _settings(
+        monkeypatch,
+        LINGSHU_DEPLOYMENT_MODE="production",
+        JWT_SECRET="x" * 48,
+        API_KEY_ENCRYPTION_KEY="y" * 48,
+        DATABASE_URL="mysql+pymysql://lingshu_prod:strong-password@db:3306/lingshu_agent",
+        REDIS_URL="redis://redis:6379/0",
+        CELERY_ENABLED="true",
+        LINGSHU_VECTOR_BACKEND="milvus",
+        CORS_ORIGINS="https://agent.example.com",
+        STORAGE_BACKEND="minio",
+        STORAGE_ACCESS_KEY="lingshu-prod",
+        STORAGE_SECRET_KEY="z" * 48,
+    )
+    store = vs_module.vector_store
+    # 🛡️ 全部走 monkeypatch，用例结束自动还原，避免污染后续用例。
+    monkeypatch.setattr(store, "settings", settings)
+    monkeypatch.setattr(store, "_client", None)
+    monkeypatch.setattr(store, "_error", "connection refused")
+
+    issues = settings.production_readiness_issues()
+
+    fallback_issues = [issue for issue in issues if "Milvus connection is unavailable" in issue]
+    assert len(fallback_issues) == 1
+    assert "connection refused" in fallback_issues[0]
