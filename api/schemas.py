@@ -149,7 +149,7 @@ class KnowledgeBaseUpdateRequest(BaseModel):
     """知识库可更新字段（局部更新，未提供者不改动）。"""
 
     enabled: bool | None = None
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = None
 
 

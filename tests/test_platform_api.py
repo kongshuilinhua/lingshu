@@ -2865,3 +2865,58 @@ def test_knowledge_base_enabled_persists_and_filters_retrieval(client, auth_head
     assert listed.status_code == 200
     target = [kb for kb in listed.json()["items"] if kb["id"] == kb_id]
     assert target and target[0]["enabled"] is False
+
+
+def test_knowledge_base_patch_preserves_unset_fields_and_bounds_name(client, auth_headers):
+    """PATCH 是局部更新：未提供的字段必须保持原值，且 name 保留长度/非空约束。
+
+    覆盖既有前端调用路径（main.jsx / resources.js 只传 {name, description}）
+    以及 Task 3 新增的 {enabled} 单字段调用。
+    """
+    created = client.post(
+        "/api/knowledge-bases",
+        headers=auth_headers,
+        json={"name": "Original KB", "description": "原生描述"},
+    )
+    assert created.status_code == 200
+    kb_id = created.json()["knowledge_base"]["id"]
+    assert created.json()["knowledge_base"]["enabled"] is True
+
+    # ① 只传 {name, description}（既有前端路径）→ enabled 必须保持原值 True
+    renamed = client.patch(
+        f"/api/knowledge-bases/{kb_id}",
+        headers=auth_headers,
+        json={"name": "Renamed KB", "description": "改后描述"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["knowledge_base"]["name"] == "Renamed KB"
+    assert renamed.json()["knowledge_base"]["description"] == "改后描述"
+    assert renamed.json()["knowledge_base"]["enabled"] is True
+
+    # ② 只传 {enabled} → description/name 不能被清空
+    disabled = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"enabled": False}
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["knowledge_base"]["enabled"] is False
+    assert disabled.json()["knowledge_base"]["name"] == "Renamed KB"
+    assert disabled.json()["knowledge_base"]["description"] == "改后描述"
+
+    # ③ name 长度上限与 Create 侧一致（列类型 String(160)）
+    too_long = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"name": "x" * 161}
+    )
+    assert too_long.status_code == 422
+
+    # ④ 纯空白 name 仍被拒（min_length=1 拦空串，函数内 strip 校验拦纯空格）
+    blank = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"name": "   "}
+    )
+    assert blank.status_code == 422
+
+    # ⑤ 写入的 name 应已 strip，不留首尾空白
+    padded = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"name": "  Trimmed KB  "}
+    )
+    assert padded.status_code == 200
+    assert padded.json()["knowledge_base"]["name"] == "Trimmed KB"

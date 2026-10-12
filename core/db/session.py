@@ -363,13 +363,13 @@ def _run_compat_migrations() -> None:
                     )
                 )
     if "knowledge_bases" in table_names:
-        # 🛡️ enabled 用 BOOLEAN + server_default 1（新建知识库默认启用）。
+        # 🛡️ enabled 用 BOOLEAN DEFAULT true（与仓库既有 boolean 迁移写法一致），新建知识库默认启用。
         # updated_at 用 TIMESTAMP；不用 DATETIME 是为了对齐 _VALID_DDL_TYPES 白名单
         #（该白名单只允许 BOOLEAN/INTEGER/BIGINT/FLOAT/DOUBLE/VARCHAR/TEXT/JSON/TIMESTAMP）。
         _ensure_columns(
             "knowledge_bases",
             {
-                "enabled": "BOOLEAN DEFAULT 1",
+                "enabled": "BOOLEAN DEFAULT true",
                 "updated_at": "TIMESTAMP NULL",
             },
         )
