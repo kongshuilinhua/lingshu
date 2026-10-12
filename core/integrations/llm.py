@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import socket
 import ssl
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterable
@@ -15,9 +17,30 @@ from core.integrations import anthropic_protocol
 from core.integrations.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
 from core.security.outbound_http import open_model_gateway
 
+logger = logging.getLogger(__name__)
+
 # 🎯 系统硬编码默认的 OpenAI 兼容模式 API 端点（指向阿里云百炼/通义千问兼容接口）
 DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 OPENAI_COMPATIBLE_DEFAULT_BASE = DASHSCOPE_COMPATIBLE_BASE
+
+# 🛡️ 批量 embedding 的瞬时故障重试策略。
+# 只对网络类与 5xx 异常重试；4xx（请求体超限、鉴权失败、模型不存在）不重试——重试必然再次失败。
+_EMBED_MAX_ATTEMPTS = 3
+_EMBED_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _is_retryable_embedding_error(exc: Exception) -> bool:
+    """判定 embedding 请求失败是否值得重试。
+
+    🎯 依赖 `_post_json` 打上的 `retryable` 标记：
+      - 网络类异常（连接失败/超时/SSL）→ retryable=True
+      - HTTP 5xx → retryable=True
+      - HTTP 4xx（请求体超限、鉴权失败、模型不存在）→ retryable=False
+
+    🛡️ 未打标记的异常（如响应体过大、JSON 解析失败）按不可重试处理，
+        避免在确定性故障上做无谓的重试与等待。
+    """
+    return bool(getattr(exc, "retryable", False))
 
 
 @dataclass
@@ -421,7 +444,28 @@ class OpenAICompatibleProvider:
         out: list[list[float]] = []
         for start in range(0, len(texts), effective_batch):
             batch = texts[start : start + effective_batch]
-            data = self._post_json(url, {"model": settings.openai_embedding_model, "input": batch}, api_key)
+            payload = {"model": settings.openai_embedding_model, "input": batch}
+
+            # 🛡️ 有界重试：只重试瞬时故障，避免一次网络抖动让整篇文档落入 failed 终态。
+            data: dict | None = None
+            for attempt in range(1, _EMBED_MAX_ATTEMPTS + 1):
+                try:
+                    data = self._post_json(url, payload, api_key)
+                    break
+                except Exception as exc:  # noqa: BLE001 - 可重试性由 _is_retryable_embedding_error 判定
+                    if not _is_retryable_embedding_error(exc) or attempt == _EMBED_MAX_ATTEMPTS:
+                        raise
+                    logger.warning(
+                        "Embedding batch failed (attempt %s/%s), retrying: %s",
+                        attempt,
+                        _EMBED_MAX_ATTEMPTS,
+                        exc,
+                    )
+                    if _EMBED_RETRY_BACKOFF_SECONDS:
+                        time.sleep(_EMBED_RETRY_BACKOFF_SECONDS * attempt)
+            if data is None:  # pragma: no cover - 循环必然 break 或 raise
+                raise RuntimeError("Embedding batch failed without a result")
+
             items = sorted(data["data"], key=lambda item: item.get("index", 0))
             out.extend(item["embedding"] for item in items)
         return out
@@ -614,13 +658,19 @@ class OpenAICompatibleProvider:
                 return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read(4096).decode("utf-8", errors="replace").replace(api_key, "[secret]")[:800]
-            raise RuntimeError(
+            error = RuntimeError(
                 f"Model call failed: HTTP {exc.code}. Check endpoint, API key and model name. {detail}"
-            ) from exc
+            )
+            # 🛡️ 5xx 视为瞬时故障（可重试）；4xx 是确定性失败，重试无意义。
+            error.retryable = exc.code >= 500
+            raise error from exc
         except (urllib.error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
-            raise RuntimeError(
+            error = RuntimeError(
                 f"Model call failed: cannot connect to model gateway {url}. Check endpoint, proxy, certs and API key. Raw error: {exc}"
-            ) from exc
+            )
+            # 网络类异常（连接失败、超时、SSL 握手）均为瞬时故障。
+            error.retryable = True
+            raise error from exc
 
     def _post_json_stream(self, url: str, payload: dict, api_key: str, *, public_only: bool = False,
                           headers: dict | None = None, protocol: str = "openai-compatible") -> Iterable[dict]:

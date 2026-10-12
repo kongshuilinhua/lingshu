@@ -10,6 +10,8 @@
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from core.config import get_settings
 from core.integrations import llm as llm_module
 from core.services import rag_cache
@@ -107,3 +109,64 @@ def test_embed_skips_cache_when_disabled(monkeypatch):
     provider.embed("x")
     provider.embed("x")
     assert calls["n"] == 2   # 关缓存时每次都打 API
+
+
+def test_embed_batch_retries_on_transient_failure(monkeypatch):
+    """embed_batch 必须对瞬时故障重试，而不是让整篇文档直接 failed。
+
+    旧行为：批量 embedding 无重试，一次网络抖动导致 indexing→failed 终态，
+    用户必须重新上传整篇文档。
+    """
+    from core.integrations import llm as llm_module
+
+    provider = llm_module.OpenAICompatibleProvider()
+    settings = llm_module.get_settings()
+    monkeypatch.setattr(settings, "mock_llm", False, raising=False)
+    monkeypatch.setattr(provider, "_api_key", lambda *a, **k: "test-key")
+    monkeypatch.setattr(provider, "_api_base", lambda *a, **k: "https://example.invalid/v1")
+
+    calls = {"n": 0}
+
+    def flaky_post(url, payload, api_key, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            # 模拟 _post_json 对网络类异常的统一包装（带 retryable 标记）
+            err = RuntimeError("Model call failed: cannot connect to model gateway")
+            err.retryable = True
+            raise err
+        return {"data": [{"index": i, "embedding": [0.1, 0.2]} for i, _ in enumerate(payload["input"])]}
+
+    monkeypatch.setattr(provider, "_post_json", flaky_post)
+    # 关闭退避等待，让测试跑得快
+    monkeypatch.setattr(llm_module, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    result = provider.embed_batch(["a", "b"])
+    assert len(result) == 2
+    assert calls["n"] == 3
+
+
+def test_embed_batch_does_not_retry_on_client_error(monkeypatch):
+    """4xx 属确定性失败，重试无意义，必须立即抛出（只调用一次）。"""
+    from core.integrations import llm as llm_module
+
+    provider = llm_module.OpenAICompatibleProvider()
+    settings = llm_module.get_settings()
+    monkeypatch.setattr(settings, "mock_llm", False, raising=False)
+    monkeypatch.setattr(provider, "_api_key", lambda *a, **k: "test-key")
+    monkeypatch.setattr(provider, "_api_base", lambda *a, **k: "https://example.invalid/v1")
+    monkeypatch.setattr(llm_module, "_EMBED_RETRY_BACKOFF_SECONDS", 0.0)
+
+    calls = {"n": 0}
+
+    def bad_request(url, payload, api_key, **kwargs):
+        calls["n"] += 1
+        # 模拟 _post_json 对 4xx 的包装（retryable=False）
+        err = RuntimeError("Model call failed: HTTP 400. Check endpoint, API key and model name.")
+        err.retryable = False
+        raise err
+
+    monkeypatch.setattr(provider, "_post_json", bad_request)
+
+    with pytest.raises(RuntimeError):
+        provider.embed_batch(["a"])
+    assert calls["n"] == 1
