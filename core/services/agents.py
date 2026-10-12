@@ -521,6 +521,11 @@ def normalize_rag(value) -> dict:
     """
     settings = get_settings()
     data = value.model_dump() if hasattr(value, "model_dump") else dict(value or {})
+
+    def _bool_or(value, fallback: bool) -> bool:
+        """局部更新语义：None 表示「调用方未提供」→ 取默认；显式 False 必须被尊重，不可回落默认。"""
+        return fallback if value is None else bool(value)
+
     top_k = int(data.get("top_k") or settings.rag_top_k)
     dense_top_k = int(data.get("dense_top_k") or settings.rag_dense_top_k)
     bm25_top_k = int(data.get("bm25_top_k") or settings.rag_bm25_top_k)
@@ -532,10 +537,12 @@ def normalize_rag(value) -> dict:
         "dense_top_k": max(1, min(dense_top_k, 50)),
         "bm25_top_k": max(1, min(bm25_top_k, 50)),
         "rrf_k": max(1, min(rrf_k, 200)),
-        "rerank_enabled": bool(data.get("rerank_enabled", settings.rag_rerank_enabled)),
+        "rerank_enabled": _bool_or(data.get("rerank_enabled"), settings.rag_rerank_enabled),
         "rerank_top_n": max(1, min(rerank_top_n, 20)),
-        "cache_enabled": bool(data.get("cache_enabled", settings.rag_cache_enabled)),
-        "refuse_when_no_evidence": bool(data.get("refuse_when_no_evidence", settings.rag_refuse_when_no_evidence)),
+        "cache_enabled": _bool_or(data.get("cache_enabled"), settings.rag_cache_enabled),
+        "refuse_when_no_evidence": _bool_or(
+            data.get("refuse_when_no_evidence"), settings.rag_refuse_when_no_evidence
+        ),
     }
 
 

@@ -1,5 +1,7 @@
 import json
 
+from api.schemas import AgentCreateRequest, AgentRagConfig
+from core.config import get_settings
 from core.db.models import Agent
 from core.services.agents import normalize_rag
 from core.services.knowledge import split_parent_child
@@ -43,6 +45,35 @@ def test_normalize_rag_uses_final_config_defaults(monkeypatch):
     assert config["bm25_top_k"] == 11
     assert config["rrf_k"] == 55
     assert config["rerank_enabled"] is False
+
+
+def test_normalize_rag_empty_config_keeps_settings_defaults():
+    """空配置（键全缺）必须落到 settings 默认值，而不是被 None 归零成 False。"""
+    settings = get_settings()
+    config = normalize_rag(AgentRagConfig().model_dump())
+
+    assert config["rerank_enabled"] == settings.rag_rerank_enabled
+    assert config["cache_enabled"] == settings.rag_cache_enabled
+    assert config["refuse_when_no_evidence"] == settings.rag_refuse_when_no_evidence
+
+
+def test_normalize_rag_frontend_create_payload_keeps_refusal_on():
+    """前端建 agent 的真实载荷形状：pydantic 会把未提供的 bool 字段补成 None，拒答必须仍为开启。"""
+    payload = AgentCreateRequest(name="t").model_dump()["rag"]
+    config = normalize_rag(payload)
+
+    assert config["rerank_enabled"] is True
+    assert config["cache_enabled"] is True
+    assert config["refuse_when_no_evidence"] is True
+
+
+def test_normalize_rag_explicit_false_is_respected():
+    """显式 opt-out 必须保住：三个 bool 字段传 False 时不得回落默认值。"""
+    config = normalize_rag({"rerank_enabled": False, "cache_enabled": False, "refuse_when_no_evidence": False})
+
+    assert config["rerank_enabled"] is False
+    assert config["cache_enabled"] is False
+    assert config["refuse_when_no_evidence"] is False
 
 
 def test_parent_child_chunk_ids_are_stable():

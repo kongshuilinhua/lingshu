@@ -2478,7 +2478,11 @@ def test_text_only_chat_model_can_use_backend_default_rag(client, auth_headers):
     response = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=auth_headers,
-        json={"message": "should not retrieve", "mode": "draft", "rag_enabled": True},
+        # 🛡️ 查询必须与文档内容有词面交集，才能通过 _has_evidence。
+        # 原来这里是 "should not retrieve"（与文档无任何共同词元）—— 该查询按新语义应被判为「无证据」并拒答，
+        # 它此前能断言到 sources 事件，只是因为 refuse_when_no_evidence 被 None 覆盖成了 False（已修）。
+        # 本测试的意图是「纯文本聊天模型仍能跑后端默认 RAG」，故用文档里的标识符作查询。
+        json={"message": "text-only-rag-source-token", "mode": "draft", "rag_enabled": True},
     )
 
     assert response.status_code == 200
@@ -2784,7 +2788,11 @@ def test_published_chat_uses_snapshot_knowledge_bindings_after_draft_changes(cli
     published = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=auth_headers,
-        json={"message": "which kb", "mode": "published"},
+        # 🛡️ 查询必须与快照 KB 的文档有词面交集，才能通过 _has_evidence。
+        # 原来这里是 "which kb"（与两份文档都无共同词元）—— 按新语义应判为「无证据」并拒答，
+        # 它此前能断言到 sources 内容，只是因为 refuse_when_no_evidence 被 None 覆盖成了 False（已修）。
+        # 本测试的意图是「发布快照用快照的 KB 绑定」，故用快照 KB 里的标识符作查询。
+        json={"message": "published-source-token", "mode": "published"},
     )
     assert published.status_code == 200
     assert "published-source-token" in published.text
