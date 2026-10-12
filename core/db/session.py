@@ -362,6 +362,22 @@ def _run_compat_migrations() -> None:
                         "ON prompt_templates (workspace_id, user_id, title)"
                     )
                 )
+    if "knowledge_bases" in table_names:
+        # 🛡️ enabled 用 BOOLEAN + server_default 1（新建知识库默认启用）。
+        # updated_at 用 TIMESTAMP；不用 DATETIME 是为了对齐 _VALID_DDL_TYPES 白名单
+        #（该白名单只允许 BOOLEAN/INTEGER/BIGINT/FLOAT/DOUBLE/VARCHAR/TEXT/JSON/TIMESTAMP）。
+        _ensure_columns(
+            "knowledge_bases",
+            {
+                "enabled": "BOOLEAN DEFAULT 1",
+                "updated_at": "TIMESTAMP NULL",
+            },
+        )
+        # 存量行回填：老库新加的 updated_at 为 NULL，用 created_at 兜底，避免前端时间列空白。
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE knowledge_bases SET updated_at = created_at WHERE updated_at IS NULL")
+            )
     if "knowledge_documents" in table_names:
         if engine.dialect.name == "postgresql":
             with engine.begin() as connection:

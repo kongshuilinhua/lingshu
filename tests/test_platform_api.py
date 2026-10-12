@@ -2838,3 +2838,30 @@ def test_session_memory_async_compression(client, auth_headers):
         assert data["turns"][0]["user"] == "hello memory"
     finally:
         db.close()
+
+
+def test_knowledge_base_enabled_persists_and_filters_retrieval(client, auth_headers):
+    """KB 启用状态必须落库，且停用后不参与检索。
+
+    旧实现该开关是前端纯 useState（KnowledgeHome.jsx:195），刷新即还原，
+    KnowledgeBase 模型连 enabled 字段都没有。
+    """
+    created = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Toggle KB"})
+    assert created.status_code == 200
+    kb_id = created.json()["knowledge_base"]["id"]
+    # 新建默认启用
+    assert created.json()["knowledge_base"]["enabled"] is True
+    assert created.json()["knowledge_base"]["updated_at"] is not None
+
+    # 停用
+    patched = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"enabled": False}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["knowledge_base"]["enabled"] is False
+
+    # 重新读取，确认已落库（不是内存态）
+    listed = client.get("/api/knowledge-bases", headers=auth_headers)
+    assert listed.status_code == 200
+    target = [kb for kb in listed.json()["items"] if kb["id"] == kb_id]
+    assert target and target[0]["enabled"] is False

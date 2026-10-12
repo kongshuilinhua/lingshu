@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
-from core.db.models import KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
+from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import vector_store as vector_store_module
 from core.observability.metrics import record_cache
@@ -68,6 +68,24 @@ def retrieve(
     if not knowledge_base_ids:
         started_status.update({"reason": "no_knowledge_base", "no_evidence": True})
         return RagResult([], started_status)
+
+    # 🛡️ 停用的知识库不参与检索：在进入缓存与检索前统一剔除，
+    # 避免停用后仍从 Redis 缓存命中旧结果。
+    # ⚠️ 注意此处**不改写** started_status 里的原始 knowledge_base_ids——
+    # 拒答条件依赖它为非空，停用全部 KB 时仍应拒答而非静默通过。
+    enabled_ids = [
+        row[0]
+        for row in db.query(KnowledgeBase.id)
+        .filter(
+            KnowledgeBase.id.in_(knowledge_base_ids),
+            KnowledgeBase.enabled.is_(True),
+        )
+        .all()
+    ]
+    if not enabled_ids:
+        started_status.update({"reason": "all_knowledge_bases_disabled", "no_evidence": True})
+        return RagResult([], started_status)
+    knowledge_base_ids = enabled_ids
 
     # 🎯 缓存防雪崩与击穿：使用结合了 Query、Config 和文档最后修改时间戳的版本化 `cache_key`
     cache_key = _cache_key(db, workspace_id=workspace_id, knowledge_base_ids=knowledge_base_ids, query=query, config=config)

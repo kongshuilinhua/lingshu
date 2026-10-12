@@ -145,6 +145,14 @@ class KnowledgeBaseCreateRequest(BaseModel):
     description: str = ""
 
 
+class KnowledgeBaseUpdateRequest(BaseModel):
+    """知识库可更新字段（局部更新，未提供者不改动）。"""
+
+    enabled: bool | None = None
+    name: str | None = None
+    description: str | None = None
+
+
 class KnowledgeDocumentCreateRequest(BaseModel):
     """
     创建/导入知识库文档请求载荷。

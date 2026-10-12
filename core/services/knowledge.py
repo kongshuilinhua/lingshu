@@ -68,6 +68,13 @@ def knowledge_base_summary(kb: KnowledgeBase, document_count: int = 0) -> dict:
         "name": kb.name,
         "description": kb.description,
         "document_count": document_count,
+        "enabled": bool(getattr(kb, "enabled", True)),
+        # updated_at 为 NULL 时回退 created_at（兼容未跑回填的老库）。
+        "updated_at": (
+            (getattr(kb, "updated_at", None) or kb.created_at).isoformat()
+            if getattr(kb, "updated_at", None) or kb.created_at
+            else None
+        ),
         "created_at": kb.created_at.isoformat() if kb.created_at else None,
     }
 
