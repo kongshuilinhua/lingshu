@@ -13,7 +13,6 @@ from core.config import get_settings
 from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import vector_store as vector_store_module
-from core.services.rag import retrieve
 from core.services.uploads import (
     DOC_TYPES,
     LANGCHAIN_EXTRA_SUFFIXES,
@@ -432,33 +431,6 @@ def list_document_chunks(db: Session, *, document_id: int) -> list[dict]:
         }
         for chunk in chunks
     ]
-
-
-def search_knowledge(
-    db: Session,
-    *,
-    workspace_id: int,
-    knowledge_base_ids: list[int],
-    query: str,
-    top_k: int = 4,
-    runtime_config: dict | None = None,
-) -> list[dict]:
-    result = retrieve(
-        db,
-        workspace_id=workspace_id,
-        knowledge_base_ids=knowledge_base_ids,
-        query=query,
-        config={"top_k": top_k},
-        runtime_config=runtime_config,
-    )
-    return result.sources
-
-
-def split_text(text: str, *, chunk_size: int = 700) -> list[str]:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    if not cleaned:
-        return []
-    return [cleaned[index : index + chunk_size] for index in range(0, len(cleaned), chunk_size)]
 
 
 # ── 切分基础设施：token 计长 + 结构保留归一化 + CN/EN 递归分隔符 ──────────────

@@ -226,8 +226,7 @@ def _bm25_search(db: Session, *, workspace_id: int, knowledge_base_ids: list[int
 
     ⚡ 边界与性能思考（大内存优化策略）：
         - 对大规模数据库分块记录，如果直接一次性 `.all()` 调入，会造成严重的物理内存暴涨以及 SQLAlchemy 对象跟踪开销。
-        - 采取批处理分片读取机制（`offset().limit()`），分批提取，并配以 `db.expire_all()`。
-          `db.expire_all()` 极其关键，它用于主动释放 SQLAlchemy 内部的 Session 一级实体缓存，防止读入十万级分块直接耗尽 JVM/Python 堆内存。
+        - 采取批处理分片读取机制（`offset().limit()`），分批提取，避免一次性 `.all()` 把十万级分块全部驻留内存。
         - 对分词操作，优先使用高性能结巴（`jieba`）库进行中文精确分词；若缺失结巴环境，自动防御退化为正则表达式匹配非空 Unicode 汉字和单词列表。
     """
     # 🎯 生成版本控制特征指纹：检查关联知识库内所有文件的个数和最大修改时间戳

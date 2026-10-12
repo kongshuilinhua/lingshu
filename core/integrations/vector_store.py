@@ -215,7 +215,8 @@ class MilvusVectorStore:
     def _ensure_collection(self, vector_dimension: int) -> None:
         """
         🛡️ 防御性设计：延迟懒初始化 Collection。
-        首次向量写入或检索时，若目标 Collection 不存在，根据向量实际的维度自动触发物理 Collection 与相应 HNSW/IVF 索引结构的建表。
+        首次向量写入或检索时，若目标 Collection 不存在，根据向量实际的维度自动触发物理 Collection 的建表；
+        不显式指定索引类型，由 Milvus 服务端选择 AUTOINDEX；显式 HNSW 参数化留待 P2。
         """
         if not self._client:
             return
