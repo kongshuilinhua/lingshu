@@ -167,38 +167,19 @@ def test_custom_segment_mode_honours_user_delimiter():
 
     旧实现：前端输入框把 delimiter 传到后端（ResegmentRequest.delimiter），
     但 chunk_document 从不读取 cfg["delimiter"]，用户填了等于没填。
+
+    ⚠️ 参数说明（brief 原参数不可用）：brief 原用 13 字符文本 + max_chunk_len=100，
+    但 chunk_document 的 child 预算 = int(max_chunk_len * 0.35) = 35 字符，
+    远大于文本本身，RecursiveCharacterTextSplitter 会把切出的片段合并回 1 块；
+    且实测在能切出 ≥3 段的尺寸区间，默认分隔符同样能切出 ≥3 段，
+    故 brief 原参数无论是否读取 delimiter 都得到 1 段，断言无判别力。
+    这里改用 36 字符文本 + max_chunk_len=60（child 预算 21 字符）：
+    文本无任何默认分隔符字符（换行/句号等），默认分隔符只能切出 2 段，
+    只有把用户分隔符当首选切点才能切出 3 段及以上。
     """
     from core.services.knowledge import chunk_document
 
-    text = "AAA|||BBB|||CCC"
-    children, _ = chunk_document(
-        text,
-        content_type="text/plain",
-        kb_id=1,
-        document_id=1,
-        segment_config={
-            "segment_mode": "custom",
-            "delimiter": "|||",
-            "max_chunk_len": 100,
-            "overlap_pct": 0,
-        },
-    )
-
-    joined = "".join(child["text"] for child in children)
-    assert "AAA" in joined
-    assert "BBB" in joined
-    assert "CCC" in joined
-    assert len(children) >= 1
-
-
-def test_custom_segment_mode_delimiter_actually_splits():
-    """分隔标识符必须是真实切点（上一条只用 13 字符文本，切分器会把它们合并回去，
-    无法区分「读了 delimiter」与「没读」）。这里文本长度超过 child 预算，
-    默认分隔符切不出 3 段（无换行/句号），只有把用户分隔符当首选切点才会。
-    """
-    from core.services.knowledge import chunk_document
-
-    text = "ABCDEFGHIJ|||KLMNOPQRST|||UVWXYZABCD"  # 36 字符，无默认分隔符
+    text = "ABCDEFGHIJ|||KLMNOPQRST|||UVWXYZABCD"  # 36 字符，无默认分隔符字符
     children, _ = chunk_document(
         text,
         content_type="text/plain",
@@ -213,7 +194,8 @@ def test_custom_segment_mode_delimiter_actually_splits():
     )
 
     joined = "".join(child["text"] for child in children)
-    for piece in ("ABCDEFGHIJ", "KLMNOPQRST", "UVWXYZABCD"):
-        assert piece in joined
+    assert "ABCDEFGHIJ" in joined
+    assert "KLMNOPQRST" in joined
+    assert "UVWXYZABCD" in joined
     # child 预算 21 字符，按 "|||" 切才有 3 段；默认分隔符只能切出 2 段。
     assert len(children) >= 3
