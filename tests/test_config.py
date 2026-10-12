@@ -99,3 +99,19 @@ def test_production_readiness_blocks_runtime_vector_fallback(monkeypatch):
     fallback_issues = [issue for issue in issues if "Milvus connection is unavailable" in issue]
     assert len(fallback_issues) == 1
     assert "connection refused" in fallback_issues[0]
+
+
+def test_vector_backend_is_normalized(monkeypatch):
+    """向量后端名必须去空白 + 转小写。
+
+    🛡️ 若不在配置层收口，`Milvus` / `" milvus "` 这类写法会让向量库单例**根本不尝试连接**
+    （`vector_store.py` 按字面比较 `== "milvus"`），于是 `_client is None` 却不算降级，
+    向量被静默写进进程内内存 —— 既绕过「降级拒写」也绕过「生产禁降级」。
+    """
+    assert _settings(monkeypatch, LINGSHU_VECTOR_BACKEND="Milvus").vector_backend == "milvus"
+    assert _settings(monkeypatch, LINGSHU_VECTOR_BACKEND="  MILVUS  ").vector_backend == "milvus"
+
+
+def test_vector_backend_normalization_does_not_whitelist(monkeypatch):
+    """只做 strip+lower，不校验取值集合：未知后端应原样通过而不报错。"""
+    assert _settings(monkeypatch, LINGSHU_VECTOR_BACKEND="qdrant").vector_backend == "qdrant"

@@ -140,7 +140,7 @@ class MilvusVectorStore:
             配置为 milvus 但连接不可用时，**拒绝写入**而不是写内存。
             memory 后端（本地开发显式选择）仍走原路径。
         """
-        if self.settings.vector_backend == "milvus" and self._client is None:
+        if self.settings.vector_backend.strip().lower() == "milvus" and self._client is None:
             raise VectorStoreUnavailableError(
                 f"Milvus is unavailable ({self._error or 'unknown error'}); refusing to write vectors "
                 "to the in-process fallback store."

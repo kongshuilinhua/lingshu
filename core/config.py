@@ -263,6 +263,20 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("vector_backend")
+    @classmethod
+    def _normalize_vector_backend(cls, value: str) -> str:
+        """规范化向量后端名：去空白 + 转小写。
+
+        🛡️ 为什么必须收口在配置层：
+            该字段被多处按字面比较（`vector_store.py` 的 `== "milvus"`、
+            `config.py` 的 `.strip().lower() == "milvus"`）。若不在入口规范化，
+            写成 `Milvus` 或 `" milvus "` 会让单例**根本不尝试连接**，
+            从而既绕过「降级拒写」也绕过「生产禁降级」，向量被静默写进内存。
+            规范化后所有比较点的语义自动一致。
+        """
+        return str(value or "").strip().lower()
+
     @property
     def cors_origin_list(self) -> list[str]:
         """将逗号分隔的 CORS 来源字符串解析为列表，过滤空白项。"""
