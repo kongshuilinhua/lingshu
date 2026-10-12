@@ -285,6 +285,17 @@ class Settings(BaseSettings):
             issues.append("LINGSHU_MOCK_LLM must be false in production.")
         if self.vector_backend.strip().lower() == "memory":
             issues.append("LINGSHU_VECTOR_BACKEND=memory is only suitable for local development.")
+        elif self.vector_backend.strip().lower() == "milvus":
+            # 运行期降级同样不可接受：生产环境配置了 milvus 却回落到内存，
+            # 等于所有新入库文档的向量在进程重启后静默消失。
+            from core.integrations.vector_store import vector_store as _vector_store
+
+            if _vector_store.using_fallback:
+                issues.append(
+                    "LINGSHU_VECTOR_BACKEND=milvus but the Milvus connection is unavailable "
+                    f"({_vector_store.status().get('error') or 'unknown error'}); "
+                    "production must not run on the in-process fallback store."
+                )
         if not self.redis_url:
             issues.append("REDIS_URL is required in production for cache, rate limit, job state, and Celery.")
         if not self.celery_enabled:

@@ -200,8 +200,14 @@ def run_document_ingestion(*, document_id: int, workspace_id: int, kb_id: int) -
                 vector_store_module.vector_store.delete(
                     filters={"workspace_id": workspace_id, "knowledge_base_id": kb_id, "document_id": document_id}
                 )
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                # 🛡️ 不再静默吞掉：向量清理失败会让 DB 与向量库不一致，
+                # 必须留下可检索的痕迹，否则问题永远无法被发现。
+                logger.exception(
+                    "Vector cleanup failed during rollback: document_id=%s error=%s",
+                    document_id,
+                    cleanup_exc,
+                )
             document = db.get(KnowledgeDocument, document_id)
             if document:
                 db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document_id).delete(synchronize_session=False)
@@ -291,8 +297,14 @@ def reindex_knowledge_base(db: Session, *, workspace_id: int, kb: KnowledgeBase)
                 vector_store_module.vector_store.delete(
                     filters={"workspace_id": workspace_id, "knowledge_base_id": kb.id, "document_id": document_id}
                 )
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                # 🛡️ 不再静默吞掉：向量清理失败会让 DB 与向量库不一致，
+                # 必须留下可检索的痕迹，否则问题永远无法被发现。
+                logger.exception(
+                    "Vector cleanup failed during rollback: document_id=%s error=%s",
+                    document_id,
+                    cleanup_exc,
+                )
             failed += 1
             document = db.get(KnowledgeDocument, document_id)
             if not document:
