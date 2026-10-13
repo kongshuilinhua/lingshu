@@ -231,12 +231,15 @@ def test_all_disabled_knowledge_bases_refuse_without_rewriting_ids(client, auth_
       - 端到端：查该 status 确实触发了拒答（用户侧可见），因为第二层依赖的
         knowledge_base_ids 非空只有走完 workflow 才被真正消费。
 
-    注：`refuse_when_no_evidence` 必须在 agent 创建时报成显式 True。该字段在
-    api/schemas.py 的 AgentRagConfig 里默认 None，而 normalize_rag 只透传报文里
-    实际给出的键（`data.get(k, settings.rag_xxx)` 的默认值仅在键缺失时生效），
-    于是 agent 落库的 rag 字典里根本不含这个键，workflow 侧读到 None → 不拒答。
-    这与 test_platform_api.py::test_rag_no_evidence_refuses_instead_of_guessing
-    的既有写法一致（那边同样显式传了 True）。
+    注：本测试在创建 agent 时显式传 `refuse_when_no_evidence: True`，与
+    test_platform_api.py::test_rag_no_evidence_refuses_instead_of_guessing 的既有写法一致。
+
+    历史背景（避免误读）：该字段在 api/schemas.py 的 AgentRagConfig 里声明为
+    `bool | None = None`，而 normalize_rag 早先用 `data.get(k, settings.rag_xxx)` —— 键存在
+    但值为 None 时默认值不生效，bool(None) 得 False。于是「不显式传该字段」建出的 agent
+    拒答默认是关的。该缺陷已由 3eccc59 修复（引入 _bool_or：None 视为未提供、取 settings 默认；
+    显式 False 仍被尊重）。**故现在不显式传该字段也会正确取到 True**；
+    此处保留显式传值仅为了让测试意图自明，不再是必需。
     """
     from core.db.session import SessionLocal
     from core.services.rag import retrieve
