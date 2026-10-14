@@ -14,7 +14,7 @@ from core.db.models import Agent, UserModelConfig
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import anthropic_protocol
 from core.security.api_keys import decrypt_api_key, encrypt_api_key
-from core.security.outbound_http import open_public_https
+from core.security.outbound_http import open_model_gateway
 
 
 def user_model_payload(config: UserModelConfig) -> dict:
@@ -199,13 +199,15 @@ def user_model_runtime_config(config: UserModelConfig) -> dict:
     }
 
 
-def test_user_model_config(config: UserModelConfig, *, detect_image: bool = False) -> dict:
+def test_user_model_config(config: UserModelConfig, *, detect_image: bool = False, detect_reasoning: bool = False) -> dict:
     """
     对用户私有模型配置进行全链路真实连通性测试。
 
     🎯 意图与工程大局观：
         在保存或测试私有模型时，发起真实的空问答 HTTP 请求测试，评估 Base URL 和 API Key 的正确性。
         如果参数 `detect_image` 为 True，将触发核心的 **Active Multi-Modal Probe（多模态主动探测）**，确保平台拿到的能力清单百分之百真实。
+        如果参数 `detect_reasoning` 为 True，会以 thinking=True 发一次流式请求，按是否返回思考帧判定推理类型，
+        见 `_check_reasoning_capability`。
     """
     started = time.monotonic()
     checks = {
@@ -225,6 +227,8 @@ def test_user_model_config(config: UserModelConfig, *, detect_image: bool = Fals
     }
     if detect_image:
         checks["image"]["detected"] = True
+    if detect_reasoning:
+        checks["reasoning"]["detected"] = True
     try:
         runtime = user_model_runtime_config(config)
         provider = OpenAICompatibleProvider()
@@ -247,6 +251,15 @@ def test_user_model_config(config: UserModelConfig, *, detect_image: bool = Fals
             if not image_ok:
                 checks["image"]["error_code"] = image_result["error_code"]
                 checks["image"]["message"] = image_result["message"]
+
+        # 3. 推理能力测试
+        if detect_reasoning:
+            reasoning_result = _check_reasoning_capability(provider, runtime)
+            checks["reasoning"]["type"] = reasoning_result["type"]
+            checks["reasoning"]["ok"] = reasoning_result["type"] != "none"
+            if reasoning_result.get("error_code"):
+                checks["reasoning"]["error_code"] = reasoning_result["error_code"]
+                checks["reasoning"]["message"] = reasoning_result["message"]
     except Exception as exc:
         # 🛡️ 安全核心：在连通性抛错时进行严格过滤清洗
         checks["chat"]["error_code"] = _chat_probe_error_code(exc)
@@ -271,7 +284,7 @@ def test_user_model_config(config: UserModelConfig, *, detect_image: bool = Fals
     }
 
 
-def test_user_model_payload(payload: dict, *, detect_image: bool = False) -> dict:
+def test_user_model_payload(payload: dict, *, detect_image: bool = False, detect_reasoning: bool = False) -> dict:
     """基于前端传入的临时 Payload（未入库数据）进行连通性预测试。"""
     api_key = _required_api_key(payload.get("api_key"))
     data = _config_fields(payload)
@@ -280,7 +293,7 @@ def test_user_model_payload(payload: dict, *, detect_image: bool = False) -> dic
         encrypted_api_key=encrypt_api_key(api_key),
         **data,
     )
-    return test_user_model_config(config, detect_image=detect_image)
+    return test_user_model_config(config, detect_image=detect_image, detect_reasoning=detect_reasoning)
 
 
 def probe_models_payload(payload: dict) -> dict:
@@ -303,7 +316,7 @@ def probe_models_payload(payload: dict) -> dict:
         cursors = set()
         for _ in range(20):
             request = urllib.request.Request(url, headers=auth_headers)
-            with open_public_https(request, timeout=10) as response:
+            with open_model_gateway(request, timeout=10, allow_private=_private_gateways_allowed()) as response:
                 if response.status != 200:
                     raise ValueError("Model endpoint redirected or rejected the request")
                 raw = response.read(1024 * 1024 + 1)
@@ -399,17 +412,31 @@ def _config_fields(payload: dict, *, partial: bool = False) -> dict:
     return data
 
 
+_PRIVATE_GATEWAY_HINT = " (private or self-hosted gateways require USER_MODEL_ALLOW_PRIVATE_NETWORK=true)"
+
+
+def _private_gateways_allowed() -> bool:
+    return bool(getattr(get_settings(), "user_model_allow_private_network", False))
+
+
 def _validate_public_base_url(value: str) -> None:
     parsed = urllib.parse.urlsplit(value)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+    allow_private = _private_gateways_allowed()
+    allowed_schemes = {"http", "https"} if allow_private else {"https"}
+    if (parsed.scheme not in allowed_schemes or not parsed.hostname or parsed.username or parsed.password
             or parsed.query or parsed.fragment):
-        raise ValueError("Public HTTPS base_url required")
+        raise ValueError("Public HTTPS base_url required" + ("" if allow_private else _PRIVATE_GATEWAY_HINT))
+    if parsed.hostname.rstrip(".").lower() in {"metadata", "metadata.google.internal"}:
+        raise ValueError("Model gateway target is blocked")
     try:
         ip = ipaddress.ip_address(parsed.hostname)
     except ValueError:
         return
-    if not ip.is_global:
-        raise ValueError("Public HTTPS base_url required")
+    mapped = getattr(ip, "ipv4_mapped", None) or ip
+    if mapped.is_link_local or mapped.is_multicast or mapped.is_unspecified:
+        raise ValueError("Model gateway target is blocked")
+    if not allow_private and not ip.is_global:
+        raise ValueError("Public HTTPS base_url required" + _PRIVATE_GATEWAY_HINT)
 
 
 def _protocol(value) -> str:
@@ -496,6 +523,47 @@ def _check_image_capability(provider: OpenAICompatibleProvider, runtime: dict, *
             "error_code": _image_probe_error_code(exc),
             "message": _sanitize_probe_error(exc),
         }
+
+
+_REASONING_PROBE_MAX_TOKENS = 1024
+
+
+def _check_reasoning_capability(provider: OpenAICompatibleProvider, runtime: dict) -> dict:
+    """
+    以 thinking=True 发一次极短的流式请求，看端点是否回传思考流来判定推理类型。
+
+    - 读到第一帧 reasoning → native，立即结束读取；
+    - 正常读完没有 reasoning 帧 → prompt（平台侧提示词增强，任何文本模型都可用）；
+    - 请求本身失败（如端点不接受 thinking 参数）→ 同样退回 prompt，并记录错误码。
+      能走到这里说明基础问答已经通过，模型仍可使用提示词增强。
+
+    已知限制：不按 `reasoning_content`（OpenAI 兼容）或 `thinking_delta`（Anthropic）
+    约定回传思考内容的网关，会被判为 prompt。
+    """
+    if get_settings().mock_llm:
+        native = _model_name_implies_reasoning(runtime.get("chat_model", ""))
+        return {"type": "native" if native else "prompt", "error_code": "", "message": ""}
+    probe_runtime = {**runtime, "max_tokens": _REASONING_PROBE_MAX_TOKENS}
+    try:
+        for frame in provider.chat_stream(
+            # 用需要一点推理的小题：自适应思考的模型对过于简单的问题可能直接跳过思考
+            [{"role": "user", "content": "How many letter r are in \"strawberry raspberry\"? Answer with a number."}],
+            model=runtime["chat_model"],
+            temperature=1,
+            runtime_config=probe_runtime,
+            thinking=True,
+        ):
+            if frame.get("type") == "reasoning" and frame.get("text"):
+                return {"type": "native", "error_code": "", "message": ""}
+    except Exception as exc:
+        return {"type": "prompt", "error_code": _chat_probe_error_code(exc), "message": _sanitize_probe_error(exc)}
+    return {"type": "prompt", "error_code": "", "message": ""}
+
+
+def _model_name_implies_reasoning(model_name: str) -> bool:
+    """mock 模式下按模型名推断是否原生推理（reasoner、r1、qwen3、thinking 等标记）。"""
+    normalized = f"-{str(model_name or '').lower().replace('_', '-').replace('/', '-')}-"
+    return any(marker in normalized for marker in ("reasoner", "-r1-", "qwen3", "thinking"))
 
 
 def _image_probe_error_code(exc: Exception) -> str:

@@ -72,7 +72,7 @@ def get_chat_model(*, model=None, temperature=0.0, runtime_config=None, **kwargs
     base_url = provider._api_base(settings, runtime_config, purpose="chat")
     resolved_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
     if (runtime_config or {}).get("untrusted_base_url"):
-        kwargs["http_client"] = httpx.Client(transport=PublicHTTPSHttpxTransport(), follow_redirects=False)
+        kwargs["http_client"] = httpx.Client(transport=PublicHTTPSHttpxTransport(allow_private=bool(getattr(settings, "user_model_allow_private_network", False))), follow_redirects=False)
     return ChatOpenAI(
         model=resolved_model,
         base_url=base_url,

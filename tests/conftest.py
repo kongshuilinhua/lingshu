@@ -93,6 +93,8 @@ def client(monkeypatch, _test_db_url):
     monkeypatch.setenv("CELERY_ENABLED", "false")
     # 上传体积限额测试假设 8MB；运行时默认已调大到 30MB，固定测试环境为 8MB 让限额机制校验成立。
     monkeypatch.setenv("UPLOAD_MAX_BYTES", str(8 * 1024 * 1024))
+    # 本机 .env 可能打开了模型网关内网开关；测试固定为默认关闭，保证拒绝私网地址的断言成立。
+    monkeypatch.setenv("USER_MODEL_ALLOW_PRIVATE_NETWORK", "false")
     for key in [
         "OPENAI_API_KEY",
         "DASHSCOPE_API_KEY",

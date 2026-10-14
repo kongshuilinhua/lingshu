@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from core.config import get_settings
 from core.integrations import anthropic_protocol
 from core.integrations.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
-from core.security.outbound_http import open_public_https
+from core.security.outbound_http import open_model_gateway
 
 # 🎯 系统硬编码默认的 OpenAI 兼容模式 API 端点（指向阿里云百炼/通义千问兼容接口）
 DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -565,6 +565,11 @@ class OpenAICompatibleProvider:
             self._breakers[model_name] = CircuitBreaker(failure_threshold=3, timewindow=60)
         return self._breakers[model_name]
 
+    @staticmethod
+    def _private_gateways_allowed() -> bool:
+        # 只作用于用户自定义模型网关（public_only 路径），见 USER_MODEL_ALLOW_PRIVATE_NETWORK
+        return bool(getattr(get_settings(), "user_model_allow_private_network", False))
+
     def _post_json(self, url: str, payload: dict, api_key: str, *, timeout_seconds: int = 60, public_only: bool = False, headers: dict | None = None) -> dict:
         """
         同步 POST JSON 工具函数。
@@ -586,7 +591,10 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         try:
-            opened = open_public_https(request, timeout=timeout_seconds) if public_only else urllib.request.urlopen(request, timeout=timeout_seconds)
+            opened = (
+                open_model_gateway(request, timeout=timeout_seconds, allow_private=self._private_gateways_allowed())
+                if public_only else urllib.request.urlopen(request, timeout=timeout_seconds)
+            )
             with opened as response:
                 if public_only and response.status != 200:
                     raise RuntimeError("Model endpoint redirected or rejected the request")
@@ -625,7 +633,10 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         try:
-            opened = open_public_https(request, timeout=120) if public_only else urllib.request.urlopen(request, timeout=120)
+            opened = (
+                open_model_gateway(request, timeout=120, allow_private=self._private_gateways_allowed())
+                if public_only else urllib.request.urlopen(request, timeout=120)
+            )
             with opened as response:
                 if public_only and response.status != 200:
                     raise RuntimeError("Model endpoint redirected or rejected the request")

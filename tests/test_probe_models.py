@@ -7,6 +7,14 @@ import pytest
 from core.services.user_models import probe_models_payload
 
 
+@pytest.fixture(autouse=True)
+def _private_gateways_off(monkeypatch):
+    # 固定开关为关，避免本机 .env 打开 USER_MODEL_ALLOW_PRIVATE_NETWORK 后拒绝用例误失败
+    import core.services.user_models as um
+
+    monkeypatch.setattr(um, "_private_gateways_allowed", lambda: False)
+
+
 class _FakeResp(io.BytesIO):
     status = 200
 
@@ -25,7 +33,7 @@ def test_probe_models_payload_lists_sorted_ids(monkeypatch):
 
     monkeypatch.setattr(
         um,
-        "open_public_https",
+        "open_model_gateway",
         lambda url, **kw: _FakeResp({"data": [{"id": "qwen-plus"}, {"id": "deepseek-chat"}, {"id": None}]}),
     )
     r = probe_models_payload({"base_url": "https://x.com/v1", "api_key": "sk-x"})
@@ -43,7 +51,7 @@ def test_probe_models_payload_builds_url_and_auth_header(monkeypatch):
         captured["headers"] = request.headers
         return _FakeResp({"data": []})
 
-    monkeypatch.setattr(um, "open_public_https", fake_get)
+    monkeypatch.setattr(um, "open_model_gateway", fake_get)
     probe_models_payload({"base_url": "https://x.com/v1/", "api_key": "sk-secret"})
     # 尾斜杠被 rstrip,再拼 /models
     assert captured["url"] == "https://x.com/v1/models"
@@ -53,7 +61,7 @@ def test_probe_models_payload_builds_url_and_auth_header(monkeypatch):
 def test_probe_models_payload_handles_missing_data(monkeypatch):
     import core.services.user_models as um
 
-    monkeypatch.setattr(um, "open_public_https", lambda url, **kw: _FakeResp({}))
+    monkeypatch.setattr(um, "open_model_gateway", lambda url, **kw: _FakeResp({}))
     r = probe_models_payload({"base_url": "https://x.com/v1", "api_key": "sk-x"})
     assert r["ok"] is True
     assert r["models"] == []
@@ -66,7 +74,7 @@ def test_probe_models_payload_handles_failure(monkeypatch):
     def boom(url, **kw):
         raise RuntimeError("conn refused")
 
-    monkeypatch.setattr(um, "open_public_https", boom)
+    monkeypatch.setattr(um, "open_model_gateway", boom)
     r = probe_models_payload({"base_url": "https://x.com/v1", "api_key": "sk-x"})
     assert r["ok"] is False
     assert r["models"] == []
