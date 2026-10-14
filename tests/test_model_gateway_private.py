@@ -58,6 +58,12 @@ def test_open_model_gateway_without_switch_is_public_https(monkeypatch):
     assert seen == ["https://example.com/v1"]
 
 
+def test_open_model_gateway_without_switch_hints_env_for_fake_ip(dns):
+    dns["console.tars-ai.com"] = "198.19.0.234"
+    with pytest.raises(ValueError, match="USER_MODEL_ALLOW_PRIVATE_NETWORK"):
+        open_model_gateway(urllib.request.Request("https://console.tars-ai.com/v1/models"), timeout=5, allow_private=False)
+
+
 def test_open_model_gateway_with_switch_pins_http_private_ip(monkeypatch, dns):
     dns["gw.lan"] = "192.168.1.10"
     calls = []

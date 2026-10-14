@@ -156,7 +156,16 @@ def open_model_gateway(request: urllib.request.Request, *, timeout: float, allow
     not followed and ambient proxies are still bypassed.
     """
     if not allow_private:
-        return open_public_https(request, timeout=timeout)
+        try:
+            return open_public_https(request, timeout=timeout)
+        except ValueError as exc:
+            # 域名解析到私网/代理 fake-ip 时，提示用户模型网关可由部署开关放开
+            if "blocked" in str(exc):
+                raise ValueError(
+                    "Model gateway resolves to a private or reserved address "
+                    "(private or self-hosted gateways require USER_MODEL_ALLOW_PRIVATE_NETWORK=true)"
+                ) from exc
+            raise
     _, ip = resolve_model_gateway(request.full_url)
     handler = _PinnedHTTPSHandler(ip) if request.type == "https" else _PinnedHTTPHandler(ip)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler(), handler)

@@ -1464,64 +1464,51 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .model-channel-heading small {
   color: #667085;
 }
-.provider-preset-panel {
-  display: grid;
-  gap: 10px;
-  border: 1px solid #d9eadf;
-  border-radius: 12px;
-  padding: 12px;
-  background: #f7fcf9;
-}
-.provider-preset-header {
+.chat-model-row {
   display: flex;
-  gap: 9px;
-  align-items: flex-start;
+  gap: 8px;
+  align-items: center;
+}
+.chat-model-row input {
+  flex: 1;
+  min-width: 0;
+}
+.model-probe-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #667085;
+}
+.model-probe-hint.ok {
   color: #047857;
 }
-.provider-preset-header span {
-  display: grid;
-  gap: 2px;
+.model-probe-hint.error {
+  color: #b42318;
 }
-.provider-preset-header small,
-.provider-preset-note {
-  color: #667085;
-}
-.provider-preset-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
-}
-.provider-preset-grid button {
-  display: grid;
-  gap: 3px;
-  justify-items: start;
-  min-height: 58px;
+.probed-model-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 168px;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  list-style: none;
   border: 1px solid #dfe3eb;
   border-radius: 10px;
-  padding: 9px 10px;
+  background: #fafbfc;
+}
+.probed-model-list button {
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  padding: 4px 9px;
   background: #fff;
   color: #344054;
-  text-align: left;
+  font-size: 12px;
 }
-.provider-preset-grid button strong,
-.provider-preset-grid button small {
-  max-width: 100%;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.provider-preset-grid button small {
-  color: #667085;
-}
-.provider-preset-grid button.active {
+.probed-model-list button.active {
   border-color: #047857;
   background: #ecfdf3;
   color: #065f46;
-}
-.provider-preset-note {
-  margin: 0;
-  font-size: 12px;
 }
 .model-preset-banner.private {
   border-color: #cfe8dd;
@@ -3885,7 +3872,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   .model-advanced-grid,
   .user-model-grid,
   .model-channel-grid,
-  .provider-preset-grid,
   .tool-form-grid,
   .tool-auth-grid,
   .tool-schema-grid,

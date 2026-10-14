@@ -81,6 +81,21 @@ def test_probe_models_payload_handles_failure(monkeypatch):
     assert r["count"] == 0
 
 
+def test_probe_models_payload_surfaces_upstream_error_message(monkeypatch):
+    # 只返回状态行（"401 Authorization Required"）时用户看不出是 key 无效，需透出上游错误体
+    import urllib.error
+    import core.services.user_models as um
+
+    def deny(request, **kw):
+        body = io.BytesIO(json.dumps({"error": {"message": "Your api key: ****d000 is invalid"}}).encode())
+        raise urllib.error.HTTPError(request.full_url, 401, "Authorization Required", {}, body)
+
+    monkeypatch.setattr(um, "open_model_gateway", deny)
+    r = probe_models_payload({"base_url": "https://x.com/v1", "api_key": "sk-x"})
+    assert r["ok"] is False
+    assert r["message"] == "HTTP 401: Your api key: ****d000 is invalid"
+
+
 def test_probe_models_payload_requires_base_url():
     with pytest.raises(ValueError):
         probe_models_payload({"base_url": "", "api_key": "sk-x"})

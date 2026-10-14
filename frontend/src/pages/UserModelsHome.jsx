@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
-import { Check, Plus, ServerCog, Trash2, Wand2, X } from 'lucide-react';
+import { Check, Plus, Trash2, Wand2, X } from 'lucide-react';
 import { SecretInputDialog } from '../components/SecretInputDialog.jsx';
 import {
   capabilityCheckLabel,
@@ -39,208 +39,45 @@ export function UserModelsHome({ adminModels, canManage, createModelConfig, dele
 
 
 
-const USER_MODEL_PRESETS = [
-  {
-    id: 'anthropic', label: 'Anthropic / Claude', modelHint: '从模型列表选择',
-    description: '使用 Anthropic Messages 原生协议。填入 API Key 后拉取模型列表；地址可填写 API 根地址或 /v1。使用厂商默认温度。',
-    values: { display_name: 'Claude', provider: 'anthropic', base_url: 'https://api.anthropic.com/v1',
-      chat_model: '', supports_image: false, supports_document: true, supports_reasoning: false,
-      reasoning_type: 'none', reasoning_label: '不支持', max_context: '200000', default_temperature: '1' },
-  },
-  {
-    id: 'qwen',
-    label: 'DashScope / Qwen',
-    modelHint: 'qwen-plus',
-    description: '阿里云百炼，推荐默认入口，支持通义千问；图片能力由测试自动检测，RAG/Embedding 由后端默认配置提供。',
-    values: {
-      display_name: 'Qwen Plus',
-      base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      chat_model: 'qwen-plus',
-      supports_image: false,
-      supports_document: true,
-      supports_reasoning: true,
-      reasoning_type: 'prompt',
-      reasoning_label: '提示词增强',
-      max_context: '131072',
-      default_temperature: '0.4',
-    },
-  },
-  {
-    id: 'deepseek',
-    label: 'DeepSeek',
-    modelHint: 'deepseek-v4-flash',
-    description: 'DeepSeek 官方兼容接口。这里只配置主聊天模型；知识库检索使用后端默认 Embedding。',
-    values: {
-      display_name: 'DeepSeek V4 Flash',
-      base_url: 'https://api.deepseek.com',
-      chat_model: 'deepseek-v4-flash',
-      supports_image: false,
-      supports_document: false,
-      supports_reasoning: true,
-      reasoning_type: 'prompt',
-      reasoning_label: '提示词增强',
-      max_context: '64000',
-      default_temperature: '0.6',
-    },
-  },
-  {
-    id: 'kimi',
-    label: 'Kimi / Moonshot',
-    modelHint: 'moonshot-v1-8k',
-    description: '月之暗面兼容接口。模型名可按控制台改成最新 Kimi 模型。',
-    values: {
-      display_name: 'Kimi Moonshot',
-      base_url: 'https://api.moonshot.cn/v1',
-      chat_model: 'moonshot-v1-8k',
-      supports_image: false,
-      supports_document: false,
-      supports_reasoning: true,
-      reasoning_type: 'prompt',
-      reasoning_label: '提示词增强',
-      max_context: '32768',
-      default_temperature: '0.4',
-    },
-  },
-  {
-    id: 'zhipu',
-    label: '智谱 GLM',
-    modelHint: 'glm-4-flash',
-    description: '智谱 BigModel 兼容接口。适合 GLM 系列文本模型。',
-    values: {
-      display_name: 'GLM',
-      base_url: 'https://open.bigmodel.cn/api/paas/v4',
-      chat_model: 'glm-4-flash',
-      supports_image: false,
-      supports_document: true,
-      supports_reasoning: true,
-      reasoning_type: 'prompt',
-      reasoning_label: '提示词增强',
-      max_context: '128000',
-      default_temperature: '0.4',
-    },
-  },
-  {
-    id: 'volcengine',
-    label: '火山方舟 / 豆包',
-    modelHint: 'ep-xxxxxxxx',
-    description: '火山方舟兼容接口，model 通常填写控制台创建的 endpoint id。',
-    values: {
-      display_name: 'Doubao Ark',
-      base_url: 'https://ark.cn-beijing.volces.com/api/v3',
-      chat_model: 'ep-xxxxxxxx',
-      supports_image: false,
-      supports_document: true,
-      supports_reasoning: false,
-      reasoning_type: 'none',
-      reasoning_label: '不支持',
-      max_context: '128000',
-      default_temperature: '0.4',
-    },
-  },
-  {
-    id: 'qianfan',
-    label: '百度千帆 / ERNIE',
-    modelHint: 'ernie-4.5-turbo-128k',
-    description: '百度智能云千帆兼容接口。保存前按控制台可用模型名调整。',
-    values: {
-      display_name: 'ERNIE',
-      base_url: 'https://qianfan.baidubce.com/v2',
-      chat_model: 'ernie-4.5-turbo-128k',
-      supports_image: false,
-      supports_document: true,
-      supports_reasoning: true,
-      reasoning_type: 'prompt',
-      reasoning_label: '提示词增强',
-      max_context: '128000',
-      default_temperature: '0.4',
-    },
-  },
-  {
-    id: 'siliconflow',
-    label: '硅基流动',
-    modelHint: 'Qwen/Qwen3-32B',
-    description: '聚合国产和开源模型，模型名建议从控制台复制。',
-    values: {
-      display_name: 'SiliconFlow Qwen',
-      base_url: 'https://api.siliconflow.cn/v1',
-      chat_model: 'Qwen/Qwen3-32B',
-      supports_image: false,
-      supports_document: true,
-      supports_reasoning: true,
-      reasoning_type: 'prompt',
-      reasoning_label: '提示词增强',
-      max_context: '32768',
-      default_temperature: '0.5',
-    },
-  },
-  {
-    id: 'openrouter',
-    label: 'OpenRouter',
-    modelHint: 'deepseek/deepseek-chat',
-    description: '海外聚合网关。建议使用非 GPT 模型作为默认配置。',
-    values: {
-      display_name: 'OpenRouter DeepSeek',
-      base_url: 'https://openrouter.ai/api/v1',
-      chat_model: 'deepseek/deepseek-chat',
-      supports_image: false,
-      supports_document: false,
-      supports_reasoning: true,
-      reasoning_type: 'prompt',
-      reasoning_label: '提示词增强',
-      max_context: '64000',
-      default_temperature: '0.6',
-    },
-  },
-  {
-    id: 'ollama',
-    label: 'Ollama 网关',
-    modelHint: 'qwen2.5:7b',
-    description: '需要填写已部署的公网 HTTPS 网关地址和网关令牌；当前不支持直接连接本机 HTTP 地址。模型名按 Ollama 实例设置。',
-    values: {
-      display_name: 'Ollama Model',
-      base_url: '',
-      chat_model: 'qwen2.5:7b',
-      supports_image: false,
-      supports_document: true,
-      supports_reasoning: false,
-      reasoning_type: 'none',
-      reasoning_label: '不支持',
-      max_context: '32768',
-      default_temperature: '0.4',
-    },
-  },
-  {
-    id: 'custom',
-    label: '自定义兼容网关',
-    modelHint: '填写控制台模型名',
-    description: '适用于私有部署、代理网关、One API、LiteLLM、New API 或 OpenAI-compatible 服务。',
-    values: {
-      display_name: 'Custom Model',
-      base_url: '',
-      chat_model: '',
-      supports_image: false,
-      supports_document: false,
-      supports_reasoning: false,
-      reasoning_type: 'none',
-      reasoning_label: '不支持',
-      max_context: '32768',
-      default_temperature: '0.4',
-    },
-  },
-];
-
-const USER_MODEL_PRESET_MAP = Object.fromEntries(USER_MODEL_PRESETS.map((preset) => [preset.id, preset]));
-
-function createUserModelForm(presetId = 'qwen') {
-  const preset = USER_MODEL_PRESET_MAP[presetId] || USER_MODEL_PRESET_MAP.qwen;
+function createUserModelForm() {
+  // 统一页：只填协议 / base_url / api_key / model。文档、上下文、温度用后端默认值，
+  // 推理能力在保存前由「测试当前配置」真实探测，不再由厂家预设写死。
   return {
     provider: 'openai-compatible',
+    base_url: '',
     api_key: '',
+    chat_model: '',
+    display_name: '',
+    supports_document: true,
+    supports_reasoning: false,
+    reasoning_type: 'none',
+    max_context: '131072',
+    default_temperature: '0.4',
     enabled: true,
     is_default: true,
-    preset_id: preset.id,
-    ...preset.values,
   };
+}
+
+const PRIVATE_GATEWAY_ENV = 'USER_MODEL_ALLOW_PRIVATE_NETWORK';
+
+function gatewayErrorText(message) {
+  const text = String(message || '');
+  if (text.includes(PRIVATE_GATEWAY_ENV)) {
+    return `该地址是内网、自建网关或 HTTP 地址，默认只允许公网 HTTPS；如需接入，请部署方在后端 .env 设置 ${PRIVATE_GATEWAY_ENV}=true 后重启。`;
+  }
+  return text;
+}
+
+// 保存/测试用的最终载荷：显示名称缺省取模型名；推理能力取自最近一次测试的探测结果。
+function draftFormPayload(form, testResult) {
+  const detected = testResult?.detected_capabilities;
+  const supportsReasoning = Boolean(detected?.supports_reasoning);
+  return userModelFormPayload({
+    ...form,
+    display_name: form.display_name.trim() || form.chat_model.trim(),
+    supports_reasoning: supportsReasoning,
+    reasoning_type: supportsReasoning ? (detected.reasoning_type || 'prompt') : 'none',
+  }, { includeApiKey: true });
 }
 
 function userModelEditForm(config) {
@@ -283,13 +120,19 @@ function UserModelsPanel({
   const [editConfig, setEditConfig] = useState(null);
   const [editForm, setEditForm] = useState(null);
   const [probedModels, setProbedModels] = useState([]);
+  const [probeNotice, setProbeNotice] = useState(null);
   const [probing, setProbing] = useState(false);
+  const [formError, setFormError] = useState('');
   const formVersion = useRef(0);
   const modelProbeVersion = useRef(0);
-  const activePreset = USER_MODEL_PRESET_MAP[form.preset_id] || USER_MODEL_PRESET_MAP.custom;
-  const formReady = Boolean(form.display_name.trim() && form.base_url.trim() && form.chat_model.trim() && form.api_key.trim());
+  const formReady = Boolean(form.base_url.trim() && form.chat_model.trim() && form.api_key.trim());
   const canSaveForm = formReady && draftTestResult?.ok;
   const imageProbeStatus = imageCapabilityFromTest(form, draftTestResult);
+  const detectedReasoning = draftTestResult?.detected_capabilities
+    ? reasoningCapabilityForModel(draftTestResult.detected_capabilities)
+    : null;
+  const modelFilter = form.chat_model.trim().toLowerCase();
+  const visibleModels = probedModels.filter((name) => !modelFilter || name.toLowerCase().includes(modelFilter));
   const createGuard = useUnsavedForm({ enabled: formOpen, value: form, label: '新增模型配置',
     busy: saving || draftTesting, onSave: () => submitUserModel() });
   const editGuard = useUnsavedForm({ enabled: Boolean(editConfig), value: editForm, label: '模型配置',
@@ -299,27 +142,15 @@ function UserModelsPanel({
     formVersion.current += 1;
     if ('base_url' in patch || 'api_key' in patch || 'provider' in patch) resetModelProbe();
     setDraftTestResult(null);
+    setFormError('');
     setForm((current) => ({ ...current, ...patch }));
   }
 
   function resetModelProbe() {
     modelProbeVersion.current += 1;
     setProbedModels([]);
+    setProbeNotice(null);
     setProbing(false);
-  }
-
-  function applyPreset(presetId) {
-    formVersion.current += 1;
-    resetModelProbe();
-    const preset = USER_MODEL_PRESET_MAP[presetId] || USER_MODEL_PRESET_MAP.custom;
-    setDraftTestResult(null);
-    setForm((current) => ({
-      ...current,
-      ...preset.values,
-      provider: preset.values.provider || 'openai-compatible',
-      preset_id: preset.id,
-      api_key: current.api_key || '',
-    }));
   }
 
   function openCreateForm() {
@@ -327,6 +158,7 @@ function UserModelsPanel({
     resetModelProbe();
     setForm(createUserModelForm());
     setDraftTestResult(null);
+    setFormError('');
     setNotice('');
     setProfileError('');
     setFormOpen(true);
@@ -365,7 +197,7 @@ function UserModelsPanel({
     setNotice('');
     setProfileError('');
     try {
-      const saved = await createUserModelConfig(userModelFormPayload(form, { includeApiKey: true }));
+      const saved = await createUserModelConfig(draftFormPayload(form, draftTestResult));
       createGuard.markSaved();
       setForm(createUserModelForm());
       setFormOpen(false);
@@ -373,7 +205,7 @@ function UserModelsPanel({
       setNotice(saved?.supports_image ? '模型连接已保存，图片探测通过。' : '模型连接已保存；图片探测未通过，但聊天发送不会被前端拦截。');
       return true;
     } catch (err) {
-      setProfileError(errorMessage(err));
+      setFormError(gatewayErrorText(errorMessage(err)));
       return false;
     } finally {
       setSaving(false);
@@ -386,11 +218,12 @@ function UserModelsPanel({
     setNotice('');
     setProfileError('');
     setDraftTestResult(null);
+    setFormError('');
     try {
-      const result = await testUserModelDraft({ ...userModelFormPayload(form, { includeApiKey: true }), detect_image: true });
+      const result = await testUserModelDraft({ ...draftFormPayload(form, null), detect_image: true, detect_reasoning: true });
       if (version === formVersion.current) setDraftTestResult(result);
     } catch (err) {
-      if (version === formVersion.current) setProfileError(errorMessage(err));
+      if (version === formVersion.current) setFormError(gatewayErrorText(errorMessage(err)));
     } finally {
       setDraftTesting(false);
     }
@@ -404,15 +237,28 @@ function UserModelsPanel({
     const version = ++modelProbeVersion.current;
     setProbing(true);
     setProbedModels([]);
+    setProbeNotice(null);
     setProfileError('');
     setNotice('');
     try {
       const result = await probeUserModels({ provider: form.provider, base_url: form.base_url, api_key: form.api_key });
       if (version !== modelProbeVersion.current) return;
-      setProbedModels(result.models || []);
-      if (!result.ok) setNotice(result.message || '拉取模型列表失败');
+      const models = result.models || [];
+      setProbedModels(models);
+      // 🛡️ 成功也必须有可见反馈：模型此前只塞进 <datalist>，而候选项仅在聚焦输入框时才弹出，
+      // 于是「拉取成功」与「什么都没发生」在界面上无法区分。这里给出明确计数与下一步提示。
+      if (result.ok) {
+        setProbeNotice({
+          ok: true,
+          text: models.length
+            ? `已拉到 ${models.length} 个模型，在下方列表点选；输入模型名可筛选。`
+            : '接口可用，但未返回任何模型，请手动填写模型名。',
+        });
+      } else {
+        setProbeNotice({ ok: false, text: gatewayErrorText(result.message) || '拉取模型列表失败' });
+      }
     } catch (err) {
-      if (version === modelProbeVersion.current) setProfileError(errorMessage(err));
+      if (version === modelProbeVersion.current) setProbeNotice({ ok: false, text: gatewayErrorText(errorMessage(err)) });
     } finally {
       if (version === modelProbeVersion.current) setProbing(false);
     }
@@ -524,7 +370,7 @@ function UserModelsPanel({
       <div className="panel-title-row">
         <div>
           <h3>我的模型</h3>
-          <p>选择常见兼容网关预设，填入 API Key 和模型名，保存后即可在智能体配置里使用。</p>
+          <p>填写协议、地址、API Key 和模型名，测试通过后保存，即可在智能体配置里使用。</p>
         </div>
         <div className="panel-actions">
           <span className="soft-pill">{userModels.length} 个私有模型</span>
@@ -539,72 +385,49 @@ function UserModelsPanel({
             </button>
             <header className="model-dialog-heading">
               <h3>新增模型</h3>
-              <p>选择厂商预设，填入 API Key 和模型名；运行温度等参数在智能体配置里决定。</p>
+              <p>任何 OpenAI 兼容或 Anthropic Messages 端点都可接入；运行温度等参数在智能体配置里决定。</p>
             </header>
             <form className="user-model-form" onSubmit={submitUserModel}>
-              <div className="provider-preset-panel">
-                <div className="provider-preset-header">
-                  <ServerCog size={16} />
-                  <span>
-                    <strong>模型厂商预设</strong>
-                    <small>预设填地址、常用模型名和显式能力；图片测试只作为诊断结果。</small>
-                  </span>
-                </div>
-                <div className="provider-preset-grid">
-                  {USER_MODEL_PRESETS.map((preset) => (
-                    <button
-                      type="button"
-                      key={preset.id}
-                      className={form.preset_id === preset.id ? 'active' : ''}
-                      disabled={saving}
-                      onClick={() => applyPreset(preset.id)}
-                    >
-                      <strong>{preset.label}</strong>
-                      <small>{preset.modelHint}</small>
-                    </button>
+              <div className="user-model-grid compact">
+                <label className="field-stack">
+                  <span>连接协议</span>
+                  <select value={form.provider} onChange={(event) => updateForm({ provider: event.target.value })}>
+                    <option value="openai-compatible">OpenAI-compatible（Chat Completions）</option>
+                    <option value="anthropic">Anthropic（Messages）</option>
+                  </select>
+                </label>
+                <label className="field-stack">
+                  <span>chat_base_url</span>
+                  <input value={form.base_url} onChange={(event) => updateForm({ base_url: event.target.value })} placeholder={form.provider === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.deepseek.com'} />
+                </label>
+                <label className="field-stack">
+                  <span>chat_api_key</span>
+                  <input type="password" value={form.api_key} onChange={(event) => updateForm({ api_key: event.target.value })} placeholder="只提交一次，不会回显" autoComplete="off" />
+                </label>
+                <label className="field-stack">
+                  <span>chat_model</span>
+                  <div className="chat-model-row">
+                    <input value={form.chat_model} onChange={(event) => updateForm({ chat_model: event.target.value })} placeholder="拉取后点选，或手动填写模型 ID" />
+                    <button type="button" disabled={probing || !form.base_url.trim() || !form.api_key.trim()} onClick={probeModelsDraft}>{probing ? '拉取中' : '拉取模型'}</button>
+                  </div>
+                </label>
+              </div>
+              {/* 提示与候选列表渲染在 <label> 之外：label 内含额外文本会改变 chat_model 的可访问名。 */}
+              {probeNotice && (
+                <p className={probeNotice.ok ? 'model-probe-hint ok' : 'model-probe-hint error'} role="status">{probeNotice.text}</p>
+              )}
+              {visibleModels.length > 0 && (
+                <ul className="probed-model-list" aria-label="可选模型">
+                  {visibleModels.map((name) => (
+                    <li key={name}>
+                      <button type="button" className={form.chat_model === name ? 'active' : ''} onClick={() => updateForm({ chat_model: name })}>{name}</button>
+                    </li>
                   ))}
-                </div>
-                <p className="provider-preset-note">{activePreset.description}</p>
-              </div>
-              <div className="model-channel-grid">
-                <div className="model-channel-card">
-                  <div className="model-channel-heading">
-                    <strong>聊天模型</strong>
-                    <small>用于 Agent 对话和工具推理；这里只维护连接与基础能力。</small>
-                  </div>
-                  <div className="user-model-grid compact">
-                    <label className="field-stack">
-                      <span>连接协议</span>
-                      <select value={form.provider} onChange={(event) => updateForm({ provider: event.target.value, preset_id: 'custom' })}>
-                        <option value="openai-compatible">OpenAI-compatible（Chat Completions）</option>
-                        <option value="anthropic">Anthropic（Messages）</option>
-                      </select>
-                    </label>
-                    <label className="field-stack">
-                      <span>显示名称</span>
-                       <input value={form.display_name} onChange={(event) => updateForm({ display_name: event.target.value, preset_id: form.preset_id || 'custom' })} placeholder="Qwen Plus" />
-                    </label>
-                    <label className="field-stack">
-                      <span>chat_base_url</span>
-                      <input value={form.base_url} onChange={(event) => updateForm({ base_url: event.target.value, preset_id: 'custom' })} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
-                    </label>
-                    <label className="field-stack">
-                      <span>chat_api_key</span>
-                      <input type="password" value={form.api_key} onChange={(event) => updateForm({ api_key: event.target.value })} placeholder="只提交一次，不会回显" autoComplete="off" />
-                    </label>
-                    <label className="field-stack">
-                      <span>chat_model</span>
-                      <div className="chat-model-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                        <input value={form.chat_model} onChange={(event) => updateForm({ chat_model: event.target.value, preset_id: form.preset_id || 'custom' })} placeholder={form.provider === 'anthropic' ? '选择或填写模型 ID' : 'qwen-plus'} list="probed-models" style={{ flex: 1 }} />
-                        <datalist id="probed-models">
-                          {probedModels.map((m) => <option key={m} value={m} />)}
-                        </datalist>
-                        <button type="button" disabled={probing || !form.base_url.trim() || !form.api_key.trim()} onClick={probeModelsDraft}>{probing ? '拉取中' : '拉取模型'}</button>
-                      </div>
-                    </label>
-                  </div>
-                </div>
-              </div>
+                </ul>
+              )}
+              {probedModels.length > 0 && visibleModels.length === 0 && (
+                <p className="model-probe-hint">列表中没有匹配「{form.chat_model.trim()}」的模型，将按手动填写的模型 ID 测试。</p>
+              )}
               <label className="model-enabled-check inline">
                 <input type="checkbox" checked disabled />
                 <span>
@@ -616,14 +439,14 @@ function UserModelsPanel({
                 <span className="enabled">文本</span>
                 <span className={imageProbeStatus.className}>{imageProbeStatus.label}</span>
                 <span className="enabled">文档附件后端解析</span>
-                <span className={reasoningCapabilityForModel(form).supported ? 'enabled' : ''}>{reasoningCapabilityForModel(form).label}</span>
-                <small>图片附件会随聊天请求发送；如果网关或模型不支持，会显示真实返回结果。</small>
+                <span className={detectedReasoning?.supported ? 'enabled' : ''}>深度思考：{detectedReasoning ? detectedReasoning.label : '测试后识别'}</span>
+                <small>图片与深度思考能力由「测试当前配置」真实探测；图片附件始终随聊天请求发送，不会被前端拦截。</small>
               </div>
               <div className="model-checks state-checks">
-                <label><input type="checkbox" checked={form.enabled} onChange={(event) => updateForm({ enabled: event.target.checked })} />启用</label>
                 <label><input type="checkbox" checked={form.is_default} onChange={(event) => updateForm({ is_default: event.target.checked })} />设为默认</label>
               </div>
-              {formReady && !draftTestResult?.ok && <p className="model-row-warning">保存前请先点击“测试当前配置”。图片探测只作诊断；文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
+              {formError && <p className="model-probe-hint error" role="alert">{formError}</p>}
+              {formReady && !draftTestResult?.ok && <p className="model-row-warning">保存前请先点击“测试当前配置”。文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
               {draftTestResult && <UserModelTestResult result={draftTestResult} />}
               <div className="model-form-actions">
                 <button className="preset-action" type="button" disabled={draftTesting || saving || !formReady} onClick={testDraftModel}>{draftTesting ? '检测中' : '测试当前配置'}</button>
@@ -659,7 +482,7 @@ function UserModelsPanel({
               </div>
             </div>
         ))}
-        {userModels.length === 0 && <p className="muted">还没有私有模型配置。选择一个厂商预设，填入 API Key，保存后就可以在智能体配置里选择它。</p>}
+        {userModels.length === 0 && <p className="muted">还没有私有模型配置。点「新增模型」填写地址、API Key 和模型名，保存后就可以在智能体配置里选择它。</p>}
       </div>
       {keyDialogConfig && (
         <SecretInputDialog

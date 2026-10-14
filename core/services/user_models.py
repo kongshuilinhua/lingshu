@@ -4,6 +4,7 @@ import ipaddress
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -334,8 +335,27 @@ def probe_models_payload(payload: dict) -> dict:
             cursors.add(cursor)
             url = anthropic_protocol.endpoint(base_url, "models") + "?" + urllib.parse.urlencode({"after_id": cursor})
         raise ValueError("Model list pagination limit exceeded")
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "models": [], "count": 0, "message": _sanitize_probe_error(_http_error_with_detail(exc))}
     except Exception as exc:
         return {"ok": False, "models": [], "count": 0, "message": _sanitize_probe_error(exc)}
+
+
+def _http_error_with_detail(exc: urllib.error.HTTPError) -> Exception:
+    """把上游错误体里的 message 拼进异常文本：只有状态行（如 401 Authorization Required）时用户无从判断原因。"""
+    try:
+        body = exc.read(4096).decode("utf-8", errors="replace")
+    except Exception:
+        return exc
+    detail = body.strip()
+    try:
+        data = json.loads(body)
+        error = data.get("error") if isinstance(data, dict) else None
+        detail = (error.get("message") if isinstance(error, dict) else error) or data.get("message") or detail
+    except (ValueError, AttributeError):
+        pass
+    detail = re.sub(r"\s+", " ", str(detail or "")).strip()[:300]
+    return RuntimeError(f"HTTP {exc.code}: {detail}" if detail else f"HTTP {exc.code}: {exc.reason}")
 
 
 def detect_image_support_for_payload(*, api_key: str, data: dict) -> bool:
