@@ -79,7 +79,7 @@ def test_live_chat_uses_native_headers_endpoint_and_public_transport(live_settin
         return Response(json.dumps({'content': [{'type': 'text', 'text': 'hi'},
             {'type': 'tool_use', 'id': 'toolu_1', 'name': 'echo', 'input': {'text': 'ok'}}]}).encode())
 
-    monkeypatch.setattr(llm, 'open_public_https', opened)
+    monkeypatch.setattr(llm, 'open_model_gateway', opened)
     response = llm.OpenAICompatibleProvider().chat([{'role': 'user', 'content': 'hi'}], runtime_config=RUNTIME, tools=[TOOL])
     request = captured[0]
     assert request.full_url == 'https://example.com/v1/messages'
@@ -105,7 +105,7 @@ def test_native_stream_separates_text_thinking_and_tool_arguments(live_settings,
         {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'input_json_delta', 'partial_json': '"ok"}'}},
         {'type': 'content_block_stop', 'index': 2}, {'type': 'message_stop'},
     ]
-    monkeypatch.setattr(llm, 'open_public_https', lambda request, **kwargs: sse(events))
+    monkeypatch.setattr(llm, 'open_model_gateway', lambda request, **kwargs: sse(events))
     frames = list(llm.OpenAICompatibleProvider().chat_stream([{'role': 'user', 'content': 'hi'}], runtime_config=RUNTIME))
     assert frames[:2] == [{'type': 'reasoning', 'text': 'plan'}, {'type': 'content', 'text': 'answer'}]
     assert frames[2]['tool_call']['id'] == 'toolu_s'
@@ -125,7 +125,7 @@ def test_http_error_does_not_expose_anthropic_key(live_settings, monkeypatch):
     def fail(request, **kwargs):
         raise urllib.error.HTTPError(request.full_url, 401, 'bad key', {}, io.BytesIO(b'test-only-key'))
 
-    monkeypatch.setattr(llm, 'open_public_https', fail)
+    monkeypatch.setattr(llm, 'open_model_gateway', fail)
     with pytest.raises(RuntimeError) as error:
         llm.OpenAICompatibleProvider().chat([{'role': 'user', 'content': 'hi'}], runtime_config=RUNTIME)
     assert 'test-only-key' not in str(error.value)
@@ -139,7 +139,7 @@ def test_anthropic_model_list_pagination_and_auth(monkeypatch):
         page = {'data': [{'id': 'claude-a'}], 'has_more': True, 'last_id': 'claude-a'} if len(captured) == 1 else {'data': [{'id': 'claude-b'}], 'has_more': False}
         return Response(json.dumps(page).encode())
 
-    monkeypatch.setattr('core.services.user_models.open_public_https', opened)
+    monkeypatch.setattr('core.services.user_models.open_model_gateway', opened)
     result = probe_models_payload(RUNTIME)
     assert result['models'] == ['claude-a', 'claude-b']
     assert captured[1].full_url.endswith('/v1/models?after_id=claude-a')
@@ -159,7 +159,7 @@ def test_langchain_structured_helpers_use_the_native_gateway(live_settings, monk
         return Response(json.dumps({'content': [{'type': 'tool_use', 'id': 'toolu_f',
             'name': 'Facts', 'input': {'facts': ['remembered']}}]}).encode())
 
-    monkeypatch.setattr(llm, 'open_public_https', opened)
+    monkeypatch.setattr(llm, 'open_model_gateway', opened)
     model = get_chat_model(runtime_config=RUNTIME)
     result = model.with_structured_output(Facts, method='function_calling').invoke([SystemMessage(content='Extract'), HumanMessage(content='hi')])
     assert result.facts == ['remembered']
@@ -177,7 +177,7 @@ def test_agent_native_tool_loop_replays_signed_content_and_results(live_settings
         blocks = signed if len(captured) == 1 else [{'type': 'text', 'text': 'done'}]
         return Response(json.dumps({'content': blocks}).encode())
 
-    monkeypatch.setattr(llm, 'open_public_https', opened)
+    monkeypatch.setattr(llm, 'open_model_gateway', opened)
     runner = WorkflowRunner(SimpleNamespace())
     tool = SimpleNamespace(id=1, name='echo', label='echo', description='Echo', type='http',
                            schema={}, query_schema={'text': {'required': True}}, method='GET')

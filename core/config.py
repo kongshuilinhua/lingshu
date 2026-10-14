@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     api_key_encryption_key: str | None = Field(default=None, alias="API_KEY_ENCRYPTION_KEY")
     mcp_stdio_templates_json: str = Field(default="{}", alias="MCP_STDIO_TEMPLATES_JSON")
     mcp_allow_custom_stdio: bool = Field(default=False, alias="MCP_ALLOW_CUSTOM_STDIO")
+    # 🛡️ 用户自定义模型网关是否允许内网/自建地址（http、私网 IP、本机代理 fake-ip）。
+    # 默认关闭：只允许公网 HTTPS。仅作用于「我的模型」的网关（拉取列表、连接测试、聊天调用），
+    # MCP、HTTP 工具、web reader 的 SSRF 防护不受影响；开启后云元数据地址仍被拒绝。
+    user_model_allow_private_network: bool = Field(default=False, alias="USER_MODEL_ALLOW_PRIVATE_NETWORK")
     skill_sandbox_image: str = Field(default="", alias="SKILL_SANDBOX_IMAGE")
     mcp_oauth_redirect_url: str = Field(default="", alias="MCP_OAUTH_REDIRECT_URL")
     mcp_client_metadata_url: str = Field(default="", alias="MCP_CLIENT_METADATA_URL")

@@ -233,7 +233,7 @@ def test_model_searches_then_loads_skill_then_calls_mcp(skill_db, monkeypatch, p
             data = {'choices': [{'message': message}]}
         return Response(json.dumps(data).encode())
 
-    monkeypatch.setattr(llm, 'open_public_https', opened)
+    monkeypatch.setattr(llm, 'open_model_gateway', opened)
     monkeypatch.setattr(llm.urllib.request, 'urlopen', opened)
     runtime = SimpleNamespace(id=agent.id, workspace_id=member.workspace_id, system_prompt='Help with the task.', tool_ids=[],
                               skill_bindings=skills.skill_bindings(db, agent.id), mcp_bindings=[{'server_id': server.id, 'selected_tools': ['echo']}],

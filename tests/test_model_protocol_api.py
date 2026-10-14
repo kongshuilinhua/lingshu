@@ -58,7 +58,7 @@ def test_protocol_probe_route_preserves_native_request(client, auth_headers, mon
         captured.append(request)
         return Response(json.dumps({'data': [{'id': 'claude-test'}], 'has_more': False}).encode())
 
-    monkeypatch.setattr('core.services.user_models.open_public_https', opened)
+    monkeypatch.setattr('core.services.user_models.open_model_gateway', opened)
     result = client.post('/api/user-models/probe-models', headers=auth_headers,
         json={'provider': 'anthropic', 'base_url': 'https://example.com', 'api_key': 'test-only-protocol-key'})
     assert result.status_code == 200 and result.json()['models'] == ['claude-test']

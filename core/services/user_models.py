@@ -4,6 +4,7 @@ import ipaddress
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -14,7 +15,7 @@ from core.db.models import Agent, UserModelConfig
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import anthropic_protocol
 from core.security.api_keys import decrypt_api_key, encrypt_api_key
-from core.security.outbound_http import open_public_https
+from core.security.outbound_http import open_model_gateway
 
 
 def user_model_payload(config: UserModelConfig) -> dict:
@@ -32,7 +33,6 @@ def user_model_payload(config: UserModelConfig) -> dict:
         "chat_model": config.chat_model,
         "supports_image": config.supports_image,
         "supports_document": config.supports_document,
-        "image_detection": _image_detection_payload(config),
         "supports_reasoning": config.supports_reasoning,
         "reasoning_type": config.reasoning_type,
         "reasoning_label": config.reasoning_label,
@@ -56,7 +56,6 @@ def user_model_snapshot(config: UserModelConfig | None) -> dict | None:
         "chat_model": config.chat_model,
         "supports_image": config.supports_image,
         "supports_document": config.supports_document,
-        "image_detection": _image_detection_payload(config),
         "supports_reasoning": config.supports_reasoning,
         "reasoning_type": config.reasoning_type,
         "reasoning_label": config.reasoning_label,
@@ -81,12 +80,10 @@ def create_user_model_config(db: Session, *, user_id: int, payload: dict) -> Use
     """
     新建用户私有模型配置。
 
-    🛡️ 智能多模态自动探测：
-        在写入前自动发起针对该端点的多模态能力探测，自动判断其是否真能接收图片输入，强制矫正 `supports_image`。
+    能力（图片、深度思考）以用户声明为准：前端按模型名预填、用户可改，后端不再自动探测。
     """
     api_key = _required_api_key(payload.get("api_key"))
     data = _config_fields(payload)
-    data["supports_image"] = detect_image_support_for_payload(api_key=api_key, data=data)
     if data.get("is_default"):
         _clear_other_defaults(db, user_id=user_id, keep_id=None)
     config = UserModelConfig(
@@ -102,12 +99,8 @@ def create_user_model_config(db: Session, *, user_id: int, payload: dict) -> Use
 
 def update_user_model_config(db: Session, *, config: UserModelConfig, payload: dict) -> UserModelConfig:
     """
-    修改用户私有模型配置。
-    
-    🛡️ 安全控制与自适应能力检验：
-        当涉及网关或模型变更时，重新触发针对当前端点多模态的自动嗅探，保持能力标签实时性。
+    修改用户私有模型配置；能力字段按用户提交的值保存。
     """
-    should_probe_image = any(key in payload for key in ("api_key", "base_url", "provider", "chat_model", "supports_image"))
     if "api_key" in payload:
         api_key = payload["api_key"]
         if api_key is None or not str(api_key).strip():
@@ -116,12 +109,6 @@ def update_user_model_config(db: Session, *, config: UserModelConfig, payload: d
     fields = _config_fields(payload, partial=True)
     if fields.get("is_default"):
         _clear_other_defaults(db, user_id=config.user_id, keep_id=config.id)
-    if should_probe_image:
-        probe_data = _config_data_for_probe(config, fields)
-        fields["supports_image"] = detect_image_support_for_payload(
-            api_key=decrypt_api_key(config.encrypted_api_key),
-            data=probe_data,
-        )
     for key, value in fields.items():
         setattr(config, key, value)
     db.commit()
@@ -145,16 +132,6 @@ def delete_user_model_config(db: Session, *, config: UserModelConfig) -> None:
         raise ValueError("Model config is in use")
     db.delete(config)
     db.commit()
-
-
-def _image_detection_payload(config: UserModelConfig) -> dict:
-    """封装多模态检测状态回执。"""
-    return {
-        "tested": True,
-        "confirmed": bool(config.supports_image),
-        "status": "confirmed" if config.supports_image else "failed",
-        "source": "backend_probe",
-    }
 
 
 def resolve_user_model_config(
@@ -199,79 +176,43 @@ def user_model_runtime_config(config: UserModelConfig) -> dict:
     }
 
 
-def test_user_model_config(config: UserModelConfig, *, detect_image: bool = False) -> dict:
-    """
-    对用户私有模型配置进行全链路真实连通性测试。
+_CONNECTION_TEST_MAX_TOKENS = 32
 
-    🎯 意图与工程大局观：
-        在保存或测试私有模型时，发起真实的空问答 HTTP 请求测试，评估 Base URL 和 API Key 的正确性。
-        如果参数 `detect_image` 为 True，将触发核心的 **Active Multi-Modal Probe（多模态主动探测）**，确保平台拿到的能力清单百分之百真实。
+
+def test_user_model_config(config: UserModelConfig) -> dict:
+    """
+    连通性测试：发一个极短的流式问答，收到第一帧即判定 base_url、API Key 与模型名可用。
+
+    只回答「能不能连上」，不探测图片/推理等能力——自动探测既慢又容易误判
+    （如部分纯文本模型收到图片仍返回 200），能力改由用户声明。
+
+    ⚡ 必须用流式并提前结束：推理模型（如硅基流动的 DeepSeek-R1）走非流式时，
+    即便 max_tokens 很小也要等完整思考结束才返回，实测近 1 分钟；流式首帧不到 1 秒。
     """
     started = time.monotonic()
-    checks = {
-        "chat": {"ok": False, "required": True},
-        "image": {
-            "ok": False,
-            "required": False,
-            "declared": bool(config.supports_image),
-            "tested": False,
-            "status": "declared" if config.supports_image else "not_tested",
-        },
-        "reasoning": {
-            "ok": bool(config.supports_reasoning and config.reasoning_type != "none"),
-            "required": False,
-            "type": config.reasoning_type,
-        },
-    }
-    if detect_image:
-        checks["image"]["detected"] = True
+    result = {"ok": False, "model": config.chat_model}
     try:
         runtime = user_model_runtime_config(config)
-        provider = OpenAICompatibleProvider()
-        # 1. 真实问答联通探测
-        provider.chat(
-            [{"role": "user", "content": "connection test"}],
+        stream = OpenAICompatibleProvider().chat_stream(
+            [{"role": "user", "content": "ping"}],
             model=runtime["chat_model"],
             temperature=0,
-            runtime_config=runtime,
+            runtime_config={**runtime, "max_tokens": _CONNECTION_TEST_MAX_TOKENS},
         )
-        checks["chat"]["ok"] = True
-        
-        # 2. 多模态图像能力测试
-        if detect_image:
-            image_result = _check_image_capability(provider, runtime, required=False)
-            image_ok = image_result["ok"]
-            checks["image"]["tested"] = True
-            checks["image"]["ok"] = image_ok
-            checks["image"]["status"] = "confirmed" if image_ok else "failed"
-            if not image_ok:
-                checks["image"]["error_code"] = image_result["error_code"]
-                checks["image"]["message"] = image_result["message"]
+        try:
+            # 首帧到达即说明鉴权与模型名都已通过；关闭生成器会一并断开上游连接
+            next(iter(stream), None)
+        finally:
+            stream.close()
+        result.update(ok=True, message="连接成功")
     except Exception as exc:
-        # 🛡️ 安全核心：在连通性抛错时进行严格过滤清洗
-        checks["chat"]["error_code"] = _chat_probe_error_code(exc)
-        checks["chat"]["message"] = _sanitize_probe_error(exc)
-        return {
-            "ok": False,
-            "model": config.chat_model,
-            "latency_ms": int((time.monotonic() - started) * 1000),
-            "message": _checks_message(checks),
-            "error_code": "provider_error",
-            "checks": checks,
-            "detected_capabilities": _detected_capabilities(checks),
-        }
-    ok = all(not result.get("required") or result.get("ok") for result in checks.values())
-    return {
-        "ok": ok,
-        "model": config.chat_model,
-        "latency_ms": int((time.monotonic() - started) * 1000),
-        "message": _checks_message(checks),
-        "checks": checks,
-        "detected_capabilities": _detected_capabilities(checks),
-    }
+        # 🛡️ 报错可能回显请求头里的密钥，必须脱敏后再返回前端
+        result.update(error_code=_chat_probe_error_code(exc), message=_sanitize_probe_error(exc))
+    result["latency_ms"] = int((time.monotonic() - started) * 1000)
+    return result
 
 
-def test_user_model_payload(payload: dict, *, detect_image: bool = False) -> dict:
+def test_user_model_payload(payload: dict) -> dict:
     """基于前端传入的临时 Payload（未入库数据）进行连通性预测试。"""
     api_key = _required_api_key(payload.get("api_key"))
     data = _config_fields(payload)
@@ -280,7 +221,7 @@ def test_user_model_payload(payload: dict, *, detect_image: bool = False) -> dic
         encrypted_api_key=encrypt_api_key(api_key),
         **data,
     )
-    return test_user_model_config(config, detect_image=detect_image)
+    return test_user_model_config(config)
 
 
 def probe_models_payload(payload: dict) -> dict:
@@ -303,7 +244,7 @@ def probe_models_payload(payload: dict) -> dict:
         cursors = set()
         for _ in range(20):
             request = urllib.request.Request(url, headers=auth_headers)
-            with open_public_https(request, timeout=10) as response:
+            with open_model_gateway(request, timeout=10, allow_private=_private_gateways_allowed()) as response:
                 if response.status != 200:
                     raise ValueError("Model endpoint redirected or rejected the request")
                 raw = response.read(1024 * 1024 + 1)
@@ -321,19 +262,27 @@ def probe_models_payload(payload: dict) -> dict:
             cursors.add(cursor)
             url = anthropic_protocol.endpoint(base_url, "models") + "?" + urllib.parse.urlencode({"after_id": cursor})
         raise ValueError("Model list pagination limit exceeded")
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "models": [], "count": 0, "message": _sanitize_probe_error(_http_error_with_detail(exc))}
     except Exception as exc:
         return {"ok": False, "models": [], "count": 0, "message": _sanitize_probe_error(exc)}
 
 
-def detect_image_support_for_payload(*, api_key: str, data: dict) -> bool:
-    """基于载荷内容检测图像能力。"""
-    config = UserModelConfig(
-        user_id=0,
-        encrypted_api_key=encrypt_api_key(api_key),
-        **{**data, "supports_image": False},
-    )
-    runtime = user_model_runtime_config(config)
-    return _check_image_capability(OpenAICompatibleProvider(), runtime, required=False)["ok"]
+def _http_error_with_detail(exc: urllib.error.HTTPError) -> Exception:
+    """把上游错误体里的 message 拼进异常文本：只有状态行（如 401 Authorization Required）时用户无从判断原因。"""
+    try:
+        body = exc.read(4096).decode("utf-8", errors="replace")
+    except Exception:
+        return exc
+    detail = body.strip()
+    try:
+        data = json.loads(body)
+        error = data.get("error") if isinstance(data, dict) else None
+        detail = (error.get("message") if isinstance(error, dict) else error) or data.get("message") or detail
+    except (ValueError, AttributeError):
+        pass
+    detail = re.sub(r"\s+", " ", str(detail or "")).strip()[:300]
+    return RuntimeError(f"HTTP {exc.code}: {detail}" if detail else f"HTTP {exc.code}: {exc.reason}")
 
 
 def _required_api_key(value) -> str:
@@ -399,17 +348,31 @@ def _config_fields(payload: dict, *, partial: bool = False) -> dict:
     return data
 
 
+_PRIVATE_GATEWAY_HINT = " (private or self-hosted gateways require USER_MODEL_ALLOW_PRIVATE_NETWORK=true)"
+
+
+def _private_gateways_allowed() -> bool:
+    return bool(getattr(get_settings(), "user_model_allow_private_network", False))
+
+
 def _validate_public_base_url(value: str) -> None:
     parsed = urllib.parse.urlsplit(value)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+    allow_private = _private_gateways_allowed()
+    allowed_schemes = {"http", "https"} if allow_private else {"https"}
+    if (parsed.scheme not in allowed_schemes or not parsed.hostname or parsed.username or parsed.password
             or parsed.query or parsed.fragment):
-        raise ValueError("Public HTTPS base_url required")
+        raise ValueError("Public HTTPS base_url required" + ("" if allow_private else _PRIVATE_GATEWAY_HINT))
+    if parsed.hostname.rstrip(".").lower() in {"metadata", "metadata.google.internal"}:
+        raise ValueError("Model gateway target is blocked")
     try:
         ip = ipaddress.ip_address(parsed.hostname)
     except ValueError:
         return
-    if not ip.is_global:
-        raise ValueError("Public HTTPS base_url required")
+    mapped = getattr(ip, "ipv4_mapped", None) or ip
+    if mapped.is_link_local or mapped.is_multicast or mapped.is_unspecified:
+        raise ValueError("Model gateway target is blocked")
+    if not allow_private and not ip.is_global:
+        raise ValueError("Public HTTPS base_url required" + _PRIVATE_GATEWAY_HINT)
 
 
 def _protocol(value) -> str:
@@ -421,23 +384,6 @@ def _protocol(value) -> str:
     return value
 
 
-def _config_data_for_probe(config: UserModelConfig, fields: dict) -> dict:
-    return {
-        "display_name": fields.get("display_name", config.display_name),
-        "provider": fields.get("provider", config.provider),
-        "base_url": fields.get("base_url", config.base_url),
-        "chat_model": fields.get("chat_model", config.chat_model),
-        "supports_document": fields.get("supports_document", config.supports_document),
-        "supports_reasoning": fields.get("supports_reasoning", config.supports_reasoning),
-        "reasoning_type": fields.get("reasoning_type", config.reasoning_type),
-        "reasoning_label": fields.get("reasoning_label", config.reasoning_label),
-        "max_context": fields.get("max_context", config.max_context),
-        "default_temperature": fields.get("default_temperature", config.default_temperature),
-        "enabled": fields.get("enabled", config.enabled),
-        "is_default": fields.get("is_default", config.is_default),
-    }
-
-
 def _reasoning_type(value) -> str:
     normalized = str(value or "none").strip()
     if normalized not in {"native", "prompt", "none"}:
@@ -447,75 +393,6 @@ def _reasoning_type(value) -> str:
 
 def _reasoning_label(reasoning_type: str) -> str:
     return {"native": "深度思考", "prompt": "提示词增强", "none": "不支持"}.get(reasoning_type, "不支持")
-
-
-def _tiny_png_data_url() -> str:
-    """
-    🧠 极简无损 1x1 像素 PNG Base64 数据 URL。
-    作为主动多模态图像探测的最小有效载荷负载，最大程度压缩请求开销，保护网络带宽。
-    """
-    return (
-        "data:image/png;base64,"
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-    )
-
-
-def _check_image_capability(provider: OpenAICompatibleProvider, runtime: dict, *, required: bool) -> dict:
-    """
-    通过实际向该端点灌入 1x1 小图片，看其是否抛出 "Payload Rejected" 异常来最终核对多模态能力。
-    """
-    if get_settings().mock_llm:
-        ok = _model_name_implies_image(runtime.get("chat_model", ""))
-        return {
-            "ok": ok,
-            "error_code": "" if ok else "mock_model_name_not_vision",
-            "message": "" if ok else "Mock image probe treats this model name as text-only",
-        }
-    try:
-        # 发起多模态测试调用
-        provider.chat(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "describe this image briefly"},
-                        {"type": "image_url", "image_url": {"url": _tiny_png_data_url()}},
-                    ],
-                }
-            ],
-            model=runtime["chat_model"],
-            temperature=0,
-            runtime_config=runtime,
-        )
-        return {"ok": True, "error_code": "", "message": ""}
-    except Exception as exc:
-        if required:
-            raise
-        return {
-            "ok": False,
-            "error_code": _image_probe_error_code(exc),
-            "message": _sanitize_probe_error(exc),
-        }
-
-
-def _image_probe_error_code(exc: Exception) -> str:
-    text = str(exc).lower()
-    status = _http_status_from_error(text)
-    if status in {401, 403}:
-        return "auth_failed"
-    if status == 404:
-        return "model_not_found"
-    if status in {408, 429, 500, 502, 503, 504}:
-        return "gateway_unavailable"
-    if status == 400 or "invalid" in text or "image_url" in text or "content" in text:
-        return "image_payload_rejected"
-    if "invalid api key" in text or "unauthorized" in text or "forbidden" in text:
-        return "auth_failed"
-    if "model" in text and "not" in text:
-        return "model_not_found"
-    if "cannot connect" in text or "timed out" in text or "timeout" in text:
-        return "gateway_unreachable"
-    return "image_probe_failed"
 
 
 def _chat_probe_error_code(exc: Exception) -> str:
@@ -558,52 +435,7 @@ def _sanitize_probe_error(exc: Exception) -> str:
     message = str(exc)
     message = re.sub(r"(?i)(sk-[A-Za-z0-9_-]+|api[_-]?key\s*[:=]\s*\S+|authorization\s*:\s*\S+|bearer\s+\S+)", "[secret]", message)
     message = re.sub(r"\s+", " ", message).strip()
-    return message[:500] or "Image probe failed"
-
-
-def _model_name_implies_image(model_name: str) -> bool:
-    """通过模型名称词义推断其是否内置支持多模态（vl、vision、omni 等标记）。"""
-    normalized = f"-{str(model_name or '').lower().replace('_', '-')}-"
-    markers = (
-        "-vl-",
-        "-vision-",
-        "-visual-",
-        "-multimodal-",
-        "-omni-",
-        "-qvq-",
-        "-4v-",
-    )
-    return any(marker in normalized for marker in markers)
-
-
-def _detected_capabilities(checks: dict) -> dict:
-    """整合检测的推理和图像支持状态。"""
-    reasoning_type = checks.get("reasoning", {}).get("type") or "none"
-    supports_reasoning = bool(checks.get("reasoning", {}).get("ok")) and reasoning_type != "none"
-    image_check = checks.get("image", {})
-    image_confirmed = bool(image_check.get("ok"))
-    return {
-        "supports_text": bool(checks.get("chat", {}).get("ok")),
-        "chat_error_code": checks.get("chat", {}).get("error_code", ""),
-        "chat_error": checks.get("chat", {}).get("message", ""),
-        "supports_image": image_confirmed,
-        "image_confirmed": image_confirmed,
-        "image_declared": bool(image_check.get("declared")),
-        "image_status": image_check.get("status", "not_tested"),
-        "image_error_code": image_check.get("error_code", ""),
-        "image_error": image_check.get("message", ""),
-        "supports_reasoning": supports_reasoning,
-        "reasoning_type": reasoning_type if supports_reasoning else "none",
-    }
-
-
-def _checks_message(checks: dict) -> str:
-    """聚合检测结论信息。"""
-    failed = [name for name, result in checks.items() if result.get("required") and not result.get("ok")]
-    if failed:
-        return "Capability check failed: " + ", ".join(failed)
-    passed = [name for name, result in checks.items() if result.get("required") and result.get("ok")]
-    return "Capability check succeeded: " + ", ".join(passed)
+    return message[:500] or "Connection test failed"
 
 
 def _clear_other_defaults(db: Session, *, user_id: int, keep_id: int | None) -> None:

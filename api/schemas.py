@@ -403,8 +403,7 @@ class UserModelConfigRequest(BaseModel):
 
 
 class UserModelCapabilityTestRequest(UserModelConfigRequest):
-    """私有大模型连通性与多模态/视觉推理支持实测请求载荷。"""
-    detect_image: bool = False
+    """私有大模型连通性测试请求载荷（只测能否连通，不探测能力）。"""
 
 
 class UserModelProbeModelsRequest(BaseModel):

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from core.config import get_settings
 from core.integrations import anthropic_protocol
 from core.integrations.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
-from core.security.outbound_http import open_public_https
+from core.security.outbound_http import open_model_gateway
 
 # 🎯 系统硬编码默认的 OpenAI 兼容模式 API 端点（指向阿里云百炼/通义千问兼容接口）
 DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -244,11 +244,14 @@ class OpenAICompatibleProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
+        post_kwargs = {"public_only": True} if (runtime_config or {}).get("untrusted_base_url") else {}
         try:
-            if (runtime_config or {}).get("untrusted_base_url"):
-                data = self._post_json(url, payload, api_key, public_only=True)
-            else:
-                data = self._post_json(url, payload, api_key)
+            try:
+                data = self._post_json(url, payload, api_key, **post_kwargs)
+            except RuntimeError as exc:
+                if not self._drop_rejected_enable_thinking(payload, exc):
+                    raise
+                data = self._post_json(url, payload, api_key, **post_kwargs)
         except Exception:
             breaker.record_failure()
             raise
@@ -340,11 +343,18 @@ class OpenAICompatibleProvider:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
         # 🎯 编排流转：有工具绑定时，实际上由工作流 runtime 模块使用非流式 chat() 做决策，流式仅在最后的最终回答生成阶段触发
+        post_kwargs = {"public_only": True} if (runtime_config or {}).get("untrusted_base_url") else {}
         try:
-            if (runtime_config or {}).get("untrusted_base_url"):
-                yield from self._post_json_stream(url, payload, api_key, public_only=True)
-            else:
-                yield from self._post_json_stream(url, payload, api_key)
+            emitted = False
+            try:
+                for frame in self._post_json_stream(url, payload, api_key, **post_kwargs):
+                    emitted = True
+                    yield frame
+            except RuntimeError as exc:
+                # 只有尚未产出任何帧（连接阶段即被拒）才可安全重试
+                if emitted or not self._drop_rejected_enable_thinking(payload, exc):
+                    raise
+                yield from self._post_json_stream(url, payload, api_key, **post_kwargs)
         except Exception:
             breaker.record_failure()
             raise
@@ -565,6 +575,11 @@ class OpenAICompatibleProvider:
             self._breakers[model_name] = CircuitBreaker(failure_threshold=3, timewindow=60)
         return self._breakers[model_name]
 
+    @staticmethod
+    def _private_gateways_allowed() -> bool:
+        # 只作用于用户自定义模型网关（public_only 路径），见 USER_MODEL_ALLOW_PRIVATE_NETWORK
+        return bool(getattr(get_settings(), "user_model_allow_private_network", False))
+
     def _post_json(self, url: str, payload: dict, api_key: str, *, timeout_seconds: int = 60, public_only: bool = False, headers: dict | None = None) -> dict:
         """
         同步 POST JSON 工具函数。
@@ -586,7 +601,10 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         try:
-            opened = open_public_https(request, timeout=timeout_seconds) if public_only else urllib.request.urlopen(request, timeout=timeout_seconds)
+            opened = (
+                open_model_gateway(request, timeout=timeout_seconds, allow_private=self._private_gateways_allowed())
+                if public_only else urllib.request.urlopen(request, timeout=timeout_seconds)
+            )
             with opened as response:
                 if public_only and response.status != 200:
                     raise RuntimeError("Model endpoint redirected or rejected the request")
@@ -625,7 +643,10 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         try:
-            opened = open_public_https(request, timeout=120) if public_only else urllib.request.urlopen(request, timeout=120)
+            opened = (
+                open_model_gateway(request, timeout=120, allow_private=self._private_gateways_allowed())
+                if public_only else urllib.request.urlopen(request, timeout=120)
+            )
             with opened as response:
                 if public_only and response.status != 200:
                     raise RuntimeError("Model endpoint redirected or rejected the request")
@@ -673,6 +694,19 @@ class OpenAICompatibleProvider:
             # 🛡️ DashScope 协议约束：enable_thinking=true 仅流式调用支持，
             #    非流式请求强制关闭，避免同步路径（run/工具决策等）开思考时直接 400。
             payload["enable_thinking"] = bool(thinking) and bool(payload.get("stream"))
+
+    @staticmethod
+    def _drop_rejected_enable_thinking(payload: dict, exc: Exception) -> bool:
+        """端点明确拒绝 enable_thinking（如硅基流动的 Qwen3-VL）时去掉该参数，返回是否应重试。
+
+        enable_thinking 按模型名含 qwen3 下发，但并非所有 Qwen3 系部署都接受它；
+        按 400 错误文本兜底比维护「哪些网关/模型支持」的名单更可靠。
+        """
+        text = str(exc)
+        if "enable_thinking" not in payload or "HTTP 400" not in text or "enable_thinking" not in text:
+            return False
+        payload.pop("enable_thinking", None)
+        return True
 
     def _supports_enable_thinking(self, model: str, settings, runtime_config: dict | None) -> bool:
         """Return whether the provider/model is known to accept enable_thinking."""
