@@ -1,4 +1,4 @@
-"""USER_MODEL_ALLOW_PRIVATE_NETWORK 只放开用户模型网关，云元数据与其它出站通道仍被拦截；推理能力真探测。"""
+"""USER_MODEL_ALLOW_PRIVATE_NETWORK 只放开用户模型网关，云元数据与其它出站通道仍被拦截；连接测试只测连通。"""
 
 import socket
 import urllib.request
@@ -132,85 +132,37 @@ def test_llm_post_json_passes_switch_to_gateway(monkeypatch):
     assert seen == [True]
 
 
-class _FakeStreamProvider:
-    def __init__(self, frames=None, exc=None):
-        self.frames, self.exc, self.calls = frames or [], exc, []
+def test_connection_test_stops_after_first_stream_frame(monkeypatch):
+    # 只发一个极短的流式请求，收到首帧就关闭——推理模型非流式要等完整思考，可能近 1 分钟
+    calls, consumed = [], []
 
-    def chat_stream(self, messages, **kwargs):
-        self.calls.append(kwargs)
-        if self.exc:
-            raise self.exc
-        yield from self.frames
+    def fake_stream(self, messages, **kwargs):
+        calls.append((messages, kwargs))
+        for text in ["p", "o", "n", "g"]:
+            consumed.append(text)
+            yield {"type": "reasoning", "text": text}
 
-
-@pytest.fixture
-def real_mode(monkeypatch):
-    monkeypatch.setattr(um, "get_settings", lambda: SimpleNamespace(mock_llm=False))
-
-
-def test_reasoning_native_when_reasoning_frame(real_mode):
-    provider = _FakeStreamProvider([{"type": "reasoning", "text": "let me think"}, {"type": "content", "text": "5"}])
-    result = um._check_reasoning_capability(provider, {"chat_model": "deepseek-reasoner"})
-    assert result["type"] == "native"
-    assert provider.calls[0]["thinking"] is True
-    assert provider.calls[0]["runtime_config"]["max_tokens"] == um._REASONING_PROBE_MAX_TOKENS
-
-
-def test_reasoning_prompt_when_no_reasoning_frame(real_mode):
-    provider = _FakeStreamProvider([{"type": "content", "text": "5"}])
-    assert um._check_reasoning_capability(provider, {"chat_model": "deepseek-chat"})["type"] == "prompt"
-
-
-def test_reasoning_prompt_with_error_when_request_fails(real_mode):
-    provider = _FakeStreamProvider(exc=RuntimeError("HTTP 400 thinking not supported"))
-    result = um._check_reasoning_capability(provider, {"chat_model": "m"})
-    assert result["type"] == "prompt"
-    assert result["error_code"] == "chat_payload_rejected"
-
-
-@pytest.mark.parametrize("name,expected", [
-    ("deepseek-reasoner", "native"), ("deepseek-ai/DeepSeek-R1", "native"), ("qwen3-8b", "native"),
-    ("claude-thinking", "native"), ("deepseek-chat", "prompt"), ("gpt-4o", "prompt"),
-])
-def test_reasoning_mock_uses_model_name(monkeypatch, name, expected):
-    monkeypatch.setattr(um, "get_settings", lambda: SimpleNamespace(mock_llm=True))
-    assert um._check_reasoning_capability(_FakeStreamProvider(), {"chat_model": name})["type"] == expected
-
-
-def test_detected_capabilities_reflect_reasoning_probe(monkeypatch):
-    monkeypatch.setattr(um, "_check_reasoning_capability", lambda provider, runtime: {"type": "native", "error_code": "", "message": ""})
-    monkeypatch.setattr(um.OpenAICompatibleProvider, "chat", lambda self, *a, **k: "ok")
+    monkeypatch.setattr(um.OpenAICompatibleProvider, "chat_stream", fake_stream)
     monkeypatch.setattr(um, "user_model_runtime_config", lambda config: {"chat_model": "m"})
-    config = SimpleNamespace(chat_model="m", supports_image=False, supports_reasoning=False, reasoning_type="none")
-    result = um.test_user_model_config(config, detect_reasoning=True)
-    assert result["detected_capabilities"]["supports_reasoning"] is True
-    assert result["detected_capabilities"]["reasoning_type"] == "native"
+    result = um.test_user_model_config(SimpleNamespace(chat_model="m"))
+    assert result["ok"] is True
+    assert len(calls) == 1
+    assert isinstance(calls[0][0][0]["content"], str)
+    assert calls[0][1]["runtime_config"]["max_tokens"] == um._CONNECTION_TEST_MAX_TOKENS
+    assert consumed == ["p"]
 
 
-class _FakeChatProvider:
-    def __init__(self, reply):
-        self.reply = reply
+def test_connection_test_failure_is_sanitized(monkeypatch):
+    def fail(self, messages, **kwargs):
+        raise RuntimeError("Model call failed: HTTP 401. Authorization: Bearer sk-leaked-secret")
+        yield  # 生成器：错误在首次迭代时抛出，与真实 chat_stream 一致
 
-    def chat(self, messages, **kwargs):
-        return SimpleNamespace(content=self.reply(messages) if callable(self.reply) else self.reply)
-
-
-def _expected_color(messages):
-    url = messages[0]["content"][1]["image_url"]["url"]
-    return next(name for name, rgb in um._IMAGE_PROBE_COLORS.items() if um._solid_png_data_url(rgb) == url)
-
-
-def test_image_probe_passes_only_when_model_names_the_color(real_mode):
-    provider = _FakeChatProvider(lambda messages: _expected_color(messages).capitalize() + ".")
-    assert um._check_image_capability(provider, {"chat_model": "vl"}, required=False)["ok"] is True
-
-
-@pytest.mark.parametrize("reply", ["I'm unable to view the image you attached.", "unknown", ""])
-def test_image_probe_rejects_200_reply_that_did_not_see_image(real_mode, reply):
-    # DeepSeek 等纯文本模型收到图片照样 200，但答不出颜色 → 不能判为支持图片
-    result = um._check_image_capability(_FakeChatProvider(reply), {"chat_model": "deepseek-v4-pro"}, required=False)
+    monkeypatch.setattr(um.OpenAICompatibleProvider, "chat_stream", fail)
+    monkeypatch.setattr(um, "user_model_runtime_config", lambda config: {"chat_model": "m"})
+    result = um.test_user_model_config(SimpleNamespace(chat_model="m"))
     assert result["ok"] is False
-    assert result["error_code"] == "image_not_understood"
+    assert result["error_code"] == "auth_failed"
+    assert "sk-leaked-secret" not in result["message"]
 
 
 def test_chat_retries_without_enable_thinking_when_endpoint_rejects_it(monkeypatch):

@@ -234,7 +234,7 @@ function normalizeUserModelForUi(config) {
 import { modelLabel } from './lib/models.js';
 
 // imported from lib/models.js
-import { modelCapabilityChips } from './lib/models.js';
+import { guessModelCapabilities, modelCapabilityChips } from './lib/models.js';
 
 function reasoningCapabilityForModel(model) {
   if (!model) {
@@ -375,7 +375,7 @@ function userModelFormPayload(form, { includeApiKey = false } = {}) {
     provider: String(form.provider || 'openai-compatible').trim(),
     base_url: String(form.base_url || '').trim(),
     chat_model: String(form.chat_model || '').trim(),
-    supports_image: false,
+    supports_image: Boolean(form.supports_image),
     supports_document: Boolean(form.supports_document),
     supports_reasoning: Boolean(form.supports_reasoning) && (form.reasoning_type || 'none') !== 'none',
     reasoning_type: form.reasoning_type || 'none',
@@ -576,6 +576,7 @@ export {
   normalizeUserModelForUi,
   modelLabel,
   modelCapabilityChips,
+  guessModelCapabilities,
   reasoningCapabilityForModel,
   reasoningLabel,
   imageCapabilityFromTest,

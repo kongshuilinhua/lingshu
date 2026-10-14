@@ -1593,66 +1593,60 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: #98a2b3;
   font-size: 12px;
 }
-.selected-model-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.selected-model-chips li {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid #a7d7bf;
-  border-radius: 999px;
-  padding: 3px 4px 3px 10px;
-  background: #ecfdf3;
-  color: #065f46;
-  font-size: 12px;
-}
-.selected-model-chips button {
-  display: inline-flex;
-  border: 0;
-  border-radius: 999px;
-  padding: 2px;
-  background: transparent;
-  color: inherit;
-}
-.draft-model-results {
+.selected-model-rows {
   display: grid;
-  gap: 6px;
-}
-.draft-model-result {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
   border: 1px solid #dfe3eb;
   border-radius: 10px;
-  padding: 8px 10px;
-  font-size: 12px;
+  overflow: hidden;
 }
-.draft-model-result.ok {
-  border-color: #a7d7bf;
-  background: #f4fbf7;
-}
-.draft-model-result.fail {
-  border-color: #f4c7c3;
-  background: #fef6f5;
-}
-.draft-model-result strong {
+.selected-model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px 116px 92px 28px;
+  align-items: center;
+  gap: 4px 10px;
+  border-top: 1px solid #eef0f4;
+  padding: 6px 10px;
   font-size: 13px;
 }
-.draft-model-result .ok {
+.selected-model-row.head {
+  border-top: 0;
+  background: #f8f9fb;
+  color: #667085;
+  font-size: 12px;
+}
+.selected-model-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.selected-model-row input[type="checkbox"] {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+}
+.selected-model-row select {
+  min-height: 30px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.selected-model-row .ok {
   color: #047857;
 }
-.draft-model-result .fail {
+.selected-model-row .fail {
   color: #b42318;
 }
-.draft-model-result small {
-  flex-basis: 100%;
+.selected-model-row > button {
+  display: inline-flex;
+  justify-content: center;
+  border: 0;
+  padding: 4px;
+  background: transparent;
+  color: #667085;
+}
+.selected-model-error {
+  grid-column: 1 / -1;
   color: #b42318;
   word-break: break-all;
 }

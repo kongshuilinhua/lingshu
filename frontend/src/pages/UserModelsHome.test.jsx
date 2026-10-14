@@ -57,7 +57,7 @@ describe('我的模型', () => {
     expect(screen.getByLabelText('chat_model')).toHaveTextContent('选择模型（可多选）');
     expect(screen.queryByLabelText('显示名称')).toBeNull();
     expect(screen.queryByText('自定义兼容网关')).toBeNull();
-    expect(screen.getByRole('button', { name: '测试当前配置' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '测试连接' })).toBeDisabled();
   });
 
   it('拉取后下拉列出全部模型，勾选一个后其余选项仍在', async () => {
@@ -102,40 +102,39 @@ describe('我的模型', () => {
     expect(await screen.findByText(/USER_MODEL_ALLOW_PRIVATE_NETWORK=true 后重启/)).toBeInTheDocument();
   });
 
-  it('多选后逐个测试，只保存通过的模型；默认只给第一个，推理能力取各自探测结果', async () => {
+  it('多选后逐个测连通，只保存通过的模型；默认只给第一个，能力按模型名预填', async () => {
     const testUserModelDraft = vi.fn(async (payload) => {
-      if (payload.chat_model === 'broken') return { ok: false, model: 'broken', message: '认证失败', checks: { chat: { required: true, ok: false } } };
-      return { ...success(payload.chat_model), detected_capabilities: { supports_text: true,
-        supports_reasoning: true, reasoning_type: payload.chat_model === 'deepseek-reasoner' ? 'native' : 'prompt' } };
+      if (payload.chat_model === 'broken') return { ok: false, model: 'broken', message: '认证失败' };
+      return success(payload.chat_model);
     });
     const props = registration({ testUserModelDraft });
     addModel('deepseek-chat');
     addModel('deepseek-reasoner');
     addModel('broken');
     expect(screen.getByRole('button', { name: '保存私有模型' })).toBeDisabled();
-    fireEvent.click(screen.getByRole('button', { name: '测试当前配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     await waitFor(() => expect(screen.getByRole('button', { name: '保存 2 个模型' })).toBeEnabled());
     expect(testUserModelDraft).toHaveBeenCalledTimes(3);
-    expect(testUserModelDraft).toHaveBeenCalledWith(expect.objectContaining({ chat_model: 'broken', detect_reasoning: true }));
+    expect(testUserModelDraft).toHaveBeenCalledWith(expect.objectContaining({ chat_model: 'broken' }));
+    expect(testUserModelDraft.mock.calls[0][0]).not.toHaveProperty('detect_image');
     expect(screen.getByText('认证失败')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '保存 2 个模型' }));
     await waitFor(() => expect(props.createUserModelConfig).toHaveBeenCalledTimes(2));
     expect(props.createUserModelConfig).toHaveBeenNthCalledWith(1, expect.objectContaining({
       display_name: 'deepseek-chat', chat_model: 'deepseek-chat', api_key: 'test-only-key',
-      base_url: 'https://api.deepseek.com', is_default: true, reasoning_type: 'prompt',
+      base_url: 'https://api.deepseek.com', is_default: true, supports_image: false, reasoning_type: 'prompt',
     }));
     expect(props.createUserModelConfig).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      chat_model: 'deepseek-reasoner', is_default: false, supports_reasoning: true, reasoning_type: 'native',
+      chat_model: 'deepseek-reasoner', is_default: false, supports_image: false, supports_reasoning: true, reasoning_type: 'native',
     }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '新增模型' })).not.toBeInTheDocument());
     expect(screen.getByText(/已保存 2 个模型，1 个测试未通过的未保存/)).toBeInTheDocument();
   });
 
   it('全部测试失败时不能保存', async () => {
-    const props = registration({ testUserModelDraft: vi.fn(async () => ({ ok: false,
-      message: '认证失败', checks: { chat: { required: true, ok: false } } })) });
+    const props = registration({ testUserModelDraft: vi.fn(async () => ({ ok: false, message: '认证失败' })) });
     addModel('deepseek-chat');
-    fireEvent.click(screen.getByRole('button', { name: '测试当前配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     await screen.findByText('认证失败');
     expect(screen.getByRole('button', { name: '保存私有模型' })).toBeDisabled();
     expect(props.createUserModelConfig).not.toHaveBeenCalled();
@@ -144,7 +143,7 @@ describe('我的模型', () => {
   it('测试后新增勾选的模型需要重新测试才能保存', async () => {
     registration();
     addModel('deepseek-chat');
-    fireEvent.click(screen.getByRole('button', { name: '测试当前配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     await waitFor(() => expect(screen.getByRole('button', { name: '保存私有模型' })).toBeEnabled());
     addModel('deepseek-reasoner');
     expect(screen.getByRole('button', { name: '保存私有模型' })).toBeDisabled();
@@ -157,7 +156,7 @@ describe('我的模型', () => {
     registration({ testUserModelDraft: vi.fn(() => pending), probeUserModels });
     await probe({ probeUserModels });
     fireEvent.click(option('old-model'));
-    fireEvent.click(screen.getByRole('button', { name: '测试当前配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     fill({ chat_base_url: 'https://example.com/v1' });
     await act(async () => finish(success('old-model')));
     expect(screen.getByRole('button', { name: '保存私有模型' })).toBeDisabled();
@@ -183,13 +182,46 @@ describe('我的模型', () => {
     await waitFor(() => expect(props.probeUserModels).toHaveBeenCalledWith({ provider: 'anthropic',
       base_url: 'https://console.tars-ai.com/v1', api_key: 'test-only-key' }));
     addModel('claude-test');
-    fireEvent.click(screen.getByRole('button', { name: '测试当前配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     await waitFor(() => expect(screen.getByRole('button', { name: '保存私有模型' })).toBeEnabled());
     expect(props.testUserModelDraft).toHaveBeenCalledWith(expect.objectContaining({ provider: 'anthropic' }));
     fireEvent.click(screen.getByRole('button', { name: '保存私有模型' }));
     await waitFor(() => expect(props.createUserModelConfig).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'anthropic', chat_model: 'claude-test', base_url: 'https://console.tars-ai.com/v1',
-      supports_reasoning: false, reasoning_type: 'none',
     })));
+  });
+
+  it('能力按模型名预填，用户修改后保存的是修改值，且不需要重新测试', async () => {
+    const props = registration();
+    addModel('Qwen/Qwen3-VL-8B-Instruct');
+    addModel('my-private-model');
+    expect(screen.getByLabelText('Qwen/Qwen3-VL-8B-Instruct 支持图片')).toBeChecked();
+    expect(screen.getByLabelText('Qwen/Qwen3-VL-8B-Instruct 深度思考')).toHaveValue('native');
+    expect(screen.getByLabelText('my-private-model 支持图片')).not.toBeChecked();
+    expect(screen.getByLabelText('my-private-model 深度思考')).toHaveValue('prompt');
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存 2 个模型' })).toBeEnabled());
+    fireEvent.click(screen.getByLabelText('my-private-model 支持图片'));
+    fireEvent.change(screen.getByLabelText('my-private-model 深度思考'), { target: { value: 'none' } });
+    expect(screen.getByRole('button', { name: '保存 2 个模型' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '保存 2 个模型' }));
+    await waitFor(() => expect(props.createUserModelConfig).toHaveBeenCalledTimes(2));
+    expect(props.createUserModelConfig).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      chat_model: 'Qwen/Qwen3-VL-8B-Instruct', supports_image: true, reasoning_type: 'native' }));
+    expect(props.createUserModelConfig).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      chat_model: 'my-private-model', supports_image: true, supports_reasoning: false, reasoning_type: 'none' }));
+  });
+
+  it('填 Anthropic 官方地址自动切到 Anthropic 协议', () => {
+    registration();
+    fill({ chat_base_url: 'https://api.anthropic.com/v1' });
+    expect(screen.getByLabelText('连接协议')).toHaveValue('anthropic');
+  });
+
+  it('接口不存在类错误提示可能是协议不匹配', async () => {
+    registration({ testUserModelDraft: vi.fn(async () => ({ ok: false, model: 'm', message: 'Model call failed: HTTP 404. Not Found' })) });
+    addModel('deepseek-chat');
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
+    expect(await screen.findByText(/可能是协议不匹配，试试切换为 Anthropic/)).toBeInTheDocument();
   });
 });

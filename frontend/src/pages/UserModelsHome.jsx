@@ -3,9 +3,8 @@ import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
 import { Check, ChevronDown, Plus, Trash2, Wand2, X } from 'lucide-react';
 import { SecretInputDialog } from '../components/SecretInputDialog.jsx';
 import {
-  capabilityCheckLabel,
   errorMessage,
-  imageCapabilityFromTest,
+  guessModelCapabilities,
   modelCapabilityChips,
   reasoningCapabilityForModel,
   reasoningLabel,
@@ -41,12 +40,13 @@ export function UserModelsHome({ adminModels, canManage, createModelConfig, dele
 
 function createUserModelForm() {
   // 统一页：只填协议 / base_url / api_key / 模型（可多选，同一连接一次注册多个模型）。
-  // 文档、上下文、温度用后端默认值；图片与推理能力在保存前逐个模型真实探测。
+  // 文档、上下文、温度用后端默认值；图片与深度思考按模型名预填，用户可逐个修改。
   return {
     provider: 'openai-compatible',
     base_url: '',
     api_key: '',
     chat_models: [],
+    capabilities: {},
     supports_document: true,
     max_context: '131072',
     default_temperature: '0.4',
@@ -66,20 +66,35 @@ function gatewayErrorText(message) {
   return text;
 }
 
+// 404/405 或「不认识的请求格式」多半是协议选错：同一网关可能只开放其中一种接口。
+const PROTOCOL_MISMATCH_PATTERN = /HTTP 40[45]\b|not found|unknown (url|endpoint)|invalid url|unrecognized request/i;
+
+function withProtocolHint(text, provider) {
+  if (!text || !PROTOCOL_MISMATCH_PATTERN.test(text)) return text;
+  const other = provider === 'anthropic' ? 'OpenAI-compatible' : 'Anthropic';
+  return `${text}（地址或接口不存在，可能是协议不匹配，试试切换为 ${other}）`;
+}
+
+// 只识别官方地址；中转网关两种协议都可能开放，不做猜测
+function providerForBaseUrl(baseUrl) {
+  return /^https?:\/\/api\.anthropic\.com(\/|$)/i.test(String(baseUrl || '').trim()) ? 'anthropic' : null;
+}
+
 function normalizeBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
 }
 
-// 单个模型的保存/测试载荷：显示名称取模型名；推理能力取自该模型最近一次测试的探测结果。
-function draftModelPayload(form, chatModel, testResult) {
-  const detected = testResult?.detected_capabilities;
-  const supportsReasoning = Boolean(detected?.supports_reasoning);
+// 单个模型的保存/测试载荷：显示名称取模型名；能力取用户在该模型行上的勾选（缺省按模型名预填）。
+function draftModelPayload(form, chatModel) {
+  const capability = form.capabilities[chatModel] || guessModelCapabilities(chatModel);
+  const reasoningType = capability.reasoning_type || 'none';
   return userModelFormPayload({
     ...form,
     chat_model: chatModel,
     display_name: chatModel,
-    supports_reasoning: supportsReasoning,
-    reasoning_type: supportsReasoning ? (detected.reasoning_type || 'prompt') : 'none',
+    supports_image: capability.supports_image,
+    supports_reasoning: reasoningType !== 'none',
+    reasoning_type: reasoningType,
   }, { includeApiKey: true });
 }
 
@@ -98,6 +113,7 @@ function userModelEditForm(config) {
     base_url: config.base_url || '',
     chat_model: config.chat_model || '',
     supports_document: config.supports_document !== false,
+    supports_image: Boolean(config.supports_image),
     supports_reasoning: Boolean(config.supports_reasoning),
     reasoning_type: config.reasoning_type || (config.supports_reasoning ? 'prompt' : 'none'),
     reasoning_label: config.reasoning_label || reasoningLabel(config.reasoning_type || 'none'),
@@ -168,6 +184,10 @@ function UserModelsPanel({
 
   function updateForm(patch) {
     // 连接参数变化会让所有测试结果失效；仅改模型勾选时保留其余模型的结果。
+    if ('base_url' in patch && !('provider' in patch)) {
+      const detected = providerForBaseUrl(patch.base_url);
+      if (detected) patch = { ...patch, provider: detected };
+    }
     if ('base_url' in patch || 'api_key' in patch || 'provider' in patch) {
       formVersion.current += 1;
       resetModelProbe();
@@ -180,8 +200,18 @@ function UserModelsPanel({
   function setSelectedModels(names) {
     const next = [...new Set(names)].filter((name) => name && !registeredModels.has(name));
     setFormError('');
-    setForm((current) => ({ ...current, chat_models: next }));
+    // 新勾选的模型按名称预填能力；已有的保留用户改过的值
+    setForm((current) => ({
+      ...current,
+      chat_models: next,
+      capabilities: Object.fromEntries(next.map((name) => [name, current.capabilities[name] || guessModelCapabilities(name)])),
+    }));
     setDraftResults((current) => Object.fromEntries(Object.entries(current).filter(([name]) => next.includes(name))));
+  }
+
+  function updateCapability(name, patch) {
+    // 能力只影响保存的声明，不影响连通性，所以不清空测试结果
+    setForm((current) => ({ ...current, capabilities: { ...current.capabilities, [name]: { ...current.capabilities[name], ...patch } } }));
   }
 
   function toggleModel(name) {
@@ -254,7 +284,7 @@ function UserModelsPanel({
     for (const name of passedModels) {
       try {
         // 「设为默认」只给本次第一个成功保存的模型
-        await createUserModelConfig(draftModelPayload({ ...form, is_default: form.is_default && !saved.length }, name, draftResults[name]));
+        await createUserModelConfig(draftModelPayload({ ...form, is_default: form.is_default && !saved.length }, name));
         saved.push(name);
       } catch (err) {
         failed.push(`${name}：${gatewayErrorText(errorMessage(err))}`);
@@ -287,10 +317,11 @@ function UserModelsPanel({
     await runWithConcurrency(targets, DRAFT_TEST_CONCURRENCY, async (name) => {
       let result;
       try {
-        result = await testUserModelDraft({ ...draftModelPayload(form, name, null), detect_image: true, detect_reasoning: true });
+        result = await testUserModelDraft(draftModelPayload(form, name));
       } catch (err) {
         result = { ok: false, model: name, message: gatewayErrorText(errorMessage(err)) };
       }
+      if (!result.ok) result = { ...result, message: withProtocolHint(result.message, form.provider) };
       if (version === formVersion.current) setDraftResults((current) => ({ ...current, [name]: result }));
     });
     setDraftTesting(false);
@@ -323,7 +354,7 @@ function UserModelsPanel({
             : '接口可用，但未返回任何模型，请在 chat_model 下拉中手动输入模型 ID。',
         });
       } else {
-        setProbeNotice({ ok: false, text: gatewayErrorText(result.message) || '拉取模型列表失败' });
+        setProbeNotice({ ok: false, text: withProtocolHint(gatewayErrorText(result.message), form.provider) || '拉取模型列表失败' });
       }
     } catch (err) {
       if (version === modelProbeVersion.current) setProbeNotice({ ok: false, text: gatewayErrorText(errorMessage(err)) });
@@ -337,10 +368,7 @@ function UserModelsPanel({
     setNotice('');
     setProfileError('');
     try {
-      const updated = await updateUserModelConfig(config.id, patch);
-      if (updated?.image_detection?.tested) {
-        setNotice(updated.supports_image ? '图片探测通过。' : '图片探测未通过；这只是诊断结果，不会拦截图片发送。');
-      }
+      await updateUserModelConfig(config.id, patch);
       return true;
     } catch (err) {
       setProfileError(errorMessage(err));
@@ -413,23 +441,6 @@ function UserModelsPanel({
     setProfileError('');
     try {
       const result = await testUserModelConfig(config.id);
-      if (result?.detected_capabilities) {
-        const patch = {};
-        const detectedReasoningSupport = result.detected_capabilities.supports_reasoning;
-        if (typeof detectedReasoningSupport === 'boolean' && detectedReasoningSupport !== Boolean(config.supports_reasoning)) {
-          patch.supports_reasoning = detectedReasoningSupport;
-          patch.reasoning_type = detectedReasoningSupport ? (result.detected_capabilities.reasoning_type || 'prompt') : 'none';
-          patch.reasoning_label = reasoningLabel(patch.reasoning_type);
-        }
-        // 图片能力同样以实测为准（旧版探测只看请求是否报错，曾把纯文本模型误记为支持图片）
-        const detectedImageSupport = result.detected_capabilities.supports_image;
-        if (typeof detectedImageSupport === 'boolean' && detectedImageSupport !== Boolean(config.supports_image)) {
-          patch.supports_image = detectedImageSupport;
-        }
-        if (Object.keys(patch).length) {
-          await updateUserModelConfig(config.id, patch);
-        }
-      }
       setTestResults((items) => ({ ...items, [config.id]: result }));
     } catch (err) {
       setProfileError(errorMessage(err));
@@ -527,32 +538,22 @@ function UserModelsPanel({
                 <p className={probeNotice.ok ? 'model-probe-hint ok' : 'model-probe-hint error'} role="status">{probeNotice.text}</p>
               )}
               {form.chat_models.length > 0 && (
-                <ul className="selected-model-chips" aria-label="已选模型">
-                  {form.chat_models.map((name) => (
-                    <li key={name}>
-                      <span>{name}</span>
-                      <button type="button" aria-label={`移除 ${name}`} onClick={() => toggleModel(name)}><X size={12} /></button>
-                    </li>
-                  ))}
-                </ul>
+                <SelectedModelRows
+                  models={form.chat_models}
+                  capabilities={form.capabilities}
+                  results={draftResults}
+                  testing={draftTesting}
+                  onChange={updateCapability}
+                  onRemove={toggleModel}
+                />
               )}
-              <label className="model-enabled-check inline">
-                <input type="checkbox" checked disabled />
-                <span>
-                  <strong>图片测试仅用于诊断</strong>
-                  <small>保存和测试会向模型发送最小图片请求；无论探测结果如何，聊天发送都不会被前端拦截。</small>
-                </span>
-              </label>
               <div className="model-checks state-checks">
                 <label><input type="checkbox" checked={form.is_default} onChange={(event) => updateForm({ is_default: event.target.checked })} />设为默认（多选时只给第一个）</label>
               </div>
               {formError && <p className="model-probe-hint error" role="alert">{formError}</p>}
-              {formReady && pendingModels.length > 0 && !draftTesting && <p className="model-row-warning">保存前请先点击“测试当前配置”，每个所选模型都会单独测试。文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
-              {form.chat_models.some((name) => draftResults[name]) && (
-                <DraftModelResults models={form.chat_models} results={draftResults} testing={draftTesting} />
-              )}
+              {formReady && pendingModels.length > 0 && !draftTesting && <p className="model-row-warning">保存前请先点击“测试连接”，只检查地址、Key 和模型名能否连通。能力按模型名预填，可在上表修改；图片附件不会被前端拦截。</p>}
               <div className="model-form-actions">
-                <button className="preset-action" type="button" disabled={draftTesting || saving || !formReady} onClick={testDraftModel}>{draftTesting ? '检测中' : '测试当前配置'}</button>
+                <button className="preset-action" type="button" disabled={draftTesting || saving || !formReady} onClick={testDraftModel}>{draftTesting ? '测试中' : '测试连接'}</button>
                 <button className="primary-model-action" type="submit" disabled={saving || draftTesting || !canSaveForm}>
                   <Plus size={15} />{passedModels.length > 1 ? `保存 ${passedModels.length} 个模型` : '保存私有模型'}
                 </button>
@@ -614,7 +615,7 @@ function UserModelsPanel({
               <div className="model-channel-card">
                 <div className="model-channel-heading">
                   <strong>{editConfig.display_name || editConfig.chat_model}</strong>
-                  <small>测试连接会检查 chat 和图片请求；运行参数由具体智能体决定。</small>
+                  <small>测试连接只检查能否连通；能力由你声明，运行参数由具体智能体决定。</small>
                 </div>
                 <div className="user-model-grid compact">
                   <label className="field-stack">
@@ -638,13 +639,22 @@ function UserModelsPanel({
                   </label>
                 </div>
                 <div className="model-checks state-checks">
+                  <label><input type="checkbox" checked={Boolean(editForm.supports_image)} onChange={(event) => updateEditForm({ supports_image: event.target.checked })} />支持图片</label>
+                  <label>
+                    深度思考
+                    <select aria-label="深度思考" value={editForm.reasoning_type} onChange={(event) => updateEditForm({ reasoning_type: event.target.value, supports_reasoning: event.target.value !== 'none' })}>
+                      <option value="native">原生深度思考</option>
+                      <option value="prompt">提示词增强</option>
+                      <option value="none">不支持</option>
+                    </select>
+                  </label>
                   <label><input type="checkbox" checked={editForm.supports_document} onChange={(event) => updateEditForm({ supports_document: event.target.checked })} />文档附件后端解析</label>
                   <label><input type="checkbox" checked={editForm.enabled} onChange={(event) => updateEditForm({ enabled: event.target.checked })} />启用</label>
                   <label><input type="checkbox" checked={editForm.is_default} onChange={(event) => updateEditForm({ is_default: event.target.checked })} />设为默认</label>
                 </div>
                 <div className="model-capability-summary">
                   <span className="enabled">文本</span>
-                  <span className="enabled">图片可发送</span>
+                  <span className={editForm.supports_image ? 'enabled' : ''}>{editForm.supports_image ? '图片' : '不支持图片'}</span>
                   <span className={editForm.supports_document ? 'enabled' : ''}>文档附件后端解析</span>
                   <span className={reasoningCapabilityForModel(editForm).supported ? 'enabled' : ''}>{reasoningCapabilityForModel(editForm).label}</span>
                 </div>
@@ -667,25 +677,39 @@ function UserModelsPanel({
   );
 }
 
-function DraftModelResults({ models, results, testing }) {
+function SelectedModelRows({ models, capabilities, results, testing, onChange, onRemove }) {
   return (
-    <div className="draft-model-results" aria-label="测试结果">
+    <div className="selected-model-rows" role="table" aria-label="已选模型">
+      <div className="selected-model-row head" role="row">
+        <span role="columnheader">模型</span>
+        <span role="columnheader">图片</span>
+        <span role="columnheader">深度思考</span>
+        <span role="columnheader">连接</span>
+        <span />
+      </div>
       {models.map((name) => {
+        const capability = capabilities[name] || guessModelCapabilities(name);
         const result = results[name];
-        if (!result) {
-          return <div className="draft-model-result" key={name}><strong>{name}</strong><span>{testing ? '检测中…' : '未测试'}</span></div>;
-        }
-        const detected = result.detected_capabilities || {};
-        const image = imageCapabilityFromTest(null, result);
-        const reasoning = reasoningCapabilityForModel(detected);
-        const error = detected.chat_error || result.checks?.chat?.message || (!result.ok ? result.message : '');
         return (
-          <div className={result.ok ? 'draft-model-result ok' : 'draft-model-result fail'} key={name}>
-            <strong>{name}</strong>
-            <span className={result.ok ? 'ok' : 'fail'}>{result.ok ? `通过 · ${result.latency_ms ?? '-'}ms` : '未通过，不会保存'}</span>
-            {result.ok && <span className={image.className}>{image.label}</span>}
-            {result.ok && <span className={reasoning.supported ? 'ok' : ''}>深度思考：{reasoning.label}</span>}
-            {error && <small>{error}</small>}
+          <div className="selected-model-row" role="row" key={name}>
+            <strong role="cell" title={name}>{name}</strong>
+            <span role="cell">
+              <input type="checkbox" aria-label={`${name} 支持图片`} checked={Boolean(capability.supports_image)}
+                onChange={(event) => onChange(name, { supports_image: event.target.checked })} />
+            </span>
+            <span role="cell">
+              <select aria-label={`${name} 深度思考`} value={capability.reasoning_type}
+                onChange={(event) => onChange(name, { reasoning_type: event.target.value })}>
+                <option value="native">原生</option>
+                <option value="prompt">提示词增强</option>
+                <option value="none">不支持</option>
+              </select>
+            </span>
+            <span role="cell" className={result ? (result.ok ? 'ok' : 'fail') : ''}>
+              {result ? (result.ok ? `✓ ${result.latency_ms ?? '-'}ms` : '✗ 未通过') : (testing ? '测试中…' : '未测试')}
+            </span>
+            <button type="button" aria-label={`移除 ${name}`} onClick={() => onRemove(name)}><X size={13} /></button>
+            {result && !result.ok && result.message && <small className="selected-model-error">{result.message}</small>}
           </div>
         );
       })}
@@ -694,35 +718,10 @@ function DraftModelResults({ models, results, testing }) {
 }
 
 function UserModelTestResult({ result }) {
-  const checks = Object.entries(result.checks || {}).filter(([, check]) => check.required);
-  const imageCapability = imageCapabilityFromTest(null, result);
-  const chatError = result.detected_capabilities?.chat_error || result.checks?.chat?.message || '';
-  const chatErrorCode = result.detected_capabilities?.chat_error_code || result.checks?.chat?.error_code || '';
-  const imageError = result.detected_capabilities?.image_error || result.checks?.image?.message || '';
-  const imageErrorCode = result.detected_capabilities?.image_error_code || result.checks?.image?.error_code || '';
   return (
     <div className={result.ok ? 'user-model-test ok' : 'user-model-test'}>
-      <strong>{result.ok ? '能力检查通过' : '能力检查失败'} · {result.model} · {result.latency_ms}ms</strong>
-      <div className="capability-checks">
-        {result.detected_capabilities && (
-          <span className={imageCapability.className}>
-            图片: {imageCapability.label}
-          </span>
-        )}
-        {result.detected_capabilities && (
-          <span className={result.detected_capabilities.supports_reasoning ? 'ok' : ''}>
-            深度思考: {result.detected_capabilities.supports_reasoning ? reasoningLabel(result.detected_capabilities.reasoning_type || 'prompt') : '不支持'}
-          </span>
-        )}
-        {checks.map(([name, check]) => (
-          <span key={name} className={check.ok ? 'ok' : 'fail'}>
-            {capabilityCheckLabel(name)}: {check.ok ? '通过' : '失败'}
-          </span>
-        ))}
-      </div>
-      <small>{result.message}</small>
-      {chatError && <small>chat 测试失败：{chatErrorCode ? `${chatErrorCode} · ` : ''}{chatError}</small>}
-      {imageError && <small>图片探测失败：{imageErrorCode ? `${imageErrorCode} · ` : ''}{imageError}</small>}
+      <strong>{result.ok ? '连接成功' : '连接失败'} · {result.model} · {result.latency_ms}ms</strong>
+      {!result.ok && <small>{result.error_code ? `${result.error_code} · ` : ''}{result.message}</small>}
     </div>
   );
 }

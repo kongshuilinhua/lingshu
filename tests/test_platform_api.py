@@ -532,39 +532,25 @@ def test_user_model_crud_never_returns_raw_api_key(client, auth_headers):
     assert deleted.json() == {"deleted": True}
 
 
-def test_user_model_image_support_is_backend_detected(client, auth_headers):
-    text_model = _create_user_model(
+def test_user_model_image_support_is_user_declared(client, auth_headers):
+    # 能力以用户声明为准：后端不再探测、不再覆盖 supports_image
+    vision_model = _create_user_model(
         client,
         auth_headers,
-        "Claimed Vision Text Model",
+        "Declared Vision Model",
         chat_model="qwen-plus",
         supports_image=True,
     )
-
-    assert text_model["supports_image"] is False
-    assert text_model["image_detection"]["tested"] is True
-    assert text_model["image_detection"]["confirmed"] is False
-    assert text_model["image_detection"]["source"] == "backend_probe"
+    assert vision_model["supports_image"] is True
+    assert "image_detection" not in vision_model
 
     patched = client.patch(
-        f"/api/user-models/{text_model['id']}",
+        f"/api/user-models/{vision_model['id']}",
         headers=auth_headers,
-        json={"chat_model": "qwen-vl-plus"},
+        json={"supports_image": False},
     )
     assert patched.status_code == 200
-    patched_model = patched.json()["model_config"]
-    assert patched_model["supports_image"] is True
-    assert patched_model["image_detection"]["confirmed"] is True
-
-    downgraded = client.patch(
-        f"/api/user-models/{text_model['id']}",
-        headers=auth_headers,
-        json={"supports_image": True, "chat_model": "qwen-plus"},
-    )
-    assert downgraded.status_code == 200
-    downgraded_model = downgraded.json()["model_config"]
-    assert downgraded_model["supports_image"] is False
-    assert downgraded_model["image_detection"]["confirmed"] is False
+    assert patched.json()["model_config"]["supports_image"] is False
 
 
 def test_user_model_cross_user_access_is_hidden(client, auth_headers):
@@ -782,13 +768,12 @@ def test_user_model_provider_test_is_sanitized(client, auth_headers):
     payload = result.json()
     assert payload["model"] == "qwen-plus"
     assert "ok" in payload
-    assert "checks" in payload
-    assert "chat" in payload["checks"]
+    assert "latency_ms" in payload
     assert "sk-private-test-key" not in result.text
     assert "Authorization" not in result.text
 
 
-def test_user_model_draft_test_checks_capabilities_without_saving(client, auth_headers):
+def test_user_model_draft_test_checks_connection_without_saving(client, auth_headers):
     result = client.post(
         "/api/user-models/test",
         headers=auth_headers,
@@ -805,94 +790,13 @@ def test_user_model_draft_test_checks_capabilities_without_saving(client, auth_h
 
     assert result.status_code == 200
     payload = result.json()
-    assert "checks" in payload
-    assert payload["checks"]["chat"]["required"] is True
-    assert payload["checks"]["image"]["required"] is False
+    assert payload["ok"] is True
+    assert payload["model"] == "qwen-plus"
+    assert "latency_ms" in payload
+    assert "checks" not in payload and "detected_capabilities" not in payload
     assert "sk-draft-chat" not in result.text
     listed = client.get("/api/user-models", headers=auth_headers)
     assert all(item["display_name"] != "Draft Qwen" for item in listed.json()["items"])
-
-
-def test_user_model_draft_test_reports_image_probe_without_overriding_declared_capability(client, auth_headers):
-    text_result = client.post(
-        "/api/user-models/test",
-        headers=auth_headers,
-        json={
-            "display_name": "Text Qwen",
-            "provider": "openai-compatible",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key": "sk-text-detect",
-            "chat_model": "qwen-plus",
-            "supports_image": False,
-            "supports_document": True,
-            "detect_image": True,
-        },
-    )
-
-    assert text_result.status_code == 200
-    text_payload = text_result.json()
-    assert text_payload["ok"] is True
-    assert text_payload["detected_capabilities"]["supports_text"] is True
-    assert text_payload["detected_capabilities"]["supports_image"] is False
-    assert text_payload["detected_capabilities"]["image_confirmed"] is False
-    assert text_payload["detected_capabilities"]["image_declared"] is False
-    assert text_payload["detected_capabilities"]["image_status"] == "failed"
-    assert text_payload["detected_capabilities"]["image_error_code"] in {"image_probe_failed", "image_payload_rejected", "mock_model_name_not_vision"}
-    assert text_payload["detected_capabilities"]["image_error"]
-    assert text_payload["checks"]["image"]["required"] is False
-    assert text_payload["checks"]["image"]["detected"] is True
-    assert text_payload["checks"]["image"]["tested"] is True
-
-    vision_result = client.post(
-        "/api/user-models/test",
-        headers=auth_headers,
-        json={
-            "display_name": "Vision Qwen",
-            "provider": "openai-compatible",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key": "sk-vision-detect",
-            "chat_model": "qwen-vl-plus",
-            "supports_image": True,
-            "supports_document": True,
-            "detect_image": True,
-        },
-    )
-
-    assert vision_result.status_code == 200
-    vision_payload = vision_result.json()
-    assert vision_payload["ok"] is True
-    assert vision_payload["detected_capabilities"]["supports_image"] is True
-    assert vision_payload["detected_capabilities"]["image_confirmed"] is True
-    assert vision_payload["detected_capabilities"]["image_declared"] is True
-    assert vision_payload["detected_capabilities"]["image_status"] == "confirmed"
-    assert vision_payload["checks"]["image"]["required"] is False
-    assert "sk-vision-detect" not in vision_result.text
-
-
-def test_user_model_image_probe_support_requires_confirmation(client, auth_headers):
-    result = client.post(
-        "/api/user-models/test",
-        headers=auth_headers,
-        json={
-            "display_name": "Claimed Vision Qwen",
-            "provider": "openai-compatible",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key": "sk-claimed-vision",
-            "chat_model": "qwen-plus",
-            "supports_image": True,
-            "supports_document": True,
-            "detect_image": True,
-        },
-    )
-
-    assert result.status_code == 200
-    payload = result.json()
-    assert payload["detected_capabilities"]["image_declared"] is True
-    assert payload["detected_capabilities"]["image_confirmed"] is False
-    assert payload["detected_capabilities"]["supports_image"] is False
-    assert payload["detected_capabilities"]["image_status"] == "failed"
-    assert payload["detected_capabilities"]["image_error_code"] in {"image_probe_failed", "image_payload_rejected", "mock_model_name_not_vision"}
-    assert "sk-claimed-vision" not in result.text
 
 
 def test_tool_crud_http_security_and_secret_redaction(client, auth_headers):

@@ -244,14 +244,14 @@ class OpenAICompatibleProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
-        public_only = bool((runtime_config or {}).get("untrusted_base_url"))
+        post_kwargs = {"public_only": True} if (runtime_config or {}).get("untrusted_base_url") else {}
         try:
             try:
-                data = self._post_json(url, payload, api_key, public_only=public_only)
+                data = self._post_json(url, payload, api_key, **post_kwargs)
             except RuntimeError as exc:
                 if not self._drop_rejected_enable_thinking(payload, exc):
                     raise
-                data = self._post_json(url, payload, api_key, public_only=public_only)
+                data = self._post_json(url, payload, api_key, **post_kwargs)
         except Exception:
             breaker.record_failure()
             raise
@@ -343,18 +343,18 @@ class OpenAICompatibleProvider:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
         # 🎯 编排流转：有工具绑定时，实际上由工作流 runtime 模块使用非流式 chat() 做决策，流式仅在最后的最终回答生成阶段触发
-        public_only = bool((runtime_config or {}).get("untrusted_base_url"))
+        post_kwargs = {"public_only": True} if (runtime_config or {}).get("untrusted_base_url") else {}
         try:
             emitted = False
             try:
-                for frame in self._post_json_stream(url, payload, api_key, public_only=public_only):
+                for frame in self._post_json_stream(url, payload, api_key, **post_kwargs):
                     emitted = True
                     yield frame
             except RuntimeError as exc:
                 # 只有尚未产出任何帧（连接阶段即被拒）才可安全重试
                 if emitted or not self._drop_rejected_enable_thinking(payload, exc):
                     raise
-                yield from self._post_json_stream(url, payload, api_key, public_only=public_only)
+                yield from self._post_json_stream(url, payload, api_key, **post_kwargs)
         except Exception:
             breaker.record_failure()
             raise

@@ -110,10 +110,7 @@ def create_user_model(request: UserModelConfigRequest, current_user: User = Depe
 @router.post("/api/user-models/test")
 def test_user_model_draft(request: UserModelCapabilityTestRequest, current_user: User = Depends(get_current_user)):
     try:
-        payload = request.model_dump()
-        detect_image = bool(payload.pop("detect_image", False))
-        detect_reasoning = bool(payload.pop("detect_reasoning", True))
-        return test_user_model_payload(payload, detect_image=detect_image, detect_reasoning=detect_reasoning)
+        return test_user_model_payload(request.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -152,8 +149,8 @@ def delete_user_model(config_id: int, current_user: User = Depends(get_current_u
 
 
 @router.post("/api/user-models/{config_id}/test")
-def test_user_model(config_id: int, detect_image: bool = Query(default=True), detect_reasoning: bool = Query(default=True), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def test_user_model(config_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     config = get_owned_user_model(db, user_id=current_user.id, config_id=config_id)
     if not config:
         raise HTTPException(status_code=404, detail="Model config not found")
-    return test_user_model_config(config, detect_image=detect_image, detect_reasoning=detect_reasoning)
+    return test_user_model_config(config)

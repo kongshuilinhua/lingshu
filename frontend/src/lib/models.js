@@ -12,9 +12,22 @@ function modelCapabilityChips(model) {
   if (!model) return [];
   const chips = [];
   if (model.supports_text !== false) chips.push('文本');
-  chips.push('图片可发送');
+  if (model.supports_image) chips.push('图片');
   chips.push('文档附件后端解析');
   return chips.length ? chips : ['未声明能力'];
+}
+
+// 按模型名预填能力（与 Cherry Studio 等客户端做法一致）：只是默认值，用户可在表单里改。
+// 第三方网关的模型名千差万别，猜不中也没关系——图片附件不会被前端拦截，深度思考可退回提示词增强。
+const IMAGE_MODEL_PATTERN = /(^|[-_/.:])(vl|vision|visual|omni|multimodal|qvq|4v|\d+v)([-_/.:]|$)|gpt-4o|gpt-4\.1|gpt-5|claude|gemini|glm-4\.?\d*v|pixtral|llava|minicpm-v|internvl|kimi-vl/i;
+const NATIVE_REASONING_PATTERN = /reasoner|(^|[-_/.:])(r1|o1|o3|o4)([-_/.:]|$)|thinking|qwq|qwen3|deepseek-v4|claude|gemini-2\.5|gpt-5|kimi-k2|glm-4\.5|glm-5/i;
+
+function guessModelCapabilities(modelName) {
+  const name = String(modelName || '');
+  return {
+    supports_image: IMAGE_MODEL_PATTERN.test(name),
+    reasoning_type: NATIVE_REASONING_PATTERN.test(name) ? 'native' : 'prompt',
+  };
 }
 
 function reasoningCapabilityForModel(model) {
@@ -95,6 +108,7 @@ function modelCapabilityWarning(model, attachments = []) {
 }
 
 export {
+  guessModelCapabilities,
   modelLabel,
   modelCapabilityChips,
   reasoningCapabilityForModel,
