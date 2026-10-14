@@ -199,3 +199,21 @@ def test_custom_segment_mode_honours_user_delimiter():
     assert "UVWXYZABCD" in joined
     # child 预算 21 字符，按 "|||" 切才有 3 段；默认分隔符只能切出 2 段。
     assert len(children) >= 3
+
+
+def test_custom_delimiter_is_not_left_in_chunk_text():
+    """用户分隔标识符只是切点标记，不应残留在下一块开头（真实环境曾出现「###第二段…」）。"""
+    from core.services.knowledge import chunk_document
+
+    children, parents = chunk_document(
+        "ABCDEFGHIJ|||KLMNOPQRST|||UVWXYZABCD",
+        content_type="text/plain",
+        kb_id=1,
+        document_id=1,
+        segment_config={"segment_mode": "custom", "delimiter": "|||", "max_chunk_len": 60, "overlap_pct": 0},
+    )
+
+    assert len(children) >= 3
+    assert all("|||" not in chunk["text"] for chunk in children)
+    # 父块可能跨越多段（内部保留分隔符），但首尾不应挂着分隔符
+    assert all(not chunk["text"].startswith("|||") and not chunk["text"].endswith("|||") for chunk in parents)

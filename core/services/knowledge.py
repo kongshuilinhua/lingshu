@@ -606,6 +606,7 @@ def _split_parent_child(
     # 既有 _RECURSIVE_SEPARATORS 作为兜底，保证任何文本都能被切开。
     # 过滤空串：空分隔符会让 splitter 行为异常。
     effective_separators = _RECURSIVE_SEPARATORS
+    custom: list[str] = []
     if separators:
         custom = [sep for sep in separators if sep]
         if custom:
@@ -614,6 +615,20 @@ def _split_parent_child(
     parents: list[dict] = []
     if not cleaned:
         return children, parents
+
+    def _strip_custom(piece: str) -> str:
+        # 用户分隔标识符只是切点标记：splitter 以 keep_separator 保留了它（默认分隔符里的句号等需要保留），
+        # 会残留在块首/块尾（如「###第二段…」），这里只剥掉用户分隔符本身。
+        piece = piece.strip()
+        changed = True
+        while changed and piece:
+            changed = False
+            for sep in custom:
+                if piece.startswith(sep):
+                    piece, changed = piece[len(sep):].strip(), True
+                if piece.endswith(sep):
+                    piece, changed = piece[: -len(sep)].strip(), True
+        return piece
 
     parent_splitter = _build_splitter(
         chunk_size=parent_size, chunk_overlap=parent_overlap,
@@ -627,7 +642,7 @@ def _split_parent_child(
 
     parent_index = 0
     for parent_text in parent_splitter.split_text(cleaned):
-        parent_text = parent_text.strip()
+        parent_text = _strip_custom(parent_text)
         if not parent_text:
             continue
         parent_id = f"kb{kb_id}-doc{document_id}-parent{parent_index}"
@@ -638,7 +653,7 @@ def _split_parent_child(
         })
         child_index = 0
         for child_text in child_splitter.split_text(parent_text):
-            child_text = child_text.strip()
+            child_text = _strip_custom(child_text)
             if not child_text:
                 continue
             children.append({

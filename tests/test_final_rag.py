@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from api.schemas import AgentCreateRequest, AgentRagConfig
 from core.config import get_settings
 from core.db.models import Agent
@@ -211,6 +213,36 @@ def test_recover_interrupted_ingestion_resets_stuck_indexing():
     empty_db = _DB([])
     assert recover_interrupted_ingestion(empty_db) == 0
     assert empty_db.committed is False
+
+
+def test_retrieve_judges_evidence_on_original_query_not_bm25_translation(client, auth_headers, monkeypatch):
+    """真实环境回归：跨语言翻译只为 BM25 检索英文文档服务。证据判定若拿翻译后的英文去和中文
+    片段比词面，「生日有什么优惠」这类换说法问题的词面证据永远命中不到，就会被误拒。"""
+    from core.db.session import SessionLocal
+    from core.services import rag
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Translate KB"}).json()["knowledge_base"]["id"]
+    added = client.post(
+        f"/api/knowledge-bases/{kb_id}/documents",
+        headers=auth_headers,
+        json={"title": "会员手册", "text": "黄金会员每月可以领取 2 张免费饮品券，生日当天全单 7 折。"},
+    )
+    assert added.status_code == 200
+    monkeypatch.setattr(rag, "translate_query", lambda provider, query, **kwargs: "What birthday discounts are there?")
+
+    db = SessionLocal()
+    try:
+        workspace_id = db.query(Agent.workspace_id).first()[0]
+        result = rag.retrieve(
+            db, workspace_id=workspace_id, knowledge_base_ids=[kb_id], query="生日有什么优惠",
+            config={"cache_enabled": False, "rerank_enabled": False},
+        )
+    finally:
+        db.close()
+
+    assert result.sources
+    assert result.status["translate"]["applied"] is True
+    assert result.status["no_evidence"] is False
 
 
 def test_all_disabled_knowledge_bases_refuse_without_rewriting_ids(client, auth_headers):
@@ -482,4 +514,50 @@ def test_has_evidence_logic():
         }
     ]
     assert _has_evidence(sources_bm25_weak, "量子隧穿效应如何解释") is False
+
+
+def test_has_evidence_ignores_dense_when_rerank_applied():
+    """真实环境回归（bge-m3 + bge-reranker-v2-m3）：无关问题 dense 常在 0.43~0.53，
+    越过 0.40 就被判有证据；rerank 对它们 ≤0.02。rerank 生效时 dense 不能单独判有证据。"""
+    from core.services.rag import _has_evidence
+
+    unrelated = [
+        {"snippet": "招牌饮品叫雾岛拿铁，售价 36 元。", "retrieval_channel": "rerank", "dense_score": 0.529, "score": 0.018},
+        {"snippet": "会员分为青铜、白银、黄金三级。", "retrieval_channel": "rerank", "dense_score": 0.515, "score": 0.0},
+    ]
+    assert _has_evidence(unrelated, "星巴克的大杯美式多少钱？", rerank_applied=True) is False
+
+    related = [{"snippet": "营业时间为上午 9 点 30 分到晚上 8 点 45 分。", "retrieval_channel": "rerank", "dense_score": 0.30, "score": 0.998}]
+    assert _has_evidence(related, "几点营业", rerank_applied=True) is True
+
+
+def test_has_evidence_keeps_lexical_match_when_rerank_score_is_low():
+    """rerank 也不能单独当裁判：换说法的正常问题（实测「生日有什么优惠」rerank 仅 0.11）
+    同样低于阈值，只看 rerank 会大面积误拒；词面命中必须保留。"""
+    from core.services.rag import _has_evidence
+
+    sources = [{"snippet": "黄金会员每月可以领取 2 张免费饮品券，生日当天全单 7 折。", "retrieval_channel": "rerank", "dense_score": 0.50, "score": 0.114}]
+    assert _has_evidence(sources, "生日有什么优惠", rerank_applied=True) is True
+
+
+def test_has_evidence_falls_back_to_lexical_and_dense_without_rerank():
+    """rerank 未开启或调用失败时，退回词面 + dense 双档（行为与此前一致）。"""
+    from core.services.rag import _has_evidence
+
+    sources = [{"snippet": "作物预测模型采用 CNN-LSTM 网络", "retrieval_channel": "rrf:dense", "dense_score": 0.45, "score": 0.02}]
+    assert _has_evidence(sources, "作物能预测吗", rerank_applied=False) is True
+
+
+@pytest.mark.parametrize("text", ["你好", "您好！", "hi", "Hello~", "谢谢", "谢谢你", "好的，谢谢", "再见", "早上好呀", "在吗？", "嗨 😊"])
+def test_small_talk_detects_pure_greetings(text):
+    from core.services.rag import is_small_talk
+
+    assert is_small_talk(text) is True
+
+
+@pytest.mark.parametrize("text", ["你好，几点开门", "今天天气怎么样", "法国的首都是哪里", "谢谢，会员怎么升级", "hello world 是什么", ""])
+def test_small_talk_rejects_real_questions(text):
+    from core.services.rag import is_small_talk
+
+    assert is_small_talk(text) is False
 

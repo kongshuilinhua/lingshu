@@ -152,7 +152,8 @@ def retrieve(
     if parent_expansion and sources:
         _expand_parents(db, workspace_id=workspace_id, sources=sources)
 
-    no_evidence = not _has_evidence(sources, bm25_query)
+    # 证据判定用用户原文：翻译后的英文只服务于 BM25 检索英文文档，拿它去和中文片段比词面永远命中不到。
+    no_evidence = not _has_evidence(sources, query, rerank_applied=rerank_applied)
 
     status = started_status | {
         "reason": "available" if sources else "no_match",
@@ -531,7 +532,7 @@ RAG_CONVERSATIONAL_STOPWORDS = {
 }
 
 
-def _has_evidence(sources: list[dict], query: str) -> bool:
+def _has_evidence(sources: list[dict], query: str, *, rerank_applied: bool = False) -> bool:
     """
     RAG 核心守门人：判断召回是否属于"有效证据"。
 
@@ -540,19 +541,22 @@ def _has_evidence(sources: list[dict], query: str) -> bool:
           如果用户发"早上好！"，向量检索会因为密度的余弦相似度计算特征，强制返回一篇含有"早上"或字面上最接近的完全不相干的文章作为上下文。
           这会诱发严重的 LLM 生成幻觉（大模型被喂入无意义文章后，可能会强行把问候语同产品说明文缝合在一起）。
 
-    🧠 判断阈值逻辑（三档，任一命中即为有证据）：
+    🧠 判断逻辑（任一档命中即有证据）：
         1. 词面证据：前置清扫停用词后，Query 的实质词出现在返回的 Snippet 原文中。
-        2. Rerank 证据：精排模型的 relevance_score >= RAG_EVIDENCE_RERANK_MIN。
-           Rerank 分数在同一次查询内可比，是最可靠的信号。
-        3. Dense 证据：向量余弦分值 >= RAG_EVIDENCE_DENSE_MIN。
+        2. rerank 已生效（rerank_applied=True）：任一片段 relevance_score >= RAG_EVIDENCE_RERANK_MIN。
+           rerank 未开启或调用失败：退回 Dense 证据，向量余弦分值 >= RAG_EVIDENCE_DENSE_MIN。
+
+    ⚠️ rerank 生效时不再看 dense —— 真实环境实测（bge-m3 + bge-reranker-v2-m3，见 tests/test_final_rag.py）：
+        无关问题（星巴克价格 / 天气）的 dense 普遍落在 0.43~0.53，越过阈值即被误判为有证据；
+        而 rerank 对它们 ≤0.02。但 rerank 也不能单独当裁判：换说法的正常问题（「生日有什么优惠」0.11、
+        「周一营业吗」0.22）同样会低于阈值，所以词面证据必须保留，二者取并集。
 
     ⚠️ 已移除的判据：「BM25 Score > 0」。
         BM25 对任何词元交叠都给出正分（含"你好""请问"这类停用词），该条件近乎恒真，
         会让"知识库里根本没有的问题"被判为有证据，从而使拒答能力失效。
-        BM25 的价值已在词面证据档（第 1 档）通过非停用词交叠间接体现。
+        BM25 的价值已在词面证据档通过非停用词交叠间接体现。
 
-    ⚠️ 两档阈值默认值 0.40 是**保守初值**，用于保持既有行为可比；
-       正式取值待 P1 评测基线标定后调整（见设计文档 §6.3）。
+    ⚠️ dense 阈值默认 0.40 仍是保守初值，无 rerank 时区分度有限；正式取值待 P1 评测基线标定。
     """
     if not sources:
         return False
@@ -571,16 +575,37 @@ def _has_evidence(sources: list[dict], query: str) -> bool:
     if tokens and any(token.lower() in snippets for token in tokens):
         return True
 
-    for source in sources:
-        channel = source.get("retrieval_channel") or ""
-        dense_score = float(source.get("dense_score") or 0.0)
-        score = float(source.get("score") or 0.0)
-        if "rerank" in channel and score >= rerank_min:
-            return True
-        if dense_score >= dense_min:
-            return True
+    if rerank_applied:
+        return any(
+            "rerank" in (source.get("retrieval_channel") or "") and float(source.get("score") or 0.0) >= rerank_min
+            for source in sources
+        )
+    return any(float(source.get("dense_score") or 0.0) >= dense_min for source in sources)
 
-    return False
+
+# 纯寒暄识别：整句只由问候/致谢/道别等短语（加语气词、标点、表情）组成才算。
+# 刻意用封闭短语表而不复用查询理解的 chitchat 意图——那个意图把「与知识无关的闲聊」也算进去，
+# 会让「法国的首都是哪里」这类该拒答的问题绕过拒答。
+_SMALL_TALK_PHRASES = (
+    "你好", "您好", "你们好", "大家好", "哈喽", "嗨", "hi", "hello", "hey",
+    "早上好", "上午好", "中午好", "下午好", "晚上好", "早安", "午安", "晚安", "早",
+    "谢谢你", "谢谢您", "谢谢", "多谢", "感谢", "辛苦了", "thanks", "thankyou", "thx",
+    "再见", "拜拜", "bye", "回头见",
+    "在吗", "在不在", "有人吗",
+    "好的", "好", "嗯", "嗯嗯", "ok", "okay", "收到", "明白了", "知道了",
+)
+_SMALL_TALK_FILLERS = "啊呀呢吧嘛哦噢哈啦~"
+_SMALL_TALK_PATTERN = re.compile(
+    "(?:" + "|".join(sorted((re.escape(p) for p in _SMALL_TALK_PHRASES), key=len, reverse=True)) + ")+"
+)
+
+
+def is_small_talk(query: str) -> bool:
+    """判断用户输入是否为纯寒暄（你好 / 谢谢 / 再见 / 在吗 …），用于无证据时免于拒答。"""
+    text = "".join(ch for ch in str(query or "").lower() if ch.isalnum() and ch not in _SMALL_TALK_FILLERS)
+    if not text or len(text) > 12:
+        return False
+    return bool(_SMALL_TALK_PATTERN.fullmatch(text))
 
 
 def _cache_key(db: Session, *, workspace_id: int, knowledge_base_ids: list[int], query: str, config: dict) -> str:

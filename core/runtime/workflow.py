@@ -51,7 +51,7 @@ from core.services.memory_summary import (
     parse_memory,
     summarize_turns,
 )
-from core.services.rag import RAG_NO_EVIDENCE_ANSWER, retrieve
+from core.services.rag import RAG_NO_EVIDENCE_ANSWER, is_small_talk, retrieve
 
 try:
     from langchain_core.messages.utils import count_tokens_approximately
@@ -617,6 +617,16 @@ class WorkflowRunner:
             # 未绑定知识库的 agent（status["knowledge_base_ids"] 为空）属「无 KB 可搜」，
             # 不是「检索不到证据」——那种情况必须正常走模型，否则所有纯聊天 agent 会被无差别拒答。
             if status.get("no_evidence") and status.get("knowledge_base_ids") and refusal_enabled:
+                # 纯寒暄（你好/谢谢）不该被「知识库里没有」拒掉：交给模型正常回应，
+                # 但同样不注入任何低相关片段，避免把问候语和业务文档缝合在一起。
+                if is_small_talk(context["input"]):
+                    small_talk_status = {**status, "reason": "small_talk", "sources_emitted": False, "matched_chunks": 0}
+                    return {
+                        "sources": [],
+                        "rag_enabled": True,
+                        "rag_status": small_talk_status,
+                        "events": [{"event": "rag_status", "data": small_talk_status}],
+                    }
                 refusal_status = {
                     **status,
                     "reason": "no_evidence_refused",

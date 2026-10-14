@@ -766,6 +766,32 @@ def test_rag_no_evidence_refuses_instead_of_guessing(client, auth_headers):
     assert "No reliable evidence was found" in response.text
 
 
+def test_rag_small_talk_is_answered_not_refused(client, auth_headers):
+    """纯寒暄（你好/谢谢）无证据时不拒答：交给模型正常回应，但不注入任何知识库片段。"""
+    kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Small Talk KB"})
+    agent = client.post(
+        "/api/agents",
+        headers=auth_headers,
+        json={
+            "name": "Small Talk Agent",
+            "knowledge_base_ids": [kb.json()["knowledge_base"]["id"]],
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+        },
+    )
+
+    response = client.post(
+        f"/api/agents/{agent.json()['agent']['id']}/chat/stream",
+        headers=auth_headers,
+        json={"message": "你好！", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert '"reason": "small_talk"' in response.text
+    assert '"rag_refusal": true' not in response.text
+    assert "No reliable evidence was found" not in response.text
+    assert "event: done" in response.text
+
+
 def test_agent_without_knowledge_base_is_not_refused(client, auth_headers):
     """未绑定知识库的 agent 不得被无证据拒答（回归护栏）。
 
