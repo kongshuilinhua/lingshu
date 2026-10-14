@@ -185,3 +185,51 @@ def test_detected_capabilities_reflect_reasoning_probe(monkeypatch):
     result = um.test_user_model_config(config, detect_reasoning=True)
     assert result["detected_capabilities"]["supports_reasoning"] is True
     assert result["detected_capabilities"]["reasoning_type"] == "native"
+
+
+class _FakeChatProvider:
+    def __init__(self, reply):
+        self.reply = reply
+
+    def chat(self, messages, **kwargs):
+        return SimpleNamespace(content=self.reply(messages) if callable(self.reply) else self.reply)
+
+
+def _expected_color(messages):
+    url = messages[0]["content"][1]["image_url"]["url"]
+    return next(name for name, rgb in um._IMAGE_PROBE_COLORS.items() if um._solid_png_data_url(rgb) == url)
+
+
+def test_image_probe_passes_only_when_model_names_the_color(real_mode):
+    provider = _FakeChatProvider(lambda messages: _expected_color(messages).capitalize() + ".")
+    assert um._check_image_capability(provider, {"chat_model": "vl"}, required=False)["ok"] is True
+
+
+@pytest.mark.parametrize("reply", ["I'm unable to view the image you attached.", "unknown", ""])
+def test_image_probe_rejects_200_reply_that_did_not_see_image(real_mode, reply):
+    # DeepSeek 等纯文本模型收到图片照样 200，但答不出颜色 → 不能判为支持图片
+    result = um._check_image_capability(_FakeChatProvider(reply), {"chat_model": "deepseek-v4-pro"}, required=False)
+    assert result["ok"] is False
+    assert result["error_code"] == "image_not_understood"
+
+
+def test_chat_retries_without_enable_thinking_when_endpoint_rejects_it(monkeypatch):
+    # 硅基流动的 Qwen3-VL 不接受 enable_thinking：400 后去掉该参数重试一次
+    import core.integrations.llm as llm_module
+
+    monkeypatch.setattr(llm_module, "get_settings", lambda: SimpleNamespace(
+        mock_llm=False, openai_model="m", llm_max_tokens=100, circuit_breaker_distributed=False,
+        openai_api_base="https://example.com/v1", user_model_allow_private_network=False))
+    provider = llm_module.OpenAICompatibleProvider()
+    sent = []
+
+    def fake_post(url, payload, key, **kwargs):
+        sent.append(dict(payload))
+        if "enable_thinking" in payload:
+            raise RuntimeError('Model call failed: HTTP 400. {"message":"current model does not support parameter `enable_thinking`."}')
+        return {"choices": [{"message": {"content": "green"}}]}
+
+    monkeypatch.setattr(provider, "_post_json", fake_post)
+    runtime = {"untrusted_base_url": True, "base_url": "https://example.com/v1", "api_key": "k", "chat_model": "Qwen/Qwen3-VL-8B-Instruct"}
+    assert provider.chat([{"role": "user", "content": "hi"}], runtime_config=runtime).content == "green"
+    assert ["enable_thinking" in p for p in sent] == [True, False]

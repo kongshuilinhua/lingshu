@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
+import random
 import re
+import struct
 import time
+import zlib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -496,20 +500,29 @@ def _reasoning_label(reasoning_type: str) -> str:
     return {"native": "深度思考", "prompt": "提示词增强", "none": "不支持"}.get(reasoning_type, "不支持")
 
 
-def _tiny_png_data_url() -> str:
-    """
-    🧠 极简无损 1x1 像素 PNG Base64 数据 URL。
-    作为主动多模态图像探测的最小有效载荷负载，最大程度压缩请求开销，保护网络带宽。
-    """
-    return (
-        "data:image/png;base64,"
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-    )
+# 图片探测用纯色图：颜色名 → RGB。每次随机挑一种，要求模型答出颜色才算真正「看见」了图片。
+_IMAGE_PROBE_COLORS = {"red": (220, 20, 20), "green": (20, 170, 40), "blue": (20, 40, 220)}
+_IMAGE_PROBE_MAX_TOKENS = 2048
+
+
+def _solid_png_data_url(rgb: tuple[int, int, int], size: int = 32) -> str:
+    """生成 size×size 的纯色 PNG data URL（无第三方依赖）。"""
+    raw = b"".join(b"\x00" + bytes(rgb) * size for _ in range(size))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
 def _check_image_capability(provider: OpenAICompatibleProvider, runtime: dict, *, required: bool) -> dict:
     """
-    通过实际向该端点灌入 1x1 小图片，看其是否抛出 "Payload Rejected" 异常来最终核对多模态能力。
+    发一张随机纯色图，要求模型说出颜色；答对才判定支持图片。
+
+    🛡️ 只看「请求没报错」会误判：部分纯文本模型/网关（如 DeepSeek）收到 image_url 照样返回 200，
+    但模型根本看不到图（回复「无法查看图片」）。因此必须校验回答内容。
     """
     if get_settings().mock_llm:
         ok = _model_name_implies_image(runtime.get("chat_model", ""))
@@ -518,23 +531,22 @@ def _check_image_capability(provider: OpenAICompatibleProvider, runtime: dict, *
             "error_code": "" if ok else "mock_model_name_not_vision",
             "message": "" if ok else "Mock image probe treats this model name as text-only",
         }
+    color = random.choice(list(_IMAGE_PROBE_COLORS))
     try:
-        # 发起多模态测试调用
-        provider.chat(
+        response = provider.chat(
             [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "describe this image briefly"},
-                        {"type": "image_url", "image_url": {"url": _tiny_png_data_url()}},
+                        {"type": "text", "text": "What single color fills this image? Reply with one lowercase English word only."},
+                        {"type": "image_url", "image_url": {"url": _solid_png_data_url(_IMAGE_PROBE_COLORS[color])}},
                     ],
                 }
             ],
             model=runtime["chat_model"],
             temperature=0,
-            runtime_config=runtime,
+            runtime_config={**runtime, "max_tokens": _IMAGE_PROBE_MAX_TOKENS},
         )
-        return {"ok": True, "error_code": "", "message": ""}
     except Exception as exc:
         if required:
             raise
@@ -543,6 +555,16 @@ def _check_image_capability(provider: OpenAICompatibleProvider, runtime: dict, *
             "error_code": _image_probe_error_code(exc),
             "message": _sanitize_probe_error(exc),
         }
+    answer = str(getattr(response, "content", response) or "").strip()
+    if re.search(rf"\b{color}\b", answer.lower()):
+        return {"ok": True, "error_code": "", "message": ""}
+    if required:
+        raise RuntimeError("Model accepted the image request but could not read the image")
+    return {
+        "ok": False,
+        "error_code": "image_not_understood",
+        "message": f"Request accepted but the model could not identify the test image (expected {color}, got: {answer[:120] or 'empty reply'})",
+    }
 
 
 _REASONING_PROBE_MAX_TOKENS = 1024

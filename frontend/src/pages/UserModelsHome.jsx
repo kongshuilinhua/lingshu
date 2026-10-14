@@ -1,6 +1,6 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
-import { Check, Plus, Trash2, Wand2, X } from 'lucide-react';
+import { Check, ChevronDown, Plus, Trash2, Wand2, X } from 'lucide-react';
 import { SecretInputDialog } from '../components/SecretInputDialog.jsx';
 import {
   capabilityCheckLabel,
@@ -40,17 +40,14 @@ export function UserModelsHome({ adminModels, canManage, createModelConfig, dele
 
 
 function createUserModelForm() {
-  // 统一页：只填协议 / base_url / api_key / model。文档、上下文、温度用后端默认值，
-  // 推理能力在保存前由「测试当前配置」真实探测，不再由厂家预设写死。
+  // 统一页：只填协议 / base_url / api_key / 模型（可多选，同一连接一次注册多个模型）。
+  // 文档、上下文、温度用后端默认值；图片与推理能力在保存前逐个模型真实探测。
   return {
     provider: 'openai-compatible',
     base_url: '',
     api_key: '',
-    chat_model: '',
-    display_name: '',
+    chat_models: [],
     supports_document: true,
-    supports_reasoning: false,
-    reasoning_type: 'none',
     max_context: '131072',
     default_temperature: '0.4',
     enabled: true,
@@ -59,6 +56,7 @@ function createUserModelForm() {
 }
 
 const PRIVATE_GATEWAY_ENV = 'USER_MODEL_ALLOW_PRIVATE_NETWORK';
+const DRAFT_TEST_CONCURRENCY = 3;
 
 function gatewayErrorText(message) {
   const text = String(message || '');
@@ -68,16 +66,29 @@ function gatewayErrorText(message) {
   return text;
 }
 
-// 保存/测试用的最终载荷：显示名称缺省取模型名；推理能力取自最近一次测试的探测结果。
-function draftFormPayload(form, testResult) {
+function normalizeBaseUrl(value) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+// 单个模型的保存/测试载荷：显示名称取模型名；推理能力取自该模型最近一次测试的探测结果。
+function draftModelPayload(form, chatModel, testResult) {
   const detected = testResult?.detected_capabilities;
   const supportsReasoning = Boolean(detected?.supports_reasoning);
   return userModelFormPayload({
     ...form,
-    display_name: form.display_name.trim() || form.chat_model.trim(),
+    chat_model: chatModel,
+    display_name: chatModel,
     supports_reasoning: supportsReasoning,
     reasoning_type: supportsReasoning ? (detected.reasoning_type || 'prompt') : 'none',
   }, { includeApiKey: true });
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const queue = [...items];
+  const runners = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) await worker(queue.shift());
+  });
+  await Promise.all(runners);
 }
 
 function userModelEditForm(config) {
@@ -113,7 +124,7 @@ function UserModelsPanel({
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
   const [draftTesting, setDraftTesting] = useState(false);
-  const [draftTestResult, setDraftTestResult] = useState(null);
+  const [draftResults, setDraftResults] = useState({});
   const [testingId, setTestingId] = useState(null);
   const [testResults, setTestResults] = useState({});
   const [keyDialogConfig, setKeyDialogConfig] = useState(null);
@@ -123,27 +134,66 @@ function UserModelsPanel({
   const [probeNotice, setProbeNotice] = useState(null);
   const [probing, setProbing] = useState(false);
   const [formError, setFormError] = useState('');
+  const [modelQuery, setModelQuery] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef(null);
   const formVersion = useRef(0);
   const modelProbeVersion = useRef(0);
-  const formReady = Boolean(form.base_url.trim() && form.chat_model.trim() && form.api_key.trim());
-  const canSaveForm = formReady && draftTestResult?.ok;
-  const imageProbeStatus = imageCapabilityFromTest(form, draftTestResult);
-  const detectedReasoning = draftTestResult?.detected_capabilities
-    ? reasoningCapabilityForModel(draftTestResult.detected_capabilities)
-    : null;
-  const modelFilter = form.chat_model.trim().toLowerCase();
-  const visibleModels = probedModels.filter((name) => !modelFilter || name.toLowerCase().includes(modelFilter));
+  const formReady = Boolean(form.base_url.trim() && form.api_key.trim() && form.chat_models.length);
+  const pendingModels = form.chat_models.filter((name) => !draftResults[name]);
+  const passedModels = form.chat_models.filter((name) => draftResults[name]?.ok);
+  const canSaveForm = formReady && !pendingModels.length && passedModels.length > 0;
+  const registeredModels = new Set(userModels
+    .filter((config) => (config.provider || 'openai-compatible') === form.provider
+      && normalizeBaseUrl(config.base_url) === normalizeBaseUrl(form.base_url))
+    .map((config) => config.chat_model));
+  const query = modelQuery.trim();
+  const modelOptions = [...new Set([...probedModels, ...form.chat_models])]
+    .filter((name) => !query || name.toLowerCase().includes(query.toLowerCase()));
+  const selectableOptions = modelOptions.filter((name) => !registeredModels.has(name));
+  const canAddQuery = Boolean(query) && !modelOptions.includes(query) && !registeredModels.has(query);
   const createGuard = useUnsavedForm({ enabled: formOpen, value: form, label: '新增模型配置',
     busy: saving || draftTesting, onSave: () => submitUserModel() });
   const editGuard = useUnsavedForm({ enabled: Boolean(editConfig), value: editForm, label: '模型配置',
     busy: saving, onSave: () => submitEditUserModel() });
 
+  useEffect(() => {
+    if (!pickerOpen) return undefined;
+    const close = (event) => {
+      if (pickerRef.current && !pickerRef.current.contains(event.target)) setPickerOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [pickerOpen]);
+
   function updateForm(patch) {
-    formVersion.current += 1;
-    if ('base_url' in patch || 'api_key' in patch || 'provider' in patch) resetModelProbe();
-    setDraftTestResult(null);
+    // 连接参数变化会让所有测试结果失效；仅改模型勾选时保留其余模型的结果。
+    if ('base_url' in patch || 'api_key' in patch || 'provider' in patch) {
+      formVersion.current += 1;
+      resetModelProbe();
+      setDraftResults({});
+    }
     setFormError('');
     setForm((current) => ({ ...current, ...patch }));
+  }
+
+  function setSelectedModels(names) {
+    const next = [...new Set(names)].filter((name) => name && !registeredModels.has(name));
+    setFormError('');
+    setForm((current) => ({ ...current, chat_models: next }));
+    setDraftResults((current) => Object.fromEntries(Object.entries(current).filter(([name]) => next.includes(name))));
+  }
+
+  function toggleModel(name) {
+    setSelectedModels(form.chat_models.includes(name)
+      ? form.chat_models.filter((item) => item !== name)
+      : [...form.chat_models, name]);
+  }
+
+  function addQueryModel() {
+    if (!canAddQuery) return;
+    setSelectedModels([...form.chat_models, query]);
+    setModelQuery('');
   }
 
   function resetModelProbe() {
@@ -157,7 +207,9 @@ function UserModelsPanel({
     formVersion.current += 1;
     resetModelProbe();
     setForm(createUserModelForm());
-    setDraftTestResult(null);
+    setDraftResults({});
+    setModelQuery('');
+    setPickerOpen(false);
     setFormError('');
     setNotice('');
     setProfileError('');
@@ -170,7 +222,7 @@ function UserModelsPanel({
       formVersion.current += 1;
       resetModelProbe();
       setFormOpen(false);
-      setDraftTestResult(null);
+      setDraftResults({});
     });
   }
 
@@ -196,37 +248,52 @@ function UserModelsPanel({
     setSaving(true);
     setNotice('');
     setProfileError('');
-    try {
-      const saved = await createUserModelConfig(draftFormPayload(form, draftTestResult));
-      createGuard.markSaved();
-      setForm(createUserModelForm());
-      setFormOpen(false);
-      setDraftTestResult(null);
-      setNotice(saved?.supports_image ? '模型连接已保存，图片探测通过。' : '模型连接已保存；图片探测未通过，但聊天发送不会被前端拦截。');
-      return true;
-    } catch (err) {
-      setFormError(gatewayErrorText(errorMessage(err)));
-      return false;
-    } finally {
-      setSaving(false);
+    setFormError('');
+    const saved = [];
+    const failed = [];
+    for (const name of passedModels) {
+      try {
+        // 「设为默认」只给本次第一个成功保存的模型
+        await createUserModelConfig(draftModelPayload({ ...form, is_default: form.is_default && !saved.length }, name, draftResults[name]));
+        saved.push(name);
+      } catch (err) {
+        failed.push(`${name}：${gatewayErrorText(errorMessage(err))}`);
+      }
     }
+    setSaving(false);
+    if (failed.length) {
+      // 已保存的从勾选中移除，失败的留在表单里便于重试
+      setSelectedModels(form.chat_models.filter((name) => !saved.includes(name)));
+      setFormError(`${saved.length ? `已保存 ${saved.length} 个；` : ''}以下模型保存失败：${failed.join('；')}`);
+      return false;
+    }
+    createGuard.markSaved();
+    setForm(createUserModelForm());
+    setFormOpen(false);
+    setDraftResults({});
+    const skipped = form.chat_models.length - saved.length;
+    setNotice(`已保存 ${saved.length} 个模型${skipped ? `，${skipped} 个测试未通过的未保存` : ''}。`);
+    return true;
   }
 
   async function testDraftModel() {
     const version = formVersion.current;
+    const targets = [...form.chat_models];
     setDraftTesting(true);
     setNotice('');
     setProfileError('');
-    setDraftTestResult(null);
     setFormError('');
-    try {
-      const result = await testUserModelDraft({ ...draftFormPayload(form, null), detect_image: true, detect_reasoning: true });
-      if (version === formVersion.current) setDraftTestResult(result);
-    } catch (err) {
-      if (version === formVersion.current) setFormError(gatewayErrorText(errorMessage(err)));
-    } finally {
-      setDraftTesting(false);
-    }
+    setDraftResults({});
+    await runWithConcurrency(targets, DRAFT_TEST_CONCURRENCY, async (name) => {
+      let result;
+      try {
+        result = await testUserModelDraft({ ...draftModelPayload(form, name, null), detect_image: true, detect_reasoning: true });
+      } catch (err) {
+        result = { ok: false, model: name, message: gatewayErrorText(errorMessage(err)) };
+      }
+      if (version === formVersion.current) setDraftResults((current) => ({ ...current, [name]: result }));
+    });
+    setDraftTesting(false);
   }
 
   async function probeModelsDraft() {
@@ -245,14 +312,15 @@ function UserModelsPanel({
       if (version !== modelProbeVersion.current) return;
       const models = result.models || [];
       setProbedModels(models);
+      if (models.length) setPickerOpen(true);
       // 🛡️ 成功也必须有可见反馈：模型此前只塞进 <datalist>，而候选项仅在聚焦输入框时才弹出，
       // 于是「拉取成功」与「什么都没发生」在界面上无法区分。这里给出明确计数与下一步提示。
       if (result.ok) {
         setProbeNotice({
           ok: true,
           text: models.length
-            ? `已拉到 ${models.length} 个模型，在下方列表点选；输入模型名可筛选。`
-            : '接口可用，但未返回任何模型，请手动填写模型名。',
+            ? `已拉到 ${models.length} 个模型，在 chat_model 下拉中勾选（可多选）。`
+            : '接口可用，但未返回任何模型，请在 chat_model 下拉中手动输入模型 ID。',
         });
       } else {
         setProbeNotice({ ok: false, text: gatewayErrorText(result.message) || '拉取模型列表失败' });
@@ -353,6 +421,11 @@ function UserModelsPanel({
           patch.reasoning_type = detectedReasoningSupport ? (result.detected_capabilities.reasoning_type || 'prompt') : 'none';
           patch.reasoning_label = reasoningLabel(patch.reasoning_type);
         }
+        // 图片能力同样以实测为准（旧版探测只看请求是否报错，曾把纯文本模型误记为支持图片）
+        const detectedImageSupport = result.detected_capabilities.supports_image;
+        if (typeof detectedImageSupport === 'boolean' && detectedImageSupport !== Boolean(config.supports_image)) {
+          patch.supports_image = detectedImageSupport;
+        }
         if (Object.keys(patch).length) {
           await updateUserModelConfig(config.id, patch);
         }
@@ -404,29 +477,64 @@ function UserModelsPanel({
                   <span>chat_api_key</span>
                   <input type="password" value={form.api_key} onChange={(event) => updateForm({ api_key: event.target.value })} placeholder="只提交一次，不会回显" autoComplete="off" />
                 </label>
-                <label className="field-stack">
+                <div className="field-stack chat-model-field">
                   <span>chat_model</span>
                   <div className="chat-model-row">
-                    <input value={form.chat_model} onChange={(event) => updateForm({ chat_model: event.target.value })} placeholder="拉取后点选，或手动填写模型 ID" />
+                    <div className="model-multiselect" ref={pickerRef}>
+                      <button type="button" className="model-multiselect-trigger" aria-label="chat_model" aria-haspopup="listbox"
+                        aria-expanded={pickerOpen} onClick={() => setPickerOpen((open) => !open)}>
+                        <span>{form.chat_models.length ? `已选 ${form.chat_models.length} 个模型` : '选择模型（可多选）'}</span>
+                        <ChevronDown size={15} />
+                      </button>
+                      {pickerOpen && (
+                        <div className="model-multiselect-panel">
+                          <input aria-label="筛选模型" value={modelQuery} autoFocus placeholder="筛选，或输入模型 ID 后回车添加"
+                            onChange={(event) => setModelQuery(event.target.value)}
+                            onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addQueryModel(); } }} />
+                          <div className="model-multiselect-actions">
+                            <button type="button" disabled={!selectableOptions.length}
+                              onClick={() => setSelectedModels([...form.chat_models, ...selectableOptions])}>全选{query ? '筛选结果' : ''}</button>
+                            <button type="button" disabled={!form.chat_models.length} onClick={() => setSelectedModels([])}>清空</button>
+                          </div>
+                          <ul role="listbox" aria-label="可选模型" aria-multiselectable="true">
+                            {canAddQuery && (
+                              <li><button type="button" className="model-multiselect-add" onClick={addQueryModel}>添加「{query}」</button></li>
+                            )}
+                            {modelOptions.map((name) => {
+                              const registered = registeredModels.has(name);
+                              return (
+                                <li key={name} role="option" aria-selected={form.chat_models.includes(name)}>
+                                  <label className={registered ? 'disabled' : ''}>
+                                    <input type="checkbox" checked={form.chat_models.includes(name)} disabled={registered} onChange={() => toggleModel(name)} />
+                                    <span>{name}</span>
+                                    {registered && <small>已注册</small>}
+                                  </label>
+                                </li>
+                              );
+                            })}
+                            {!modelOptions.length && !canAddQuery && (
+                              <li className="model-multiselect-empty">{probedModels.length ? '没有匹配的模型' : '先点「拉取模型」，或直接输入模型 ID 回车添加'}</li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
                     <button type="button" disabled={probing || !form.base_url.trim() || !form.api_key.trim()} onClick={probeModelsDraft}>{probing ? '拉取中' : '拉取模型'}</button>
                   </div>
-                </label>
+                </div>
               </div>
-              {/* 提示与候选列表渲染在 <label> 之外：label 内含额外文本会改变 chat_model 的可访问名。 */}
               {probeNotice && (
                 <p className={probeNotice.ok ? 'model-probe-hint ok' : 'model-probe-hint error'} role="status">{probeNotice.text}</p>
               )}
-              {visibleModels.length > 0 && (
-                <ul className="probed-model-list" aria-label="可选模型">
-                  {visibleModels.map((name) => (
+              {form.chat_models.length > 0 && (
+                <ul className="selected-model-chips" aria-label="已选模型">
+                  {form.chat_models.map((name) => (
                     <li key={name}>
-                      <button type="button" className={form.chat_model === name ? 'active' : ''} onClick={() => updateForm({ chat_model: name })}>{name}</button>
+                      <span>{name}</span>
+                      <button type="button" aria-label={`移除 ${name}`} onClick={() => toggleModel(name)}><X size={12} /></button>
                     </li>
                   ))}
                 </ul>
-              )}
-              {probedModels.length > 0 && visibleModels.length === 0 && (
-                <p className="model-probe-hint">列表中没有匹配「{form.chat_model.trim()}」的模型，将按手动填写的模型 ID 测试。</p>
               )}
               <label className="model-enabled-check inline">
                 <input type="checkbox" checked disabled />
@@ -435,22 +543,19 @@ function UserModelsPanel({
                   <small>保存和测试会向模型发送最小图片请求；无论探测结果如何，聊天发送都不会被前端拦截。</small>
                 </span>
               </label>
-              <div className="model-capability-summary">
-                <span className="enabled">文本</span>
-                <span className={imageProbeStatus.className}>{imageProbeStatus.label}</span>
-                <span className="enabled">文档附件后端解析</span>
-                <span className={detectedReasoning?.supported ? 'enabled' : ''}>深度思考：{detectedReasoning ? detectedReasoning.label : '测试后识别'}</span>
-                <small>图片与深度思考能力由「测试当前配置」真实探测；图片附件始终随聊天请求发送，不会被前端拦截。</small>
-              </div>
               <div className="model-checks state-checks">
-                <label><input type="checkbox" checked={form.is_default} onChange={(event) => updateForm({ is_default: event.target.checked })} />设为默认</label>
+                <label><input type="checkbox" checked={form.is_default} onChange={(event) => updateForm({ is_default: event.target.checked })} />设为默认（多选时只给第一个）</label>
               </div>
               {formError && <p className="model-probe-hint error" role="alert">{formError}</p>}
-              {formReady && !draftTestResult?.ok && <p className="model-row-warning">保存前请先点击“测试当前配置”。文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
-              {draftTestResult && <UserModelTestResult result={draftTestResult} />}
+              {formReady && pendingModels.length > 0 && !draftTesting && <p className="model-row-warning">保存前请先点击“测试当前配置”，每个所选模型都会单独测试。文档附件由后端解析成文本，RAG/Embedding 使用后端默认配置。</p>}
+              {form.chat_models.some((name) => draftResults[name]) && (
+                <DraftModelResults models={form.chat_models} results={draftResults} testing={draftTesting} />
+              )}
               <div className="model-form-actions">
                 <button className="preset-action" type="button" disabled={draftTesting || saving || !formReady} onClick={testDraftModel}>{draftTesting ? '检测中' : '测试当前配置'}</button>
-                <button className="primary-model-action" type="submit" disabled={saving || !canSaveForm}><Plus size={15} />保存私有模型</button>
+                <button className="primary-model-action" type="submit" disabled={saving || draftTesting || !canSaveForm}>
+                  <Plus size={15} />{passedModels.length > 1 ? `保存 ${passedModels.length} 个模型` : '保存私有模型'}
+                </button>
               </div>
             </form>
           </section>
@@ -482,7 +587,7 @@ function UserModelsPanel({
               </div>
             </div>
         ))}
-        {userModels.length === 0 && <p className="muted">还没有私有模型配置。点「新增模型」填写地址、API Key 和模型名，保存后就可以在智能体配置里选择它。</p>}
+        {userModels.length === 0 && <p className="muted">还没有私有模型配置。点「新增模型」填写地址和 API Key，拉取后可一次勾选多个模型注册。</p>}
       </div>
       {keyDialogConfig && (
         <SecretInputDialog
@@ -559,6 +664,32 @@ function UserModelsPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function DraftModelResults({ models, results, testing }) {
+  return (
+    <div className="draft-model-results" aria-label="测试结果">
+      {models.map((name) => {
+        const result = results[name];
+        if (!result) {
+          return <div className="draft-model-result" key={name}><strong>{name}</strong><span>{testing ? '检测中…' : '未测试'}</span></div>;
+        }
+        const detected = result.detected_capabilities || {};
+        const image = imageCapabilityFromTest(null, result);
+        const reasoning = reasoningCapabilityForModel(detected);
+        const error = detected.chat_error || result.checks?.chat?.message || (!result.ok ? result.message : '');
+        return (
+          <div className={result.ok ? 'draft-model-result ok' : 'draft-model-result fail'} key={name}>
+            <strong>{name}</strong>
+            <span className={result.ok ? 'ok' : 'fail'}>{result.ok ? `通过 · ${result.latency_ms ?? '-'}ms` : '未通过，不会保存'}</span>
+            {result.ok && <span className={image.className}>{image.label}</span>}
+            {result.ok && <span className={reasoning.supported ? 'ok' : ''}>深度思考：{reasoning.label}</span>}
+            {error && <small>{error}</small>}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

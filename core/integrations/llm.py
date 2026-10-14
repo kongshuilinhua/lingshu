@@ -244,11 +244,14 @@ class OpenAICompatibleProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
+        public_only = bool((runtime_config or {}).get("untrusted_base_url"))
         try:
-            if (runtime_config or {}).get("untrusted_base_url"):
-                data = self._post_json(url, payload, api_key, public_only=True)
-            else:
-                data = self._post_json(url, payload, api_key)
+            try:
+                data = self._post_json(url, payload, api_key, public_only=public_only)
+            except RuntimeError as exc:
+                if not self._drop_rejected_enable_thinking(payload, exc):
+                    raise
+                data = self._post_json(url, payload, api_key, public_only=public_only)
         except Exception:
             breaker.record_failure()
             raise
@@ -340,11 +343,18 @@ class OpenAICompatibleProvider:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
         # 🎯 编排流转：有工具绑定时，实际上由工作流 runtime 模块使用非流式 chat() 做决策，流式仅在最后的最终回答生成阶段触发
+        public_only = bool((runtime_config or {}).get("untrusted_base_url"))
         try:
-            if (runtime_config or {}).get("untrusted_base_url"):
-                yield from self._post_json_stream(url, payload, api_key, public_only=True)
-            else:
-                yield from self._post_json_stream(url, payload, api_key)
+            emitted = False
+            try:
+                for frame in self._post_json_stream(url, payload, api_key, public_only=public_only):
+                    emitted = True
+                    yield frame
+            except RuntimeError as exc:
+                # 只有尚未产出任何帧（连接阶段即被拒）才可安全重试
+                if emitted or not self._drop_rejected_enable_thinking(payload, exc):
+                    raise
+                yield from self._post_json_stream(url, payload, api_key, public_only=public_only)
         except Exception:
             breaker.record_failure()
             raise
@@ -684,6 +694,19 @@ class OpenAICompatibleProvider:
             # 🛡️ DashScope 协议约束：enable_thinking=true 仅流式调用支持，
             #    非流式请求强制关闭，避免同步路径（run/工具决策等）开思考时直接 400。
             payload["enable_thinking"] = bool(thinking) and bool(payload.get("stream"))
+
+    @staticmethod
+    def _drop_rejected_enable_thinking(payload: dict, exc: Exception) -> bool:
+        """端点明确拒绝 enable_thinking（如硅基流动的 Qwen3-VL）时去掉该参数，返回是否应重试。
+
+        enable_thinking 按模型名含 qwen3 下发，但并非所有 Qwen3 系部署都接受它；
+        按 400 错误文本兜底比维护「哪些网关/模型支持」的名单更可靠。
+        """
+        text = str(exc)
+        if "enable_thinking" not in payload or "HTTP 400" not in text or "enable_thinking" not in text:
+            return False
+        payload.pop("enable_thinking", None)
+        return True
 
     def _supports_enable_thinking(self, model: str, settings, runtime_config: dict | None) -> bool:
         """Return whether the provider/model is known to accept enable_thinking."""
