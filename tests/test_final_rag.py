@@ -215,6 +215,78 @@ def test_recover_interrupted_ingestion_resets_stuck_indexing():
     assert empty_db.committed is False
 
 
+def test_rerank_trims_tail_far_below_top_hit():
+    """真实环境（一份 2 块的手册）：答案块恒排第 1，另一块 rerank 恒为 0.000~0.007，
+    却因 top_k=4 每次都被带进引用。按「相对第一名」裁掉远低于第一名的尾部；
+    第一名本身分数很低时（退款 0.009）也必须保留，不能用固定阈值。"""
+    from core.services.rag import _trim_rerank_tail
+
+    def hits(*scores):
+        return [{"score": score, "retrieval_channel": "rerank", "id": index} for index, score in enumerate(scores)]
+
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.194, 0.0))] == [0]
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.009, 0.0))] == [0]
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.131, 0.007))] == [0]
+    # 多个都相关时不误伤
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.80, 0.55, 0.30, 0.02))] == [0, 1, 2]
+    # 比较类问题：另一半答案 rerank 只有第一名的 8%（实测「拿铁和美式哪个贵」0.131 vs 0.011），必须保留
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.131, 0.011, 0.0))] == [0, 1]
+    # 全部接近 0 时只留第一名，交给模型判断
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.0, 0.0, 0.0))] == [0]
+
+
+def test_rerank_trim_skips_hits_that_were_not_reranked():
+    """rerank 只覆盖 rerank_top_n 条，其余以原序挂在队尾，没有可比分数，不参与相对裁剪。"""
+    from core.services.rag import _trim_rerank_tail
+
+    hits = [{"score": 0.9, "retrieval_channel": "rerank"}, {"score": 0.016, "retrieval_channel": "rrf:dense"}]
+    assert _trim_rerank_tail(hits) == hits[:1]
+
+
+def test_retrieve_trims_irrelevant_tail_when_rerank_applied(client, auth_headers, monkeypatch):
+    from core.db.session import SessionLocal
+    from core.integrations.llm import OpenAICompatibleProvider
+    from core.services import rag
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Trim KB"}).json()["knowledge_base"]["id"]
+    for text in ["营业时间为上午 9 点 30 分到晚上 8 点 45 分。", "会员分为青铜、白银、黄金三级。"]:
+        assert client.post(f"/api/knowledge-bases/{kb_id}/documents", headers=auth_headers, json={"title": text[:4], "text": text}).status_code == 200
+
+    def fake_rerank(self, query, documents, *, top_n, model):
+        # 与真实 rerank 服务一致：按 relevance_score 降序返回
+        ranked = [{"index": i, "relevance_score": 0.2 if "营业" in doc else 0.0} for i, doc in enumerate(documents)]
+        return sorted(ranked, key=lambda item: item["relevance_score"], reverse=True)
+
+    monkeypatch.setattr(OpenAICompatibleProvider, "rerank", fake_rerank)
+    db = SessionLocal()
+    try:
+        workspace_id = db.query(Agent.workspace_id).first()[0]
+        result = rag.retrieve(db, workspace_id=workspace_id, knowledge_base_ids=[kb_id], query="几点开门",
+                              config={"cache_enabled": False, "rerank_enabled": True})
+    finally:
+        db.close()
+
+    assert [s["snippet"] for s in result.sources] == ["营业时间为上午 9 点 30 分到晚上 8 点 45 分。"]
+
+
+def test_rag_cache_key_changes_with_retrieval_logic_version(client, auth_headers, monkeypatch):
+    """检索逻辑改了（如新增 rerank 裁尾），旧缓存不能继续命中——真实环境里曾因此
+    在重启后仍返回裁尾前的 2 个片段。缓存键必须带检索逻辑版本号。"""
+    from core.db.session import SessionLocal
+    from core.services import rag
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Cache Version KB"}).json()["knowledge_base"]["id"]
+    db = SessionLocal()
+    try:
+        before = rag._cache_key(db, workspace_id=1, knowledge_base_ids=[kb_id], query="几点开门", config={})
+        monkeypatch.setattr(rag, "RAG_CACHE_LOGIC_VERSION", rag.RAG_CACHE_LOGIC_VERSION + 1)
+        after = rag._cache_key(db, workspace_id=1, knowledge_base_ids=[kb_id], query="几点开门", config={})
+    finally:
+        db.close()
+
+    assert before != after
+
+
 def test_retrieve_judges_evidence_on_original_query_not_bm25_translation(client, auth_headers, monkeypatch):
     """真实环境回归：跨语言翻译只为 BM25 检索英文文档服务。证据判定若拿翻译后的英文去和中文
     片段比词面，「生日有什么优惠」这类换说法问题的词面证据永远命中不到，就会被误拒。"""

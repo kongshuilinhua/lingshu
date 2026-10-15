@@ -144,6 +144,8 @@ def retrieve(
 
     # 5. 组装输出与有效证据评估
     top_k = int(config.get("top_k") or settings.rag_top_k)
+    if rerank_applied:
+        final_hits = _trim_rerank_tail(final_hits)
     sources = [_source_payload(hit) for hit in final_hits[:top_k]]
 
     # 5.5 父块扩展（small-to-big）：child 已用于精准命中+排序，喂给 LLM 的正文换成父块全文。
@@ -383,6 +385,29 @@ def _rerank(provider: OpenAICompatibleProvider, *, query: str, hits: list[dict],
     # 🛡️ 兜底防护：如果有部分未被重排的落选片段，按原序置于队尾，防止在切片时彻底丢失备用上下文
     output.extend(hit for index, hit in enumerate(hits) if index not in used)
     return output
+
+
+# 检索逻辑版本：进入 RAG 结果缓存键。改动检索/融合/重排/裁剪/证据判定等会影响结果的逻辑时 +1，
+# 否则 Redis 里的旧结果会在 TTL 内继续被命中（曾出现重启后仍返回裁尾前的结果）。
+RAG_CACHE_LOGIC_VERSION = 2
+
+# rerank 后按「相对第一名」裁掉尾部，低于下限的片段视为不相关。
+# 不用固定阈值——真实环境里答案块的绝对分数可能很低（「退款怎么办」只有 0.009），但它恒排第一。
+# 取值依据（bge-reranker-v2-m3 实测）：无关块多在 0.000~0.008；而比较类问题的另一半答案
+# 可能只有第一名的 8%（「拿铁和美式哪个贵」0.131 vs 0.011），所以相对比例取 5%、绝对下限取 0.01。
+# 这是少量样本上的经验值，正式取值待评测集标定。
+_RERANK_RELATIVE_FLOOR = 0.05
+_RERANK_ABSOLUTE_FLOOR = 0.01
+
+
+def _trim_rerank_tail(hits: list[dict]) -> list[dict]:
+    """保留第一名，以及 rerank 分数不低于 max(第一名 × 5%, 0.01) 的片段；未经 rerank 的队尾片段丢弃。"""
+    reranked = [hit for hit in hits if hit.get("retrieval_channel") == "rerank"]
+    if not reranked:
+        return hits
+    top_score = float(reranked[0].get("score") or 0.0)
+    floor = max(top_score * _RERANK_RELATIVE_FLOOR, _RERANK_ABSOLUTE_FLOOR)
+    return [reranked[0], *(hit for hit in reranked[1:] if float(hit.get("score") or 0.0) >= floor)]
 
 
 def _source_payload(hit: dict) -> dict:
@@ -635,5 +660,5 @@ def _cache_key(db: Session, *, workspace_id: int, knowledge_base_ids: list[int],
         "version": version,
         "config": config,
     }
-    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(json.dumps({**payload, "logic": RAG_CACHE_LOGIC_VERSION}, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     return f"rag:{digest}"
