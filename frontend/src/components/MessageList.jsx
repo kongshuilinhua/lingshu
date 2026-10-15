@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { ThumbsUp, ThumbsDown, FileText, Search, ImagePlus, Brain, ChevronDown } from 'lucide-react';
+import { ThumbsUp, ThumbsDown, FileText, Search, ImagePlus, Brain, ChevronDown, ExternalLink, X } from 'lucide-react';
 import { AgentAvatar } from './AgentAvatar.jsx';
 
 export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {}, avatar = 'AI' }) {
@@ -136,10 +137,11 @@ export function CodeBlock({ language, code }) {
 }
 
 export function MessageSources({ sources }) {
+  const [activeKey, setActiveKey] = useState(null);
   // 根据文档ID或标题进行去重，避免对同一文档的多个分片重复渲染完全相同的卡片
   const uniqueSources = [];
   const seenDocs = new Set();
-  
+
   for (const src of sources) {
     const docKey = src.document_id || src.title || src.source_id;
     if (docKey) {
@@ -154,33 +156,122 @@ export function MessageSources({ sources }) {
 
   const visible = uniqueSources.slice(0, 4);
   const hiddenCount = Math.max(0, uniqueSources.length - visible.length);
-  
+
   return (
     <details className="message-sources">
       <summary>引用来源 <span>{uniqueSources.length}</span></summary>
       <div className="message-source-list">
-        {visible.map((source) => <SourceChip key={source.chunk_id || `${source.title}-${source.snippet}`} source={source} />)}
-        {hiddenCount > 0 && <span className="source-more">还有 {hiddenCount} 个</span>}
+        {visible.map((source) => (
+          <SourceChip key={sourceKey(source)} source={source} onSelect={() => setActiveKey(sourceKey(source))} />
+        ))}
+        {hiddenCount > 0 && (
+          <button type="button" className="source-more" onClick={() => setActiveKey(sourceKey(uniqueSources[visible.length]))}>
+            还有 {hiddenCount} 个
+          </button>
+        )}
       </div>
+      {activeKey && <SourcePanel sources={sources} activeKey={activeKey} onClose={() => setActiveKey(null)} />}
     </details>
   );
 }
 
-export function SourceChip({ source }) {
-  const meta = [
+function sourceKey(source) {
+  return source.chunk_id || source.url || `${source.title}-${source.snippet}`;
+}
+
+function sourceMeta(source) {
+  return [
     source.page ? `p.${source.page}` : '',
     source.section || '',
     source.retrieval_channel || '',
     Number.isFinite(Number(source.score)) ? Number(source.score).toFixed(2) : '',
   ].filter(Boolean).join(' · ');
-  const content = (
-    <>
+}
+
+export function SourceChip({ source, onSelect }) {
+  const meta = sourceMeta(source);
+  return (
+    <button type="button" title={source.snippet || source.title} onClick={onSelect}>
       {source.url ? <Search size={14} /> : <FileText size={14} />}
       <strong>{source.title || source.source_id || 'source'}</strong>
       {meta && <small>{meta}</small>}
-    </>
+    </button>
   );
-  return source.url
-    ? <a className="source-link" title={source.snippet || source.title} href={source.url} target="_blank" rel="noreferrer">{content}</a>
-    : <span title={source.snippet || source.title}>{content}</span>;
+}
+
+// 右侧引用面板：列出本轮回答用到的全部片段（卡片按文档合并过，这里逐条展开），
+// 知识库片段显示命中原文，网页结果显示摘要并可跳转原网页。
+function SourcePanel({ sources, activeKey, onClose }) {
+  const activeRef = useRef(null);
+  const knowledge = sources.filter((source) => !source.url);
+  const web = sources.filter((source) => source.url);
+
+  useEffect(() => {
+    const onKeyDown = (event) => { if (event.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKeyDown);
+    // 面板打开时给页面让出右侧宽度，避免盖住正在看的回答
+    document.body.classList.add('source-panel-open');
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.classList.remove('source-panel-open');
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    activeRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeKey]);
+
+  const renderItem = (source, index) => {
+    const key = sourceKey(source);
+    const active = key === activeKey;
+    const meta = sourceMeta(source);
+    return (
+      <li key={key} ref={active ? activeRef : null} className={active ? 'active' : ''}>
+        <div className="source-panel-item-head">
+          <span className="source-panel-index">{index + 1}</span>
+          {source.url ? <Search size={14} /> : <FileText size={14} />}
+          <strong>{source.title || source.source_id || 'source'}</strong>
+        </div>
+        {meta && <small>{meta}</small>}
+        {source.snippet && <p>{source.snippet}</p>}
+        {source.url && (
+          <a href={source.url} target="_blank" rel="noreferrer">
+            {safeHost(source.url)} <ExternalLink size={12} />
+          </a>
+        )}
+      </li>
+    );
+  };
+
+  return createPortal(
+    <aside className="source-panel" role="complementary" aria-label="引用来源">
+      <header>
+        <strong>引用来源</strong>
+        <button type="button" aria-label="关闭引用来源" onClick={onClose}><X size={16} /></button>
+      </header>
+      <div className="source-panel-body">
+        {knowledge.length > 0 && (
+          <section>
+            <h4>知识库 · {knowledge.length}</h4>
+            <ol>{knowledge.map(renderItem)}</ol>
+          </section>
+        )}
+        {web.length > 0 && (
+          <section>
+            <h4>网页 · {web.length}</h4>
+            <ol>{web.map(renderItem)}</ol>
+          </section>
+        )}
+      </div>
+    </aside>,
+    document.body,
+  );
+}
+
+function safeHost(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
