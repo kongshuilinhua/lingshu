@@ -106,6 +106,7 @@ export function KnowledgeHome({
         <KnowledgeDashboard
           knowledgeBases={knowledgeBases}
           deleteKnowledgeBase={deleteKnowledgeBase}
+          updateKnowledgeBase={updateKnowledgeBase}
           openCreate={openCreate}
           onSelectKb={handleSelectKb}
           notify={notify}
@@ -187,6 +188,7 @@ export function KnowledgeHome({
 function KnowledgeDashboard({
   knowledgeBases,
   deleteKnowledgeBase,
+  updateKnowledgeBase,
   openCreate,
   onSelectKb,
   notify,
@@ -221,7 +223,6 @@ function KnowledgeDashboard({
           <thead>
             <tr>
               <th>信息</th>
-              <th>类型</th>
               <th>更新时间</th>
               <th>启用状态</th>
               <th>操作</th>
@@ -229,7 +230,10 @@ function KnowledgeDashboard({
           </thead>
           <tbody>
             {knowledgeBases.map((kb) => {
-              const isEnabled = kbEnabled[kb.id] !== false;
+              const isEnabled = kbEnabled[kb.id] ?? (kb.enabled !== false);
+              // 🛡️ 缺失时显示占位符「—」，绝不显示伪造日期。
+              // 旧实现 fallback 到硬编码 '2026-05-30'，让用户以为数据正常，
+              // 实际是后端从不返回该字段（KnowledgeBase 模型当时没有 updated_at）。
               const formattedDate = kb.updated_at
                 ? new Date(kb.updated_at).toLocaleString('zh-CN', {
                     year: 'numeric',
@@ -238,7 +242,7 @@ function KnowledgeDashboard({
                     hour: '2-digit',
                     minute: '2-digit',
                   })
-                : '2026-05-30';
+                : '—';
 
               return (
                 <tr key={kb.id} className="kb-row-interactive" onClick={() => onSelectKb(kb.id)}>
@@ -252,19 +256,24 @@ function KnowledgeDashboard({
                       <span className="kb-doc-count-pill">{kb.document_count || 0} 个文档</span>
                     </div>
                   </td>
-                  <td>
-                    <span className="kb-type-badge">文档库</span>
-                  </td>
                   <td className="kb-time-cell">{formattedDate}</td>
                   <td>
                     <label className="apple-switch" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         checked={isEnabled}
-                        onChange={() => {
+                        onChange={async () => {
                           const nextVal = !isEnabled;
                           setKbEnabled((prev) => ({ ...prev, [kb.id]: nextVal }));
-                          notify?.(nextVal ? `「${kb.name}」已启用` : `「${kb.name}」已停用`);
+                          try {
+                            // updateKnowledgeBase 内部会 await bootstrap()，列表自动刷新
+                            await updateKnowledgeBase?.(kb.id, { enabled: nextVal });
+                            notify?.(nextVal ? `「${kb.name}」已启用` : `「${kb.name}」已停用`);
+                          } catch (err) {
+                            // notify 只接受一个参数，错误信息必须并入文案
+                            setKbEnabled((prev) => ({ ...prev, [kb.id]: !nextVal }));
+                            notify?.(`「${kb.name}」状态更新失败：${errorMessage?.(err) || err?.message || '未知错误'}`);
+                          }
                         }}
                       />
                       <span className="slider"></span>
@@ -284,15 +293,6 @@ function KnowledgeDashboard({
                       </button>
                       {openMenuKbId === kb.id && (
                         <div className="bubble-dropdown-menu" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setOpenMenuKbId(null);
-                              notify?.("复制成功！已复制到其他空间。");
-                            }}
-                          >
-                            复制到其他空间
-                          </button>
                           <button
                             type="button"
                             className="danger"

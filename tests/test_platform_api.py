@@ -172,6 +172,29 @@ def test_health_exposes_model_status(client, owner_token):
     assert response.json()["dependencies"]["vector_store"]["active_backend"] == "memory"
 
 
+def test_health_treats_configured_embedding_as_available_when_probe_disabled(client, monkeypatch):
+    """HEALTH_MODEL_PROBE_ENABLED=false 时不能把「没探测」当成「探测失败」。
+
+    旧实现要求 embedding 探测成功才算可用，关掉探测后 embedding 永远不可用，
+    前端据此把知识库按钮置灰、悄悄发 rag_enabled=false，知识库整体失效。
+    """
+    from api import main
+
+    monkeypatch.setattr(main.settings, "mock_llm", False)
+    monkeypatch.setattr(main.settings, "health_model_probe_enabled", False)
+    monkeypatch.setattr(main.settings, "openai_embedding_model", "BAAI/bge-m3")
+    monkeypatch.setattr(main.settings, "embedding_api_key", "sk-health-embedding-test")
+
+    body = client.get("/api/health").json()
+    embedding = body["dependencies"]["embedding"]
+
+    assert embedding["probe"]["enabled"] is False
+    assert embedding["available"] is True
+    assert embedding["reason"] is None
+    assert "Embedding gateway probe failed." not in body["issues"]
+    assert "Chat model gateway probe failed." not in body["issues"]
+
+
 def test_dashscope_key_alias_uses_dashscope_compatible_base(monkeypatch):
     from core.config import get_settings
     from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OpenAICompatibleProvider
@@ -731,7 +754,12 @@ def test_system_model_runtime_ignores_default_private_model(client, auth_headers
     assert default_private["chat_model"] not in published_chat.text
 
 
-def test_rag_no_evidence_still_uses_model_answer(client, auth_headers):
+def test_rag_no_evidence_refuses_instead_of_guessing(client, auth_headers):
+    """无证据时必须拒答，且不得调用模型生成（防幻觉）。
+
+    这是本仓此前最严重的语义反转：refuse_when_no_evidence 配置项默认 True，
+    全链路却只计算不使用；而旧测试反向断言拒答文案不能出现，把错误行为锁死。
+    """
     kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "No Evidence KB"})
     assert kb.status_code == 200
     agent = client.post(
@@ -754,9 +782,131 @@ def test_rag_no_evidence_still_uses_model_answer(client, auth_headers):
     assert response.status_code == 200
     assert "event: rag_status" in response.text
     assert '"no_evidence": true' in response.text
+    assert '"rag_refusal": true' in response.text
     assert "event: token" in response.text
     assert "event: done" in response.text
+    # 拒答文案必须出现（与旧断言方向相反）
+    assert "No reliable evidence was found" in response.text
+
+
+def test_rag_small_talk_is_answered_not_refused(client, auth_headers):
+    """纯寒暄（你好/谢谢）无证据时不拒答：交给模型正常回应，但不注入任何知识库片段。"""
+    kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Small Talk KB"})
+    agent = client.post(
+        "/api/agents",
+        headers=auth_headers,
+        json={
+            "name": "Small Talk Agent",
+            "knowledge_base_ids": [kb.json()["knowledge_base"]["id"]],
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+        },
+    )
+
+    response = client.post(
+        f"/api/agents/{agent.json()['agent']['id']}/chat/stream",
+        headers=auth_headers,
+        json={"message": "你好！", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert '"reason": "small_talk"' in response.text
+    assert '"rag_refusal": true' not in response.text
     assert "No reliable evidence was found" not in response.text
+    assert "event: done" in response.text
+
+
+def test_agent_without_knowledge_base_is_not_refused(client, auth_headers):
+    """未绑定知识库的 agent 不得被无证据拒答（回归护栏）。
+
+    背景：`retrieve()` 的「未绑定知识库」提前返回路径硬编码 `no_evidence: True`
+    （core/services/rag.py，reason=no_knowledge_base）。接通拒答后若只看
+    `no_evidence`，所有纯聊天 agent 会被无差别拒答。设计意图（设计文档 §5.1）
+    是「检索执行了但没找到相关证据」才拒答，不是「没配知识库」。
+    故拒答条件必须同时要求本轮确有知识库参与检索（knowledge_base_ids 非空）。
+    """
+    agent = client.post("/api/agents", headers=auth_headers, json={"name": "Plain Chat Agent"})
+    assert agent.status_code == 200
+
+    response = client.post(
+        f"/api/agents/{agent.json()['agent']['id']}/chat/stream",
+        headers=auth_headers,
+        json={"message": "what can you do", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert "event: rag_status" in response.text
+    # 不得拒答：既不出现拒答事件，也不出现拒答文案。
+    assert '"rag_refusal": true' not in response.text
+    assert "No reliable evidence was found" not in response.text
+    # 正常走模型生成（而非被拒答短路），因此有 token 与 done。
+    assert "event: token" in response.text
+    assert "event: done" in response.text
+
+
+def test_rag_refusal_short_circuits_tool_node(client, auth_headers):
+    """「知识库 + 工具」组合下，拒答不得被 Tool 节点的模型回答覆盖（回归护栏）。
+
+    背景：默认节点序是 start → knowledge → tool → llm → answer。Knowledge 节点
+    写入拒答草稿后，Tool 节点会在「模型返回纯文本、无 tool_calls」与「多轮工具轮次
+    用尽」两处返回 draft，覆盖掉拒答草稿——于是用户看到的是正常作答，拒答契约
+    对带工具的 agent 失效。sources 虽已清空，拒答这半却不成立。
+    纯聊天 agent 走「无可用工具」早退，其返回 dict 不含 draft，掩盖了这个洞；
+    本用例是当前唯一覆盖「KB + 工具」组合的方向。
+    """
+    from core.services import web_search
+
+    def fake_search(query, *, top_k=None, timeout_seconds=None):
+        return {
+            "query": query,
+            "provider": "fake",
+            "latency_ms": 7,
+            "items": [{"title": "T", "url": "https://example.com/x", "snippet": "S."}],
+        }
+
+    web_search.search_web = fake_search
+
+    # 空知识库（无文档）：knowledge_base_ids 非空 → 检索确实执行 → no_evidence 为真。
+    kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Refusal With Tool KB"})
+    assert kb.status_code == 200
+    tool = client.post(
+        "/api/tools",
+        headers=auth_headers,
+        json={
+            "type": "builtin_search",
+            "name": "refusal_search",
+            "label": "Refusal Search",
+            "description": "Search test",
+            "search_options": {"top_k": 2},
+        },
+    )
+    assert tool.status_code == 200
+    tool_id = tool.json()["tool"]["id"]
+
+    agent = client.post(
+        "/api/agents",
+        headers=auth_headers,
+        json={
+            "name": "KB Plus Tool Agent",
+            "knowledge_base_ids": [kb.json()["knowledge_base"]["id"]],
+            "tool_ids": [tool_id],
+            "tool_policy": {"web_search_enabled": True},
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+        },
+    )
+    assert agent.status_code == 200
+
+    response = client.post(
+        f"/api/agents/{agent.json()['agent']['id']}/chat/stream",
+        headers=auth_headers,
+        json={"message": "what can you do", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert '"no_evidence": true' in response.text
+    # 拒答契约成立：文案出现，且 Tool 节点确实让行（未产生任何工具调用）。
+    assert "No reliable evidence was found" in response.text
+    assert "event: tool_call" not in response.text
+    assert "event: done" in response.text
 
 
 def test_user_model_provider_test_is_sanitized(client, auth_headers):
@@ -2377,7 +2527,11 @@ def test_text_only_chat_model_can_use_backend_default_rag(client, auth_headers):
     response = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=auth_headers,
-        json={"message": "should not retrieve", "mode": "draft", "rag_enabled": True},
+        # 🛡️ 查询必须与文档内容有词面交集，才能通过 _has_evidence。
+        # 原来这里是 "should not retrieve"（与文档无任何共同词元）—— 该查询按新语义应被判为「无证据」并拒答，
+        # 它此前能断言到 sources 事件，只是因为 refuse_when_no_evidence 被 None 覆盖成了 False（已修）。
+        # 本测试的意图是「纯文本聊天模型仍能跑后端默认 RAG」，故用文档里的标识符作查询。
+        json={"message": "text-only-rag-source-token", "mode": "draft", "rag_enabled": True},
     )
 
     assert response.status_code == 200
@@ -2683,7 +2837,11 @@ def test_published_chat_uses_snapshot_knowledge_bindings_after_draft_changes(cli
     published = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=auth_headers,
-        json={"message": "which kb", "mode": "published"},
+        # 🛡️ 查询必须与快照 KB 的文档有词面交集，才能通过 _has_evidence。
+        # 原来这里是 "which kb"（与两份文档都无共同词元）—— 按新语义应判为「无证据」并拒答，
+        # 它此前能断言到 sources 内容，只是因为 refuse_when_no_evidence 被 None 覆盖成了 False（已修）。
+        # 本测试的意图是「发布快照用快照的 KB 绑定」，故用快照 KB 里的标识符作查询。
+        json={"message": "published-source-token", "mode": "published"},
     )
     assert published.status_code == 200
     assert "published-source-token" in published.text
@@ -2737,3 +2895,85 @@ def test_session_memory_async_compression(client, auth_headers):
         assert data["turns"][0]["user"] == "hello memory"
     finally:
         db.close()
+
+
+def test_knowledge_base_enabled_persists_and_filters_retrieval(client, auth_headers):
+    """KB 启用状态必须落库，且停用后不参与检索。
+
+    旧实现该开关是前端纯 useState（KnowledgeHome.jsx:195），刷新即还原，
+    KnowledgeBase 模型连 enabled 字段都没有。
+    """
+    created = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Toggle KB"})
+    assert created.status_code == 200
+    kb_id = created.json()["knowledge_base"]["id"]
+    # 新建默认启用
+    assert created.json()["knowledge_base"]["enabled"] is True
+    assert created.json()["knowledge_base"]["updated_at"] is not None
+
+    # 停用
+    patched = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"enabled": False}
+    )
+    assert patched.status_code == 200
+    assert patched.json()["knowledge_base"]["enabled"] is False
+
+    # 重新读取，确认已落库（不是内存态）
+    listed = client.get("/api/knowledge-bases", headers=auth_headers)
+    assert listed.status_code == 200
+    target = [kb for kb in listed.json()["items"] if kb["id"] == kb_id]
+    assert target and target[0]["enabled"] is False
+
+
+def test_knowledge_base_patch_preserves_unset_fields_and_bounds_name(client, auth_headers):
+    """PATCH 是局部更新：未提供的字段必须保持原值，且 name 保留长度/非空约束。
+
+    覆盖既有前端调用路径（main.jsx / resources.js 只传 {name, description}）
+    以及 Task 3 新增的 {enabled} 单字段调用。
+    """
+    created = client.post(
+        "/api/knowledge-bases",
+        headers=auth_headers,
+        json={"name": "Original KB", "description": "原生描述"},
+    )
+    assert created.status_code == 200
+    kb_id = created.json()["knowledge_base"]["id"]
+    assert created.json()["knowledge_base"]["enabled"] is True
+
+    # ① 只传 {name, description}（既有前端路径）→ enabled 必须保持原值 True
+    renamed = client.patch(
+        f"/api/knowledge-bases/{kb_id}",
+        headers=auth_headers,
+        json={"name": "Renamed KB", "description": "改后描述"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["knowledge_base"]["name"] == "Renamed KB"
+    assert renamed.json()["knowledge_base"]["description"] == "改后描述"
+    assert renamed.json()["knowledge_base"]["enabled"] is True
+
+    # ② 只传 {enabled} → description/name 不能被清空
+    disabled = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"enabled": False}
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["knowledge_base"]["enabled"] is False
+    assert disabled.json()["knowledge_base"]["name"] == "Renamed KB"
+    assert disabled.json()["knowledge_base"]["description"] == "改后描述"
+
+    # ③ name 长度上限与 Create 侧一致（列类型 String(160)）
+    too_long = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"name": "x" * 161}
+    )
+    assert too_long.status_code == 422
+
+    # ④ 纯空白 name 仍被拒（min_length=1 拦空串，函数内 strip 校验拦纯空格）
+    blank = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"name": "   "}
+    )
+    assert blank.status_code == 422
+
+    # ⑤ 写入的 name 应已 strip，不留首尾空白
+    padded = client.patch(
+        f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"name": "  Trimmed KB  "}
+    )
+    assert padded.status_code == 200
+    assert padded.json()["knowledge_base"]["name"] == "Trimmed KB"

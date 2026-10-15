@@ -211,17 +211,23 @@ async def health():
         issues.append("Database initialization failed during startup.")
     redis_status = redis_store.status()
     vector_status = vector_store.status()
+    # 关闭主动探测（HEALTH_MODEL_PROBE_ENABLED=false）时，「没探测」不等于「探测失败」：
+    # 配置齐全即视为可用。否则 embedding 永远不可用，前端会据此悄悄关掉知识库。
+    embedding_available = bool(
+        embedding_model and embedding_api_key and not embedding_mock
+        and (embedding_probe["ok"] or not embedding_probe["enabled"])
+    )
     if model_mock:
         issues.append("Chat model is running in mock mode because LINGSHU_MOCK_LLM is true.")
     elif not chat_api_key:
         issues.append("Chat model API key is not configured.")
-    elif not model_probe["ok"]:
+    elif model_probe["enabled"] and not model_probe["ok"]:
         issues.append("Chat model gateway probe failed.")
     if embedding_mock:
         issues.append("Embedding is running in mock mode because LINGSHU_MOCK_LLM is true.")
     elif not embedding_model or not embedding_api_key:
         issues.append("Embedding is unavailable for real RAG because OPENAI_EMBEDDING_MODEL and a provider API key are required.")
-    elif not embedding_probe["ok"]:
+    elif embedding_probe["enabled"] and not embedding_probe["ok"]:
         issues.append("Embedding gateway probe failed.")
     if redis_status["required"] and not redis_status["available"]:
         issues.append("Redis is configured for RAG cache/job state but is not reachable.")
@@ -251,8 +257,8 @@ async def health():
                 "base_url": embedding_base,
                 "mock": embedding_mock,
                 "configured": bool(embedding_model and embedding_api_key),
-                "available": bool(embedding_model and embedding_api_key and not embedding_mock and embedding_probe.get("ok", False)),
-                "reason": None if bool(embedding_model and embedding_api_key and not embedding_mock and embedding_probe.get("ok", False)) else _runtime_unavailable_reason(embedding_probe, vector_status),
+                "available": embedding_available,
+                "reason": None if embedding_available else _runtime_unavailable_reason(embedding_probe, vector_status),
                 "probe": embedding_probe,
             },
             "web_search": {

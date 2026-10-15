@@ -362,6 +362,45 @@ def _run_compat_migrations() -> None:
                         "ON prompt_templates (workspace_id, user_id, title)"
                     )
                 )
+    if "knowledge_bases" in table_names:
+        # 🛡️ enabled 用 BOOLEAN DEFAULT true（与仓库既有 boolean 迁移写法一致），新建知识库默认启用。
+        # updated_at 用 TIMESTAMP；不用 DATETIME 是为了对齐 _VALID_DDL_TYPES 白名单
+        #（该白名单只允许 BOOLEAN/INTEGER/BIGINT/FLOAT/DOUBLE/VARCHAR/TEXT/JSON/TIMESTAMP）。
+        _ensure_columns(
+            "knowledge_bases",
+            {
+                "enabled": "BOOLEAN DEFAULT true",
+                # 🛡️ 三态迁移，先可空后收紧为 NOT NULL —— 与模型层 Mapped[datetime]（NOT NULL）对齐。
+                # 为什么不直接一句 ADD COLUMN updated_at TIMESTAMP NOT NULL：
+                # 在 MySQL 8.0 上对**已有行**的表执行该语句不会报错，却会把存量行填成
+                # '0000-00-00 00:00:00' 隐式零值——它是非 NULL，下一句 WHERE updated_at IS NULL
+                # 的回填永远命中不到，脏零值就此固化（已在 MySQL 8.0 实测复现）。
+                # 因此按「加可空列 → 回填 created_at → 再收紧 NOT NULL」三步走：
+                # 不依赖服务端隐式默认值，且收紧前所有行都已非 NULL，MODIFY 必定成功。
+                "updated_at": "TIMESTAMP NULL",
+            },
+        )
+        # 存量行回填：老库新加的 updated_at 为 NULL，用 created_at 兜底，避免前端时间列空白。
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE knowledge_bases SET updated_at = created_at WHERE updated_at IS NULL")
+            )
+        # 回填后收紧可空性，对齐模型层（Mapped[datetime] → NOT NULL）。
+        # 新建库走 Base.metadata.create_all 本就是 NOT NULL，两条建库路径自此产物一致。
+        updated_at_column = next(
+            (column for column in inspect(engine).get_columns("knowledge_bases") if column["name"] == "updated_at"),
+            None,
+        )
+        if updated_at_column is not None and updated_at_column["nullable"]:
+            if engine.dialect.name == "postgresql":
+                not_null_ddl = "ALTER TABLE knowledge_bases ALTER COLUMN updated_at SET NOT NULL"
+            elif engine.dialect.name == "mysql":
+                not_null_ddl = "ALTER TABLE knowledge_bases MODIFY COLUMN updated_at TIMESTAMP NOT NULL"
+            else:
+                not_null_ddl = None
+            if not_null_ddl:
+                with engine.begin() as connection:
+                    connection.execute(text(not_null_ddl))
     if "knowledge_documents" in table_names:
         if engine.dialect.name == "postgresql":
             with engine.begin() as connection:

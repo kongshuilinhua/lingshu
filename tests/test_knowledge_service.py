@@ -161,3 +161,59 @@ def test_prepare_document_payload_text_source_empty_still_fails():
         # 文本源空内容报错不包含"扫描件"
         assert "扫描件" not in str(exc)
 
+
+def test_custom_segment_mode_honours_user_delimiter():
+    """重切分的「分隔标识符」必须真实生效。
+
+    旧实现：前端输入框把 delimiter 传到后端（ResegmentRequest.delimiter），
+    但 chunk_document 从不读取 cfg["delimiter"]，用户填了等于没填。
+
+    ⚠️ 参数说明（brief 原参数不可用）：brief 原用 13 字符文本 + max_chunk_len=100，
+    但 chunk_document 的 child 预算 = int(max_chunk_len * 0.35) = 35 字符，
+    远大于文本本身，RecursiveCharacterTextSplitter 会把切出的片段合并回 1 块；
+    且实测在能切出 ≥3 段的尺寸区间，默认分隔符同样能切出 ≥3 段，
+    故 brief 原参数无论是否读取 delimiter 都得到 1 段，断言无判别力。
+    这里改用 36 字符文本 + max_chunk_len=60（child 预算 21 字符）：
+    文本无任何默认分隔符字符（换行/句号等），默认分隔符只能切出 2 段，
+    只有把用户分隔符当首选切点才能切出 3 段及以上。
+    """
+    from core.services.knowledge import chunk_document
+
+    text = "ABCDEFGHIJ|||KLMNOPQRST|||UVWXYZABCD"  # 36 字符，无默认分隔符字符
+    children, _ = chunk_document(
+        text,
+        content_type="text/plain",
+        kb_id=1,
+        document_id=1,
+        segment_config={
+            "segment_mode": "custom",
+            "delimiter": "|||",
+            "max_chunk_len": 60,
+            "overlap_pct": 0,
+        },
+    )
+
+    joined = "".join(child["text"] for child in children)
+    assert "ABCDEFGHIJ" in joined
+    assert "KLMNOPQRST" in joined
+    assert "UVWXYZABCD" in joined
+    # child 预算 21 字符，按 "|||" 切才有 3 段；默认分隔符只能切出 2 段。
+    assert len(children) >= 3
+
+
+def test_custom_delimiter_is_not_left_in_chunk_text():
+    """用户分隔标识符只是切点标记，不应残留在下一块开头（真实环境曾出现「###第二段…」）。"""
+    from core.services.knowledge import chunk_document
+
+    children, parents = chunk_document(
+        "ABCDEFGHIJ|||KLMNOPQRST|||UVWXYZABCD",
+        content_type="text/plain",
+        kb_id=1,
+        document_id=1,
+        segment_config={"segment_mode": "custom", "delimiter": "|||", "max_chunk_len": 60, "overlap_pct": 0},
+    )
+
+    assert len(children) >= 3
+    assert all("|||" not in chunk["text"] for chunk in children)
+    # 父块可能跨越多段（内部保留分隔符），但首尾不应挂着分隔符
+    assert all(not chunk["text"].startswith("|||") and not chunk["text"].endswith("|||") for chunk in parents)

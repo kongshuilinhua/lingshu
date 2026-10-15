@@ -3242,8 +3242,7 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   gap: 7px;
   margin-top: 8px;
 }
-.message-source-list span,
-.message-source-list a,
+.message-source-list button,
 .source-more {
   display: inline-flex;
   align-items: center;
@@ -3256,6 +3255,12 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   color: #475467;
   text-decoration: none;
   overflow: hidden;
+  cursor: pointer;
+  font: inherit;
+}
+.message-source-list button:hover {
+  border-color: #c7d2fe;
+  background: #f5f7ff;
 }
 .message-source-list strong {
   max-width: 180px;
@@ -3268,6 +3273,127 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
 .source-more {
   color: #667085;
   font-size: 11px;
+}
+.source-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  width: min(380px, 100vw);
+  border-left: 1px solid #e4e7ec;
+  background: #fff;
+  box-shadow: -12px 0 32px rgba(16, 24, 40, 0.08);
+  animation: sourcePanelIn 0.18s ease-out;
+}
+@media (min-width: 1100px) {
+  body.source-panel-open .chat-app {
+    padding-right: 380px;
+  }
+}
+@keyframes sourcePanelIn {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.source-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #eef0f4;
+  font-size: 15px;
+}
+.source-panel header button {
+  display: inline-flex;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+}
+.source-panel header button:hover {
+  background: #f2f4f7;
+}
+.source-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 24px;
+}
+.source-panel h4 {
+  margin: 8px 0;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+}
+.source-panel ol {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+.source-panel li {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #e4e7ec;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.source-panel li.active {
+  border-color: #818cf8;
+  background: #f5f7ff;
+}
+.source-panel-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #344054;
+}
+.source-panel-item-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.source-panel-index {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 11px;
+  font-weight: 700;
+}
+.source-panel li small {
+  color: #98a2b3;
+  font-size: 11px;
+}
+.source-panel li p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.source-panel li a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  color: #4338ca;
+  font-size: 12px;
+  text-decoration: none;
+}
+.source-panel li a:hover {
+  text-decoration: underline;
 }
 .suggestion-strip button {
   max-width: 240px;
@@ -4223,16 +4349,6 @@ input:focus, textarea:focus, select:focus { border-color: #6b63ff; box-shadow: 0
   padding: 2px 8px;
   border-radius: 99px;
   margin-top: 4px;
-}
-
-.kb-type-badge {
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  color: #047857;
-  padding: 4px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 500;
 }
 
 .kb-time-cell {

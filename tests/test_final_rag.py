@@ -1,5 +1,10 @@
 import json
 
+import pytest
+
+from api.schemas import AgentCreateRequest, AgentRagConfig
+from core.config import get_settings
+from core.db.models import Agent
 from core.services.agents import normalize_rag
 from core.services.knowledge import split_parent_child
 from core.services.rag import _rrf
@@ -42,6 +47,35 @@ def test_normalize_rag_uses_final_config_defaults(monkeypatch):
     assert config["bm25_top_k"] == 11
     assert config["rrf_k"] == 55
     assert config["rerank_enabled"] is False
+
+
+def test_normalize_rag_empty_config_keeps_settings_defaults():
+    """空配置（键全缺）必须落到 settings 默认值，而不是被 None 归零成 False。"""
+    settings = get_settings()
+    config = normalize_rag(AgentRagConfig().model_dump())
+
+    assert config["rerank_enabled"] == settings.rag_rerank_enabled
+    assert config["cache_enabled"] == settings.rag_cache_enabled
+    assert config["refuse_when_no_evidence"] == settings.rag_refuse_when_no_evidence
+
+
+def test_normalize_rag_frontend_create_payload_keeps_refusal_on():
+    """前端建 agent 的真实载荷形状：pydantic 会把未提供的 bool 字段补成 None，拒答必须仍为开启。"""
+    payload = AgentCreateRequest(name="t").model_dump()["rag"]
+    config = normalize_rag(payload)
+
+    assert config["rerank_enabled"] is True
+    assert config["cache_enabled"] is True
+    assert config["refuse_when_no_evidence"] is True
+
+
+def test_normalize_rag_explicit_false_is_respected():
+    """显式 opt-out 必须保住：三个 bool 字段传 False 时不得回落默认值。"""
+    config = normalize_rag({"rerank_enabled": False, "cache_enabled": False, "refuse_when_no_evidence": False})
+
+    assert config["rerank_enabled"] is False
+    assert config["cache_enabled"] is False
+    assert config["refuse_when_no_evidence"] is False
 
 
 def test_parent_child_chunk_ids_are_stable():
@@ -179,6 +213,191 @@ def test_recover_interrupted_ingestion_resets_stuck_indexing():
     empty_db = _DB([])
     assert recover_interrupted_ingestion(empty_db) == 0
     assert empty_db.committed is False
+
+
+def test_rerank_trims_tail_far_below_top_hit():
+    """真实环境（一份 2 块的手册）：答案块恒排第 1，另一块 rerank 恒为 0.000~0.007，
+    却因 top_k=4 每次都被带进引用。按「相对第一名」裁掉远低于第一名的尾部；
+    第一名本身分数很低时（退款 0.009）也必须保留，不能用固定阈值。"""
+    from core.services.rag import _trim_rerank_tail
+
+    def hits(*scores):
+        return [{"score": score, "retrieval_channel": "rerank", "id": index} for index, score in enumerate(scores)]
+
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.194, 0.0))] == [0]
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.009, 0.0))] == [0]
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.131, 0.007))] == [0]
+    # 多个都相关时不误伤
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.80, 0.55, 0.30, 0.02))] == [0, 1, 2]
+    # 比较类问题：另一半答案 rerank 只有第一名的 8%（实测「拿铁和美式哪个贵」0.131 vs 0.011），必须保留
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.131, 0.011, 0.0))] == [0, 1]
+    # 全部接近 0 时只留第一名，交给模型判断
+    assert [h["id"] for h in _trim_rerank_tail(hits(0.0, 0.0, 0.0))] == [0]
+
+
+def test_rerank_trim_skips_hits_that_were_not_reranked():
+    """rerank 只覆盖 rerank_top_n 条，其余以原序挂在队尾，没有可比分数，不参与相对裁剪。"""
+    from core.services.rag import _trim_rerank_tail
+
+    hits = [{"score": 0.9, "retrieval_channel": "rerank"}, {"score": 0.016, "retrieval_channel": "rrf:dense"}]
+    assert _trim_rerank_tail(hits) == hits[:1]
+
+
+def test_retrieve_trims_irrelevant_tail_when_rerank_applied(client, auth_headers, monkeypatch):
+    from core.db.session import SessionLocal
+    from core.integrations.llm import OpenAICompatibleProvider
+    from core.services import rag
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Trim KB"}).json()["knowledge_base"]["id"]
+    for text in ["营业时间为上午 9 点 30 分到晚上 8 点 45 分。", "会员分为青铜、白银、黄金三级。"]:
+        assert client.post(f"/api/knowledge-bases/{kb_id}/documents", headers=auth_headers, json={"title": text[:4], "text": text}).status_code == 200
+
+    def fake_rerank(self, query, documents, *, top_n, model):
+        # 与真实 rerank 服务一致：按 relevance_score 降序返回
+        ranked = [{"index": i, "relevance_score": 0.2 if "营业" in doc else 0.0} for i, doc in enumerate(documents)]
+        return sorted(ranked, key=lambda item: item["relevance_score"], reverse=True)
+
+    monkeypatch.setattr(OpenAICompatibleProvider, "rerank", fake_rerank)
+    db = SessionLocal()
+    try:
+        workspace_id = db.query(Agent.workspace_id).first()[0]
+        result = rag.retrieve(db, workspace_id=workspace_id, knowledge_base_ids=[kb_id], query="几点开门",
+                              config={"cache_enabled": False, "rerank_enabled": True})
+    finally:
+        db.close()
+
+    assert [s["snippet"] for s in result.sources] == ["营业时间为上午 9 点 30 分到晚上 8 点 45 分。"]
+
+
+def test_rag_cache_key_changes_with_retrieval_logic_version(client, auth_headers, monkeypatch):
+    """检索逻辑改了（如新增 rerank 裁尾），旧缓存不能继续命中——真实环境里曾因此
+    在重启后仍返回裁尾前的 2 个片段。缓存键必须带检索逻辑版本号。"""
+    from core.db.session import SessionLocal
+    from core.services import rag
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Cache Version KB"}).json()["knowledge_base"]["id"]
+    db = SessionLocal()
+    try:
+        before = rag._cache_key(db, workspace_id=1, knowledge_base_ids=[kb_id], query="几点开门", config={})
+        monkeypatch.setattr(rag, "RAG_CACHE_LOGIC_VERSION", rag.RAG_CACHE_LOGIC_VERSION + 1)
+        after = rag._cache_key(db, workspace_id=1, knowledge_base_ids=[kb_id], query="几点开门", config={})
+    finally:
+        db.close()
+
+    assert before != after
+
+
+def test_retrieve_judges_evidence_on_original_query_not_bm25_translation(client, auth_headers, monkeypatch):
+    """真实环境回归：跨语言翻译只为 BM25 检索英文文档服务。证据判定若拿翻译后的英文去和中文
+    片段比词面，「生日有什么优惠」这类换说法问题的词面证据永远命中不到，就会被误拒。"""
+    from core.db.session import SessionLocal
+    from core.services import rag
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Translate KB"}).json()["knowledge_base"]["id"]
+    added = client.post(
+        f"/api/knowledge-bases/{kb_id}/documents",
+        headers=auth_headers,
+        json={"title": "会员手册", "text": "黄金会员每月可以领取 2 张免费饮品券，生日当天全单 7 折。"},
+    )
+    assert added.status_code == 200
+    monkeypatch.setattr(rag, "translate_query", lambda provider, query, **kwargs: "What birthday discounts are there?")
+
+    db = SessionLocal()
+    try:
+        workspace_id = db.query(Agent.workspace_id).first()[0]
+        result = rag.retrieve(
+            db, workspace_id=workspace_id, knowledge_base_ids=[kb_id], query="生日有什么优惠",
+            config={"cache_enabled": False, "rerank_enabled": False},
+        )
+    finally:
+        db.close()
+
+    assert result.sources
+    assert result.status["translate"]["applied"] is True
+    assert result.status["no_evidence"] is False
+
+
+def test_all_disabled_knowledge_bases_refuse_without_rewriting_ids(client, auth_headers):
+    """全部知识库停用：rag.retrieve() 如实报 all_knowledge_bases_disabled，且端到端拒答。
+
+    core/services/rag.py 的 all_knowledge_bases_disabled 支路此前零覆盖。该支路的
+    正确性依赖两件事同时成立：
+      1. reason/no_evidence 如实反映「有 KB 绑定但一个都没启用」；
+      2. knowledge_base_ids **保持原始非空值**——workflow 的拒答条件是
+         `status.get("no_evidence") and status.get("knowledge_base_ids")`，
+         若这里把 ids 改写成空（或直接复用剔除后的 enabled_ids），
+         停用 KB 的 agent 就会像「没配 KB」一样静默放行，拒答契约失效。
+
+    断言分两层，各查各的东西，不混：
+      - retrieve() 原始返回：查 rag.py 支路本身（reason/no_evidence/ids 未被改写）。
+        不能只查端到端事件流——workflow 会在拒答时把 reason 覆盖成
+        no_evidence_refused，那层看不到 all_knowledge_bases_disabled 这个原值。
+      - 端到端：查该 status 确实触发了拒答（用户侧可见），因为第二层依赖的
+        knowledge_base_ids 非空只有走完 workflow 才被真正消费。
+
+    注：本测试在创建 agent 时显式传 `refuse_when_no_evidence: True`，与
+    test_platform_api.py::test_rag_no_evidence_refuses_instead_of_guessing 的既有写法一致。
+
+    历史背景（避免误读）：该字段在 api/schemas.py 的 AgentRagConfig 里声明为
+    `bool | None = None`，而 normalize_rag 早先用 `data.get(k, settings.rag_xxx)` —— 键存在
+    但值为 None 时默认值不生效，bool(None) 得 False。于是「不显式传该字段」建出的 agent
+    拒答默认是关的。该缺陷已由 3eccc59 修复（引入 _bool_or：None 视为未提供、取 settings 默认；
+    显式 False 仍被尊重）。**故现在不显式传该字段也会正确取到 True**；
+    此处保留显式传值仅为了让测试意图自明，不再是必需。
+    """
+    from core.db.session import SessionLocal
+    from core.services.rag import retrieve
+
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "Disabled KB"}).json()[
+        "knowledge_base"
+    ]["id"]
+    patched = client.patch(f"/api/knowledge-bases/{kb_id}", headers=auth_headers, json={"enabled": False})
+    assert patched.status_code == 200
+    assert patched.json()["knowledge_base"]["enabled"] is False
+
+    agent_id = client.post(
+        "/api/agents",
+        headers=auth_headers,
+        json={
+            "name": "Disabled KB Agent",
+            "knowledge_base_ids": [kb_id],
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+        },
+    ).json()["agent"]["id"]
+
+    # 第 1 层：rag.py 支路原始输出（未被 workflow 覆写过的 reason）。
+    db = SessionLocal()
+    try:
+        agent = db.get(Agent, agent_id)
+        result = retrieve(
+            db,
+            workspace_id=agent.workspace_id,
+            knowledge_base_ids=[kb_id],
+            query="hello there",
+            config={},
+        )
+    finally:
+        db.close()
+
+    assert result.sources == []
+    assert result.status["reason"] == "all_knowledge_bases_disabled"
+    assert result.status["no_evidence"] is True
+    # 护栏：原始 knowledge_base_ids 必须原样保留（拒答条件依赖它非空）。
+    assert result.status["knowledge_base_ids"] == [kb_id]
+
+    # 第 2 层：端到端确实拒答（而非静默放行给模型）。
+    response = client.post(
+        f"/api/agents/{agent_id}/chat/stream",
+        headers=auth_headers,
+        json={"message": "hello there", "mode": "draft", "rag_enabled": True},
+    )
+
+    assert response.status_code == 200
+    rag_status = _events(response.text, "rag_status")[-1]
+    assert rag_status["no_evidence"] is True
+    assert rag_status["knowledge_base_ids"] == [kb_id]
+    assert '"rag_refusal": true' in response.text
+    assert "No reliable evidence was found" in response.text
 
 
 def test_chat_rag_options_emit_hybrid_status(client, auth_headers):
@@ -341,4 +560,76 @@ def test_has_evidence_logic():
         }
     ]
     assert _has_evidence(sources_low_dense, "你好，请问你是谁") is False
+
+    # 5. 关键回归：BM25 单路命中但 query 全是停用词 —— 旧实现因 `bm25_score > 0` 恒真而误判为有证据。
+    #    典型场景：用户问「你好呀」，jieba 切出「你好/呀」全被停用词表拦掉，
+    #    但 BM25 仍因字符交叠给出正分，于是知识库被强制注入，诱发幻觉。
+    sources_bm25_stopword_only = [
+        {
+            "snippet": "你好，这是产品使用说明的第一段。",
+            "retrieval_channel": "rrf:dense+bm25",
+            "dense_score": 0.12,
+            "bm25_score": 3.7,
+            "score": 0.016,
+        }
+    ]
+    assert _has_evidence(sources_bm25_stopword_only, "你好呀") is False
+
+    # 6. 仅凭 BM25 微弱正分（无 rerank、dense 低于阈值）不足以构成证据。
+    sources_bm25_weak = [
+        {
+            "snippet": "系统采用向量检索与词频检索双通道融合。",
+            "retrieval_channel": "rrf:dense+bm25",
+            "dense_score": 0.18,
+            "bm25_score": 1.02,
+            "score": 0.016,
+        }
+    ]
+    assert _has_evidence(sources_bm25_weak, "量子隧穿效应如何解释") is False
+
+
+def test_has_evidence_ignores_dense_when_rerank_applied():
+    """真实环境回归（bge-m3 + bge-reranker-v2-m3）：无关问题 dense 常在 0.43~0.53，
+    越过 0.40 就被判有证据；rerank 对它们 ≤0.02。rerank 生效时 dense 不能单独判有证据。"""
+    from core.services.rag import _has_evidence
+
+    unrelated = [
+        {"snippet": "招牌饮品叫雾岛拿铁，售价 36 元。", "retrieval_channel": "rerank", "dense_score": 0.529, "score": 0.018},
+        {"snippet": "会员分为青铜、白银、黄金三级。", "retrieval_channel": "rerank", "dense_score": 0.515, "score": 0.0},
+    ]
+    assert _has_evidence(unrelated, "星巴克的大杯美式多少钱？", rerank_applied=True) is False
+
+    related = [{"snippet": "营业时间为上午 9 点 30 分到晚上 8 点 45 分。", "retrieval_channel": "rerank", "dense_score": 0.30, "score": 0.998}]
+    assert _has_evidence(related, "几点营业", rerank_applied=True) is True
+
+
+def test_has_evidence_keeps_lexical_match_when_rerank_score_is_low():
+    """rerank 也不能单独当裁判：换说法的正常问题（实测「生日有什么优惠」rerank 仅 0.11）
+    同样低于阈值，只看 rerank 会大面积误拒；词面命中必须保留。"""
+    from core.services.rag import _has_evidence
+
+    sources = [{"snippet": "黄金会员每月可以领取 2 张免费饮品券，生日当天全单 7 折。", "retrieval_channel": "rerank", "dense_score": 0.50, "score": 0.114}]
+    assert _has_evidence(sources, "生日有什么优惠", rerank_applied=True) is True
+
+
+def test_has_evidence_falls_back_to_lexical_and_dense_without_rerank():
+    """rerank 未开启或调用失败时，退回词面 + dense 双档（行为与此前一致）。"""
+    from core.services.rag import _has_evidence
+
+    sources = [{"snippet": "作物预测模型采用 CNN-LSTM 网络", "retrieval_channel": "rrf:dense", "dense_score": 0.45, "score": 0.02}]
+    assert _has_evidence(sources, "作物能预测吗", rerank_applied=False) is True
+
+
+@pytest.mark.parametrize("text", ["你好", "您好！", "hi", "Hello~", "谢谢", "谢谢你", "好的，谢谢", "再见", "早上好呀", "在吗？", "嗨 😊"])
+def test_small_talk_detects_pure_greetings(text):
+    from core.services.rag import is_small_talk
+
+    assert is_small_talk(text) is True
+
+
+@pytest.mark.parametrize("text", ["你好，几点开门", "今天天气怎么样", "法国的首都是哪里", "谢谢，会员怎么升级", "hello world 是什么", ""])
+def test_small_talk_rejects_real_questions(text):
+    from core.services.rag import is_small_talk
+
+    assert is_small_talk(text) is False
 

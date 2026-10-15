@@ -322,6 +322,8 @@ class KnowledgeBase(Base):
     workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
@@ -357,7 +359,7 @@ class KnowledgeDocument(Base):
     text_preview: Mapped[str] = mapped_column(Text, default="")
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(20), default="uploaded")  # 'uploaded' / 'parsing' / 'success' / 'failed'
+    status: Mapped[str] = mapped_column(String(20), default="uploaded")  # 'uploaded' / 'indexing' / 'indexed' / 'failed'
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     segment_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)

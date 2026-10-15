@@ -865,12 +865,21 @@ function App() {
   }
 
   async function updateKnowledgeBase(kbId, payload) {
-    const body = {
-      name: String(payload?.name || '').trim(),
-      description: String(payload?.description || '').trim(),
-    };
-    if (!body.name) {
-      throw new Error('知识库名称不能为空。');
+    // 🛡️ 局部更新：只透传调用方显式提供的字段。
+    // 旧实现无条件把 payload 收敛成 {name, description} 并强制 name 非空，
+    // 导致「仅切换启用状态」这类调用既丢失 enabled，又会因 name 为空而抛错。
+    const body = {};
+    if (payload?.name !== undefined) {
+      body.name = String(payload.name || '').trim();
+      if (!body.name) {
+        throw new Error('知识库名称不能为空。');
+      }
+    }
+    if (payload?.description !== undefined) {
+      body.description = String(payload.description || '').trim();
+    }
+    if (payload?.enabled !== undefined) {
+      body.enabled = Boolean(payload.enabled);
     }
     const data = await api(`/api/knowledge-bases/${kbId}`, { token, method: 'PATCH', body });
     await bootstrap();

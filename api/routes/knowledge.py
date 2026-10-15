@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from api.access import require_kb_write_access, require_workspace_kb
 from api.deps import get_current_membership
-from api.schemas import KnowledgeBaseCreateRequest, KnowledgeDocumentCreateRequest
+from api.schemas import KnowledgeBaseCreateRequest, KnowledgeBaseUpdateRequest, KnowledgeDocumentCreateRequest
 from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, WorkspaceMember
 from core.db.session import get_db
 from core.services.knowledge import (
@@ -261,11 +261,20 @@ def delete_kb(kb_id: int, membership: WorkspaceMember = Depends(get_current_memb
 
 
 @router.patch("/{kb_id}")
-def update_kb(kb_id: int, request: KnowledgeBaseCreateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+def update_kb(kb_id: int, request: KnowledgeBaseUpdateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     kb = require_workspace_kb(db, membership.workspace_id, kb_id)
     require_kb_write_access(kb, membership)
-    kb.name = request.name
-    kb.description = request.description
+    # 🔁 局部更新：只改显式提供的字段，未提供者保持原值（改名/改描述/启停可独立调用）。
+    if request.name is not None:
+        # min_length=1 已拦空串；此处再拦纯空白（"   " 长度为 3，能过 pydantic 但过不了 strip），
+        # 并以 strip 后的值入库，避免首尾空白污染展示与检索。
+        if not request.name.strip():
+            raise HTTPException(status_code=422, detail="Knowledge base name must not be empty")
+        kb.name = request.name.strip()
+    if request.description is not None:
+        kb.description = request.description
+    if request.enabled is not None:
+        kb.enabled = bool(request.enabled)
     db.commit()
     db.refresh(kb)
     return {"knowledge_base": knowledge_base_summary(kb)}

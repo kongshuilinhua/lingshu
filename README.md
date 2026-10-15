@@ -63,7 +63,7 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
   - **Redis 缓存**：相同 query 在 TTL 内直接返回缓存结果
 - **可选 CRAG 自纠检索**（LangGraph）：检索 → LLM 相关性评分 → 证据不足则改写查询重检索，有界轮数 + 失败回退原生单趟（`RAG_SELF_CORRECT`，默认关）
 - 结构化引用来源展示
-- 证据不足时拒绝回答（`RAG_REFUSE_WHEN_NO_EVIDENCE`）
+- 证据不足时拒绝回答（`RAG_REFUSE_WHEN_NO_EVIDENCE`）；证据判定阈值 `RAG_EVIDENCE_RERANK_MIN` / `RAG_EVIDENCE_DENSE_MIN`（默认 0.40，P1 评测基线标定项）
 
 ### 知识库管理
 - 创建知识库（名称 + 描述）
@@ -241,6 +241,8 @@ RAG_RERANK_ENABLED=true           # 是否启用 Rerank
 RAG_RERANK_MODEL=qwen3-rerank     # Rerank 模型
 RAG_CACHE_TTL_SECONDS=3600        # RAG 缓存过期时间
 RAG_REFUSE_WHEN_NO_EVIDENCE=true  # 证据不足时拒答
+RAG_EVIDENCE_RERANK_MIN=0.40      # Rerank 精排分证据阈值（P1 评测基线标定项）
+RAG_EVIDENCE_DENSE_MIN=0.40       # Dense 余弦分证据阈值（P1 评测基线标定项）
 RAG_PARENT_EXPANSION=true         # 父块扩展（small-to-big）
 
 # 会话记忆摘要

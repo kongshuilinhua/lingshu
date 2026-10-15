@@ -21,6 +21,16 @@ class VectorHit:
     metadata: dict
 
 
+class VectorStoreUnavailableError(RuntimeError):
+    """向量存储不可用且已进入降级态，写入操作被拒绝。
+
+    🛡️ 为什么不静默写内存：
+        进程内 MemoryVectorStore 的向量随进程消亡而丢失，但 MySQL 的 KnowledgeChunk
+        记录仍会保留，导致 DB 与向量库永久不一致且无任何可观测信号。
+        宁可让写入显式失败（调用方据此把文档置 failed 并可重试），也不要制造静默的数据黑洞。
+    """
+
+
 class MemoryVectorStore:
     """
     轻量级进程内内存向量空间（用于开发环境调试或作为 Milvus 挂掉时的保底）。
@@ -125,7 +135,16 @@ class MilvusVectorStore:
     def upsert(self, vector_id: str, vector: list[float], text: str, metadata: dict) -> None:
         """
         往向量库中插入/更新单条向量及其元数据实体。
+
+        🛡️ 降级态语义（见 VectorStoreUnavailableError）：
+            配置为 milvus 但连接不可用时，**拒绝写入**而不是写内存。
+            memory 后端（本地开发显式选择）仍走原路径。
         """
+        if self.settings.vector_backend.strip().lower() == "milvus" and self._client is None:
+            raise VectorStoreUnavailableError(
+                f"Milvus is unavailable ({self._error or 'unknown error'}); refusing to write vectors "
+                "to the in-process fallback store."
+            )
         if not self._client:
             self._fallback.upsert(vector_id, vector, text, metadata)
             return
@@ -196,7 +215,8 @@ class MilvusVectorStore:
     def _ensure_collection(self, vector_dimension: int) -> None:
         """
         🛡️ 防御性设计：延迟懒初始化 Collection。
-        首次向量写入或检索时，若目标 Collection 不存在，根据向量实际的维度自动触发物理 Collection 与相应 HNSW/IVF 索引结构的建表。
+        首次向量写入或检索时，若目标 Collection 不存在，根据向量实际的维度自动触发物理 Collection 的建表；
+        不显式指定索引类型，由 Milvus 服务端选择 AUTOINDEX；显式 HNSW 参数化留待 P2。
         """
         if not self._client:
             return

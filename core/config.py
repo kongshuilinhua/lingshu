@@ -187,6 +187,8 @@ class Settings(BaseSettings):
     embedding_cache_enabled: bool = Field(default=True, alias="EMBEDDING_CACHE_ENABLED")
     # 🧠 TTL 默认 7 天：embedding 不会因文档变更而改变，TTL 仅为给 Redis 内存占用设上限。
     embedding_cache_ttl_seconds: int = Field(default=7 * 24 * 3600, alias="EMBEDDING_CACHE_TTL_SECONDS")
+    rag_evidence_rerank_min: float = Field(default=0.40, alias="RAG_EVIDENCE_RERANK_MIN")
+    rag_evidence_dense_min: float = Field(default=0.40, alias="RAG_EVIDENCE_DENSE_MIN")
     # 🛡️ 无证据时拒绝回答：防止 LLM 在知识库无相关内容时产生幻觉
     rag_refuse_when_no_evidence: bool = Field(default=True, alias="RAG_REFUSE_WHEN_NO_EVIDENCE")
     # 🎯 父块扩展（small-to-big 检索）：用 child 小块精准命中、排序，最终喂给 LLM 时换成对应父块全文。
@@ -261,6 +263,20 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("vector_backend")
+    @classmethod
+    def _normalize_vector_backend(cls, value: str) -> str:
+        """规范化向量后端名：去空白 + 转小写。
+
+        🛡️ 为什么必须收口在配置层：
+            该字段被多处按字面比较（`vector_store.py` 的 `== "milvus"`、
+            `config.py` 的 `.strip().lower() == "milvus"`）。若不在入口规范化，
+            写成 `Milvus` 或 `" milvus "` 会让单例**根本不尝试连接**，
+            从而既绕过「降级拒写」也绕过「生产禁降级」，向量被静默写进内存。
+            规范化后所有比较点的语义自动一致。
+        """
+        return str(value or "").strip().lower()
+
     @property
     def cors_origin_list(self) -> list[str]:
         """将逗号分隔的 CORS 来源字符串解析为列表，过滤空白项。"""
@@ -283,6 +299,21 @@ class Settings(BaseSettings):
             issues.append("LINGSHU_MOCK_LLM must be false in production.")
         if self.vector_backend.strip().lower() == "memory":
             issues.append("LINGSHU_VECTOR_BACKEND=memory is only suitable for local development.")
+        elif self.vector_backend.strip().lower() == "milvus":
+            # 运行期降级同样不可接受：生产环境配置了 milvus 却回落到内存，
+            # 等于所有新入库文档的向量在进程重启后静默消失。
+            from core.integrations.vector_store import vector_store as _vector_store
+
+            # 🛡️ 仅当向量库单例确实由「本 Settings 实例」驱动时才检查其运行期状态。
+            # 单例在构造时执行 `self.settings = get_settings()`，与调用方 self 可能不是同一对象
+            # （单元测试构造独立 Settings 即属此情形）；不加此守卫会误报，且使结果依赖用例执行顺序。
+            # 生产启动路径（api/main.py）两侧都取自 get_settings()，故守卫成立、拦截能力不受影响。
+            if _vector_store.settings is self and _vector_store.using_fallback:
+                issues.append(
+                    "LINGSHU_VECTOR_BACKEND=milvus but the Milvus connection is unavailable "
+                    f"({_vector_store.status().get('error') or 'unknown error'}); "
+                    "production must not run on the in-process fallback store."
+                )
         if not self.redis_url:
             issues.append("REDIS_URL is required in production for cache, rate limit, job state, and Celery.")
         if not self.celery_enabled:

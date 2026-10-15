@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
-from core.db.models import KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
+from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import vector_store as vector_store_module
 from core.observability.metrics import record_cache
@@ -68,6 +68,24 @@ def retrieve(
     if not knowledge_base_ids:
         started_status.update({"reason": "no_knowledge_base", "no_evidence": True})
         return RagResult([], started_status)
+
+    # 🛡️ 停用的知识库不参与检索：在进入缓存与检索前统一剔除，
+    # 避免停用后仍从 Redis 缓存命中旧结果。
+    # ⚠️ 注意此处**不改写** started_status 里的原始 knowledge_base_ids——
+    # 拒答条件依赖它为非空，停用全部 KB 时仍应拒答而非静默通过。
+    enabled_ids = [
+        row[0]
+        for row in db.query(KnowledgeBase.id)
+        .filter(
+            KnowledgeBase.id.in_(knowledge_base_ids),
+            KnowledgeBase.enabled.is_(True),
+        )
+        .all()
+    ]
+    if not enabled_ids:
+        started_status.update({"reason": "all_knowledge_bases_disabled", "no_evidence": True})
+        return RagResult([], started_status)
+    knowledge_base_ids = enabled_ids
 
     # 🎯 缓存防雪崩与击穿：使用结合了 Query、Config 和文档最后修改时间戳的版本化 `cache_key`
     cache_key = _cache_key(db, workspace_id=workspace_id, knowledge_base_ids=knowledge_base_ids, query=query, config=config)
@@ -126,6 +144,8 @@ def retrieve(
 
     # 5. 组装输出与有效证据评估
     top_k = int(config.get("top_k") or settings.rag_top_k)
+    if rerank_applied:
+        final_hits = _trim_rerank_tail(final_hits)
     sources = [_source_payload(hit) for hit in final_hits[:top_k]]
 
     # 5.5 父块扩展（small-to-big）：child 已用于精准命中+排序，喂给 LLM 的正文换成父块全文。
@@ -134,7 +154,8 @@ def retrieve(
     if parent_expansion and sources:
         _expand_parents(db, workspace_id=workspace_id, sources=sources)
 
-    no_evidence = not _has_evidence(sources, bm25_query)
+    # 证据判定用用户原文：翻译后的英文只服务于 BM25 检索英文文档，拿它去和中文片段比词面永远命中不到。
+    no_evidence = not _has_evidence(sources, query, rerank_applied=rerank_applied)
 
     status = started_status | {
         "reason": "available" if sources else "no_match",
@@ -208,8 +229,7 @@ def _bm25_search(db: Session, *, workspace_id: int, knowledge_base_ids: list[int
 
     ⚡ 边界与性能思考（大内存优化策略）：
         - 对大规模数据库分块记录，如果直接一次性 `.all()` 调入，会造成严重的物理内存暴涨以及 SQLAlchemy 对象跟踪开销。
-        - 采取批处理分片读取机制（`offset().limit()`），分批提取，并配以 `db.expire_all()`。
-          `db.expire_all()` 极其关键，它用于主动释放 SQLAlchemy 内部的 Session 一级实体缓存，防止读入十万级分块直接耗尽 JVM/Python 堆内存。
+        - 采取批处理分片读取机制（`offset().limit()`），分批提取，避免一次性 `.all()` 把十万级分块全部驻留内存。
         - 对分词操作，优先使用高性能结巴（`jieba`）库进行中文精确分词；若缺失结巴环境，自动防御退化为正则表达式匹配非空 Unicode 汉字和单词列表。
     """
     # 🎯 生成版本控制特征指纹：检查关联知识库内所有文件的个数和最大修改时间戳
@@ -367,6 +387,29 @@ def _rerank(provider: OpenAICompatibleProvider, *, query: str, hits: list[dict],
     return output
 
 
+# 检索逻辑版本：进入 RAG 结果缓存键。改动检索/融合/重排/裁剪/证据判定等会影响结果的逻辑时 +1，
+# 否则 Redis 里的旧结果会在 TTL 内继续被命中（曾出现重启后仍返回裁尾前的结果）。
+RAG_CACHE_LOGIC_VERSION = 2
+
+# rerank 后按「相对第一名」裁掉尾部，低于下限的片段视为不相关。
+# 不用固定阈值——真实环境里答案块的绝对分数可能很低（「退款怎么办」只有 0.009），但它恒排第一。
+# 取值依据（bge-reranker-v2-m3 实测）：无关块多在 0.000~0.008；而比较类问题的另一半答案
+# 可能只有第一名的 8%（「拿铁和美式哪个贵」0.131 vs 0.011），所以相对比例取 5%、绝对下限取 0.01。
+# 这是少量样本上的经验值，正式取值待评测集标定。
+_RERANK_RELATIVE_FLOOR = 0.05
+_RERANK_ABSOLUTE_FLOOR = 0.01
+
+
+def _trim_rerank_tail(hits: list[dict]) -> list[dict]:
+    """保留第一名，以及 rerank 分数不低于 max(第一名 × 5%, 0.01) 的片段；未经 rerank 的队尾片段丢弃。"""
+    reranked = [hit for hit in hits if hit.get("retrieval_channel") == "rerank"]
+    if not reranked:
+        return hits
+    top_score = float(reranked[0].get("score") or 0.0)
+    floor = max(top_score * _RERANK_RELATIVE_FLOOR, _RERANK_ABSOLUTE_FLOOR)
+    return [reranked[0], *(hit for hit in reranked[1:] if float(hit.get("score") or 0.0) >= floor)]
+
+
 def _source_payload(hit: dict) -> dict:
     """转换召回信息为前端强类型来源字典。"""
     metadata = hit.get("metadata") or {}
@@ -491,6 +534,18 @@ def _bm25_scores(corpus: list[list[str]], query_tokens: list[str]) -> list[float
         return scores
 
 
+# 🛡️ 无证据拒答文案。
+# 工程约束：必须包含子串 "No reliable evidence was found" ——
+# 后端测试（tests/test_platform_api.py）以该措辞判定拒答，改动会直接挂测试。
+# 前端不解析这段文案：它消费的是下发的 rag_status / rag_refusal 事件
+#（见 frontend/src/store/useChatStore.js、BuilderView.jsx），其中 rag_refusal 目前尚无消费者。
+# 如需本地化，请在前端按下发语言渲染，不要改动这里的英文基准串。
+RAG_NO_EVIDENCE_ANSWER = (
+    "No reliable evidence was found in the knowledge base for this question. "
+    "请补充相关资料后重试，或换个更具体的问法。"
+)
+
+
 # 🎯 坚固的 RAG 拒答词过滤机制。
 # 阻止那些无实质含义的问候句、语气助词或系统指代词（如“帮我”、“你好”）无端激活 RAG 匹配分，防止把无关的随机向量碎片灌给 LLM 导致胡言乱语。
 RAG_CONVERSATIONAL_STOPWORDS = {
@@ -502,46 +557,80 @@ RAG_CONVERSATIONAL_STOPWORDS = {
 }
 
 
-def _has_evidence(sources: list[dict], query: str) -> bool:
+def _has_evidence(sources: list[dict], query: str, *, rerank_applied: bool = False) -> bool:
     """
-    RAG 核心守门人：判断召回是否属于“有效证据”。
+    RAG 核心守门人：判断召回是否属于"有效证据"。
 
     🛡️ 防御性设计：
         - 为什么要做证据判定？
-          如果用户发“早上好！”，向量检索会因为密度的余弦相似度计算特征，强制返回一篇含有“早上”或字面上最接近的完全不相干的文章作为上下文。
+          如果用户发"早上好！"，向量检索会因为密度的余弦相似度计算特征，强制返回一篇含有"早上"或字面上最接近的完全不相干的文章作为上下文。
           这会诱发严重的 LLM 生成幻觉（大模型被喂入无意义文章后，可能会强行把问候语同产品说明文缝合在一起）。
-        
-    🧠 判断阈值逻辑：
-        1. 前置清扫过滤停用词，检查 Query 的实质词是否真的包含在返回的 Snippet 原文中。
-        2. 如果词汇层面无交集，严格检查三大通道的评分底线：
-           - BM25 Score > 0 （确认存在精确的分词交叠）。
-           - Dense Channel 余弦分值 >= 0.40 （向量距离底线线）。
-           - Rerank 重排打分值 >= 0.40 （高保真重排重估得分阈值）。
-           一旦均低于上述底线，本方法将返回 `False` 触发拒答或使用大模型本能兜底。
+
+    🧠 判断逻辑（任一档命中即有证据）：
+        1. 词面证据：前置清扫停用词后，Query 的实质词出现在返回的 Snippet 原文中。
+        2. rerank 已生效（rerank_applied=True）：任一片段 relevance_score >= RAG_EVIDENCE_RERANK_MIN。
+           rerank 未开启或调用失败：退回 Dense 证据，向量余弦分值 >= RAG_EVIDENCE_DENSE_MIN。
+
+    ⚠️ rerank 生效时不再看 dense —— 真实环境实测（bge-m3 + bge-reranker-v2-m3，见 tests/test_final_rag.py）：
+        无关问题（星巴克价格 / 天气）的 dense 普遍落在 0.43~0.53，越过阈值即被误判为有证据；
+        而 rerank 对它们 ≤0.02。但 rerank 也不能单独当裁判：换说法的正常问题（「生日有什么优惠」0.11、
+        「周一营业吗」0.22）同样会低于阈值，所以词面证据必须保留，二者取并集。
+
+    ⚠️ 已移除的判据：「BM25 Score > 0」。
+        BM25 对任何词元交叠都给出正分（含"你好""请问"这类停用词），该条件近乎恒真，
+        会让"知识库里根本没有的问题"被判为有证据，从而使拒答能力失效。
+        BM25 的价值已在词面证据档通过非停用词交叠间接体现。
+
+    ⚠️ dense 阈值默认 0.40 仍是保守初值，无 rerank 时区分度有限；正式取值待 P1 评测基线标定。
     """
     if not sources:
         return False
-        
+
+    settings = get_settings()
+    rerank_min = float(getattr(settings, "rag_evidence_rerank_min", 0.40))
+    dense_min = float(getattr(settings, "rag_evidence_dense_min", 0.40))
+
     tokens = [
-        token for token in _tokenize(query) 
+        token for token in _tokenize(query)
         if len(token) > 1 and token.lower() not in RAG_CONVERSATIONAL_STOPWORDS
     ]
-    
+
     snippets = " ".join(source.get("snippet", "") for source in sources).lower()
-    
+
     if tokens and any(token.lower() in snippets for token in tokens):
         return True
-        
-    for source in sources:
-        channel = source.get("retrieval_channel", "")
-        if "bm25" in channel and source.get("bm25_score", 0.0) > 0:
-            return True
-        if "dense" in channel and source.get("dense_score", 0.0) >= 0.40:
-            return True
-        if "rerank" in channel and (source.get("score", 0.0) >= 0.40 or source.get("dense_score", 0.0) >= 0.40):
-            return True
-            
-    return False
+
+    if rerank_applied:
+        return any(
+            "rerank" in (source.get("retrieval_channel") or "") and float(source.get("score") or 0.0) >= rerank_min
+            for source in sources
+        )
+    return any(float(source.get("dense_score") or 0.0) >= dense_min for source in sources)
+
+
+# 纯寒暄识别：整句只由问候/致谢/道别等短语（加语气词、标点、表情）组成才算。
+# 刻意用封闭短语表而不复用查询理解的 chitchat 意图——那个意图把「与知识无关的闲聊」也算进去，
+# 会让「法国的首都是哪里」这类该拒答的问题绕过拒答。
+_SMALL_TALK_PHRASES = (
+    "你好", "您好", "你们好", "大家好", "哈喽", "嗨", "hi", "hello", "hey",
+    "早上好", "上午好", "中午好", "下午好", "晚上好", "早安", "午安", "晚安", "早",
+    "谢谢你", "谢谢您", "谢谢", "多谢", "感谢", "辛苦了", "thanks", "thankyou", "thx",
+    "再见", "拜拜", "bye", "回头见",
+    "在吗", "在不在", "有人吗",
+    "好的", "好", "嗯", "嗯嗯", "ok", "okay", "收到", "明白了", "知道了",
+)
+_SMALL_TALK_FILLERS = "啊呀呢吧嘛哦噢哈啦~"
+_SMALL_TALK_PATTERN = re.compile(
+    "(?:" + "|".join(sorted((re.escape(p) for p in _SMALL_TALK_PHRASES), key=len, reverse=True)) + ")+"
+)
+
+
+def is_small_talk(query: str) -> bool:
+    """判断用户输入是否为纯寒暄（你好 / 谢谢 / 再见 / 在吗 …），用于无证据时免于拒答。"""
+    text = "".join(ch for ch in str(query or "").lower() if ch.isalnum() and ch not in _SMALL_TALK_FILLERS)
+    if not text or len(text) > 12:
+        return False
+    return bool(_SMALL_TALK_PATTERN.fullmatch(text))
 
 
 def _cache_key(db: Session, *, workspace_id: int, knowledge_base_ids: list[int], query: str, config: dict) -> str:
@@ -571,5 +660,5 @@ def _cache_key(db: Session, *, workspace_id: int, knowledge_base_ids: list[int],
         "version": version,
         "config": config,
     }
-    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(json.dumps({**payload, "logic": RAG_CACHE_LOGIC_VERSION}, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     return f"rag:{digest}"

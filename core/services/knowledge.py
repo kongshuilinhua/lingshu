@@ -13,7 +13,6 @@ from core.config import get_settings
 from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import vector_store as vector_store_module
-from core.services.rag import retrieve
 from core.services.uploads import (
     DOC_TYPES,
     LANGCHAIN_EXTRA_SUFFIXES,
@@ -68,6 +67,13 @@ def knowledge_base_summary(kb: KnowledgeBase, document_count: int = 0) -> dict:
         "name": kb.name,
         "description": kb.description,
         "document_count": document_count,
+        "enabled": bool(getattr(kb, "enabled", True)),
+        # updated_at 为 NULL 时回退 created_at（兼容未跑回填的老库）。
+        "updated_at": (
+            (getattr(kb, "updated_at", None) or kb.created_at).isoformat()
+            if getattr(kb, "updated_at", None) or kb.created_at
+            else None
+        ),
         "created_at": kb.created_at.isoformat() if kb.created_at else None,
     }
 
@@ -193,8 +199,14 @@ def run_document_ingestion(*, document_id: int, workspace_id: int, kb_id: int) -
                 vector_store_module.vector_store.delete(
                     filters={"workspace_id": workspace_id, "knowledge_base_id": kb_id, "document_id": document_id}
                 )
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                # 🛡️ 不再静默吞掉：向量清理失败会让 DB 与向量库不一致，
+                # 必须留下可检索的痕迹，否则问题永远无法被发现。
+                logger.exception(
+                    "Vector cleanup failed during rollback: document_id=%s error=%s",
+                    document_id,
+                    cleanup_exc,
+                )
             document = db.get(KnowledgeDocument, document_id)
             if document:
                 db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document_id).delete(synchronize_session=False)
@@ -284,8 +296,14 @@ def reindex_knowledge_base(db: Session, *, workspace_id: int, kb: KnowledgeBase)
                 vector_store_module.vector_store.delete(
                     filters={"workspace_id": workspace_id, "knowledge_base_id": kb.id, "document_id": document_id}
                 )
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                # 🛡️ 不再静默吞掉：向量清理失败会让 DB 与向量库不一致，
+                # 必须留下可检索的痕迹，否则问题永远无法被发现。
+                logger.exception(
+                    "Vector cleanup failed during rollback: document_id=%s error=%s",
+                    document_id,
+                    cleanup_exc,
+                )
             failed += 1
             document = db.get(KnowledgeDocument, document_id)
             if not document:
@@ -415,33 +433,6 @@ def list_document_chunks(db: Session, *, document_id: int) -> list[dict]:
     ]
 
 
-def search_knowledge(
-    db: Session,
-    *,
-    workspace_id: int,
-    knowledge_base_ids: list[int],
-    query: str,
-    top_k: int = 4,
-    runtime_config: dict | None = None,
-) -> list[dict]:
-    result = retrieve(
-        db,
-        workspace_id=workspace_id,
-        knowledge_base_ids=knowledge_base_ids,
-        query=query,
-        config={"top_k": top_k},
-        runtime_config=runtime_config,
-    )
-    return result.sources
-
-
-def split_text(text: str, *, chunk_size: int = 700) -> list[str]:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    if not cleaned:
-        return []
-    return [cleaned[index : index + chunk_size] for index in range(0, len(cleaned), chunk_size)]
-
-
 # ── 切分基础设施：token 计长 + 结构保留归一化 + CN/EN 递归分隔符 ──────────────
 
 # 递归分隔符优先级：段落 > 行 > 中文句末 > 英文句末 > 中文子句 > 英文子句 > 空格 > 字符。
@@ -486,15 +477,18 @@ def _normalize_keep_structure(text: str) -> str:
     return text.strip()
 
 
-def _build_splitter(*, chunk_size: int, chunk_overlap: int, length_unit: str):
-    """构造边界感知递归切分器；length_unit='token' 用 tiktoken 计长，否则按字符。"""
+def _build_splitter(*, chunk_size: int, chunk_overlap: int, length_unit: str, separators: list[str] | None = None):
+    """构造边界感知递归切分器；length_unit='token' 用 tiktoken 计长，否则按字符。
+
+    separators 为 None 时用默认 _RECURSIVE_SEPARATORS（既有行为不变）。
+    """
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
     length_function = _token_len if length_unit == "token" else len
     chunk_size = max(int(chunk_size), 1)
     chunk_overlap = max(min(int(chunk_overlap), chunk_size - 1), 0)
     return RecursiveCharacterTextSplitter(
-        separators=_RECURSIVE_SEPARATORS,
+        separators=separators or _RECURSIVE_SEPARATORS,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         length_function=length_function,
@@ -598,26 +592,57 @@ def _split_parent_child(
     length_unit: str = "token",
     title: str | None = None,
     section: str | None = None,
+    separators: list[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     r"""边界感知 parent-child 切分核心，返回 (children, parents)。
 
     - 用递归分隔符在自然语义边界切分（不再 `\s+→空格` 压平结构）。
     - parent 与 child 各自带 overlap，跨块语义不被切断（旧实现 parent 无重叠）。
     - child 额外携带 embed_text（上下文增强前缀），仅用于向量化；落库 text 保持干净。
+    - separators 为用户自定义分隔标识符，优先于默认分隔符生效。
     """
     cleaned = _normalize_keep_structure(text)
+    # 🎯 用户自定义分隔符优先生效：置于递归切分列表首位，
+    # 既有 _RECURSIVE_SEPARATORS 作为兜底，保证任何文本都能被切开。
+    # 过滤空串：空分隔符会让 splitter 行为异常。
+    effective_separators = _RECURSIVE_SEPARATORS
+    custom: list[str] = []
+    if separators:
+        custom = [sep for sep in separators if sep]
+        if custom:
+            effective_separators = custom + [sep for sep in _RECURSIVE_SEPARATORS if sep not in custom]
     children: list[dict] = []
     parents: list[dict] = []
     if not cleaned:
         return children, parents
 
-    parent_splitter = _build_splitter(chunk_size=parent_size, chunk_overlap=parent_overlap, length_unit=length_unit)
-    child_splitter = _build_splitter(chunk_size=child_size, chunk_overlap=child_overlap, length_unit=length_unit)
+    def _strip_custom(piece: str) -> str:
+        # 用户分隔标识符只是切点标记：splitter 以 keep_separator 保留了它（默认分隔符里的句号等需要保留），
+        # 会残留在块首/块尾（如「###第二段…」），这里只剥掉用户分隔符本身。
+        piece = piece.strip()
+        changed = True
+        while changed and piece:
+            changed = False
+            for sep in custom:
+                if piece.startswith(sep):
+                    piece, changed = piece[len(sep):].strip(), True
+                if piece.endswith(sep):
+                    piece, changed = piece[: -len(sep)].strip(), True
+        return piece
+
+    parent_splitter = _build_splitter(
+        chunk_size=parent_size, chunk_overlap=parent_overlap,
+        length_unit=length_unit, separators=effective_separators,
+    )
+    child_splitter = _build_splitter(
+        chunk_size=child_size, chunk_overlap=child_overlap,
+        length_unit=length_unit, separators=effective_separators,
+    )
     prefix = _contextual_prefix(title, section)
 
     parent_index = 0
     for parent_text in parent_splitter.split_text(cleaned):
-        parent_text = parent_text.strip()
+        parent_text = _strip_custom(parent_text)
         if not parent_text:
             continue
         parent_id = f"kb{kb_id}-doc{document_id}-parent{parent_index}"
@@ -628,7 +653,7 @@ def _split_parent_child(
         })
         child_index = 0
         for child_text in child_splitter.split_text(parent_text):
-            child_text = child_text.strip()
+            child_text = _strip_custom(child_text)
             if not child_text:
                 continue
             children.append({
@@ -677,6 +702,14 @@ def chunk_document(
         max_len = max(int(cfg.get("max_chunk_len", 1600)), 1)
         overlap_pct = max(0, min(int(cfg.get("overlap_pct", 10)), 50))
         child_len = max(int(max_len * 0.35), 1)
+        # 🎯 读取用户填写的分隔标识符；旧实现漏读了 cfg["delimiter"]，
+        # 导致前端「分隔标识符」输入框是空操作。
+        raw_delimiter = cfg.get("delimiter")
+        custom_separators = (
+            [part for part in str(raw_delimiter).split(",") if part]
+            if raw_delimiter
+            else None
+        )
         return _split_parent_child(
             text, kb_id=kb_id, document_id=document_id,
             parent_size=max_len,
@@ -685,6 +718,7 @@ def chunk_document(
             child_overlap=int(child_len * overlap_pct / 100),
             length_unit="char",
             title=title,
+            separators=custom_separators,
         )
     return _split_parent_child(
         text, kb_id=kb_id, document_id=document_id,
