@@ -172,6 +172,29 @@ def test_health_exposes_model_status(client, owner_token):
     assert response.json()["dependencies"]["vector_store"]["active_backend"] == "memory"
 
 
+def test_health_treats_configured_embedding_as_available_when_probe_disabled(client, monkeypatch):
+    """HEALTH_MODEL_PROBE_ENABLED=false 时不能把「没探测」当成「探测失败」。
+
+    旧实现要求 embedding 探测成功才算可用，关掉探测后 embedding 永远不可用，
+    前端据此把知识库按钮置灰、悄悄发 rag_enabled=false，知识库整体失效。
+    """
+    from api import main
+
+    monkeypatch.setattr(main.settings, "mock_llm", False)
+    monkeypatch.setattr(main.settings, "health_model_probe_enabled", False)
+    monkeypatch.setattr(main.settings, "openai_embedding_model", "BAAI/bge-m3")
+    monkeypatch.setattr(main.settings, "embedding_api_key", "sk-health-embedding-test")
+
+    body = client.get("/api/health").json()
+    embedding = body["dependencies"]["embedding"]
+
+    assert embedding["probe"]["enabled"] is False
+    assert embedding["available"] is True
+    assert embedding["reason"] is None
+    assert "Embedding gateway probe failed." not in body["issues"]
+    assert "Chat model gateway probe failed." not in body["issues"]
+
+
 def test_dashscope_key_alias_uses_dashscope_compatible_base(monkeypatch):
     from core.config import get_settings
     from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OpenAICompatibleProvider
