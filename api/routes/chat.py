@@ -27,6 +27,7 @@ from core.db.models import (
     WorkspaceMember,
 )
 from core.db.session import get_db
+from core.observability import tracing
 from core.runtime.workflow import WorkflowRunner, compact_session_memory_task
 from core.security.permissions import can_manage
 from core.tasks.dispatch import dispatch
@@ -186,7 +187,10 @@ def chat_stream(agent_id: int, request: ChatRequest, background_tasks: Backgroun
             WorkflowRunner(db).resolve_chat_model(request.model_override.model_dump(), current_user.id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="所选模型不可用或无权访问，请重新选择。") from exc
-    return StreamingResponse(stream_chat_events(db, agent, current_user.id, request, background_tasks), media_type="text/event-stream")
+    # bind_context：Starlette 在线程池里逐次 next() 同步生成器且每次复制 context，
+    # 不固定 context 的话 Langfuse 的 span 跨 yield 后会丢父子关系
+    return StreamingResponse(tracing.bind_context(stream_chat_events(db, agent, current_user.id, request, background_tasks)),
+                             media_type="text/event-stream")
 
 
 # ── Sessions ──
@@ -284,4 +288,21 @@ def create_feedback(message_id: int, request: FeedbackRequest, current_user: Use
     db.add(feedback)
     db.commit()
     db.refresh(feedback)
+    _score_feedback_trace(db, message, request.rating, request.comment)
     return {"feedback": {"id": feedback.id, "rating": feedback.rating, "comment": feedback.comment}}
+
+
+def _score_feedback_trace(db: Session, message: Message, rating: str, comment: str) -> None:
+    """把点赞/点踩写成 Langfuse 打分。trace id 由本轮用户消息 id 派生（见 WorkflowRunner._run_trace）。"""
+    if rating == "none" or not tracing.enabled():
+        return
+    user_message = (
+        db.query(Message)
+        .filter(Message.session_id == message.session_id, Message.role == "user", Message.id < message.id)
+        .order_by(Message.id.desc())
+        .first()
+    )
+    if not user_message:
+        return
+    tracing.score(trace_id=tracing.trace_id_for(f"lingshu-message-{user_message.id}"), name="user_feedback",
+                  value=1 if rating == "positive" else 0, data_type="BOOLEAN", comment=comment or None)

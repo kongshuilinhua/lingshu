@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 
 from core.config import get_settings
+from core.observability import tracing
 
 # 翻译系统提示词：保留技术专有名词原文，只输出译文
 _SYSTEM_PROMPT = (
@@ -84,17 +85,18 @@ def translate_query(provider, query: str, *, runtime_config: dict | None = None)
     if cached is not None:
         return cached
 
-    # 调用 LLM 翻译
+    # 调用 LLM 翻译（包一层具名 span，链路里能看出这次模型调用是检索前的跨语言翻译）
     try:
-        resp = provider.chat(
-            [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": query},
-            ],
-            model=model,
-            temperature=0.0,
-            runtime_config=runtime_config,
-        )
+        with tracing.span("rag.translate_query", input=query, metadata={"model": model}):
+            resp = provider.chat(
+                [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": query},
+                ],
+                model=model,
+                temperature=0.0,
+                runtime_config=runtime_config,
+            )
         translated = (resp.content or "").strip()
         # 简单有效性检查：非空、不等于原文、不超过原文 5 倍长度
         if translated and translated != query and len(translated) < len(query) * 5:
