@@ -24,7 +24,7 @@ export const useAgentStore = create((set, get) => ({
     suggested_questions: [],
     variables: [],
     memory: { enabled: false, strategy: 'session_summary', max_messages: 12 },
-    rag: { enabled_by_default: true, top_k: 4 },
+    rag: { enabled_by_default: true, top_k: 4, retrieval_mode: 'on_demand' },
     tool_policy: { mode: 'auto', allowed_tool_names: [], web_search_enabled: false },
   },
 

@@ -774,7 +774,7 @@ def test_rag_no_evidence_refuses_instead_of_guessing(client, auth_headers):
         json={
             "name": "No Evidence Agent",
             "knowledge_base_ids": [kb.json()["knowledge_base"]["id"]],
-            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True, "retrieval_mode": "auto"},
         },
     )
     assert agent.status_code == 200
@@ -804,7 +804,7 @@ def test_rag_small_talk_is_answered_not_refused(client, auth_headers):
         json={
             "name": "Small Talk Agent",
             "knowledge_base_ids": [kb.json()["knowledge_base"]["id"]],
-            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True, "retrieval_mode": "auto"},
         },
     )
 
@@ -896,7 +896,7 @@ def test_rag_refusal_short_circuits_tool_node(client, auth_headers):
             "knowledge_base_ids": [kb.json()["knowledge_base"]["id"]],
             "tool_ids": [tool_id],
             "tool_policy": {"web_search_enabled": True},
-            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True, "retrieval_mode": "auto"},
         },
     )
     assert agent.status_code == 200
@@ -1230,7 +1230,7 @@ def test_knowledge_upload_and_chat_sse(client, auth_headers):
     agent = client.post(
         "/api/agents",
         headers=auth_headers,
-        json={"name": "客服助手", "system_prompt": "基于知识库回答。", "knowledge_base_ids": [kb_id]},
+        json={"name": "客服助手", "system_prompt": "基于知识库回答。", "knowledge_base_ids": [kb_id], "rag": {"retrieval_mode": "auto"}},
     )
     assert agent.status_code == 200
     agent_id = agent.json()["agent"]["id"]
@@ -2351,7 +2351,7 @@ def test_document_attachment_and_rag_toggle(client, auth_headers):
         json={
             "name": "Attachment RAG",
             "knowledge_base_ids": [kb_id],
-            "rag": {"enabled_by_default": True, "top_k": 4},
+            "rag": {"enabled_by_default": True, "top_k": 4, "retrieval_mode": "auto"},
         },
     )
     assert agent.status_code == 200
@@ -2525,7 +2525,7 @@ def test_text_only_chat_model_can_use_backend_default_rag(client, auth_headers):
             "name": "Text Only RAG",
             "user_model_config_id": text_model["id"],
             "knowledge_base_ids": [kb_id],
-            "rag": {"enabled_by_default": True, "top_k": 4},
+            "rag": {"enabled_by_default": True, "top_k": 4, "retrieval_mode": "auto"},
         },
     )
     agent_id = agent.json()["agent"]["id"]
@@ -2721,7 +2721,7 @@ def test_published_chat_uses_snapshot_model_rag_and_memory_after_draft_changes(c
             "name": "Snapshot Runtime",
             "model_id": default_model["id"],
             "knowledge_base_ids": [kb_id],
-            "rag": {"enabled_by_default": False, "top_k": 1},
+            "rag": {"enabled_by_default": False, "top_k": 1, "retrieval_mode": "auto"},
             "memory": {"enabled": True, "strategy": "session_summary", "max_messages": 6},
         },
     )
@@ -2733,7 +2733,7 @@ def test_published_chat_uses_snapshot_model_rag_and_memory_after_draft_changes(c
         headers=auth_headers,
         json={
             "model_id": vision_model_id,
-            "rag": {"enabled_by_default": True, "top_k": 4},
+            "rag": {"enabled_by_default": True, "top_k": 4, "retrieval_mode": "auto"},
             "memory": {"enabled": False, "strategy": "session_summary", "max_messages": 6},
         },
     )
@@ -2828,7 +2828,7 @@ def test_published_chat_uses_snapshot_knowledge_bindings_after_draft_changes(cli
         json={
             "name": "Snapshot Knowledge",
             "knowledge_base_ids": [first_kb_id],
-            "rag": {"enabled_by_default": True, "top_k": 1},
+            "rag": {"enabled_by_default": True, "top_k": 1, "retrieval_mode": "auto"},
         },
     )
     agent_id = agent.json()["agent"]["id"]

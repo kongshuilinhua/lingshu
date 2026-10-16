@@ -18,6 +18,7 @@ from core.db.models import (
     AgentKnowledgeBase,
     AgentMcpBinding,
     AgentVersion,
+    KnowledgeBase,
     McpServer,
     ModelConfig,
     Run,
@@ -74,6 +75,11 @@ from core.services.web_search import WebSearchError
 logger = logging.getLogger(__name__)
 
 _TEXT_TOOL_MARKERS = ("<function", "<tool_call>")
+
+# 按需调用模式下的虚拟知识库检索工具
+KNOWLEDGE_TOOL_NAME = "search_knowledge_base"
+KNOWLEDGE_TOOL_TYPE = "builtin_knowledge"
+KNOWLEDGE_TOOL_MAX_CALLS = 3
 
 
 def _drain(generator):
@@ -589,27 +595,25 @@ class WorkflowRunner:
                 }
                 return {"sources": [], "rag_enabled": False, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
 
-            kb_ids = getattr(agent, "knowledge_base_ids", None)
-            if kb_ids is None:
-                kb_ids = [
-                    row.knowledge_base_id
-                    for row in self.db.query(AgentKnowledgeBase).filter(AgentKnowledgeBase.agent_id == agent.id).all()
-                ]
+            kb_ids = self._agent_knowledge_base_ids(agent)
 
-            # 执行 RAG 向量混合检索与重排重估；自纠模式默认关闭，关闭时仍走原生单趟路径。
-            retrieve_kwargs = {
-                "workspace_id": agent.workspace_id,
-                "knowledge_base_ids": kb_ids,
-                "query": context.get("rewritten_query") or context["input"],
-                "config": context.get("rag_config") or {},
-                "runtime_config": getattr(agent, "runtime_config", None),
-            }
-            if get_settings().rag_self_correct:
-                from core.runtime.self_correct_retrieval import self_correct_retrieve
+            # 按需调用：本节点不检索，知识库作为 search_knowledge_base 工具交给 Tool 节点里的模型自行决定
+            if (context.get("rag_config") or {}).get("retrieval_mode") == "on_demand" and kb_ids:
+                status = {
+                    "enabled": True,
+                    "effective_source": effective_source,
+                    "retrieval_mode": "on_demand",
+                    "knowledge_base_ids": kb_ids,
+                    "query": context["input"],
+                    "top_k": int(context.get("rag_top_k") or node.get("config", {}).get("top_k", 4)),
+                    "matched_chunks": 0,
+                    "sources_emitted": False,
+                    "reason": "on_demand",
+                    "no_evidence": False,
+                }
+                return {"sources": [], "rag_enabled": True, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
 
-                rag_result = self_correct_retrieve(self.db, **retrieve_kwargs)
-            else:
-                rag_result = retrieve(self.db, **retrieve_kwargs)
+            rag_result = self._retrieve(agent, kb_ids, context.get("rewritten_query") or context["input"], context)
             sources = rag_result.sources
             status = {**rag_result.status, "effective_source": effective_source}
 
@@ -795,6 +799,8 @@ class WorkflowRunner:
         allowed_names = set(tool_policy.get("allowed_tool_names") or [])
         if allowed_names:
             bound_tools = [t for t in bound_tools if t.name in allowed_names]
+        # 知识库工具由「检索方式」开关控制，不受工具白名单过滤
+        bound_tools.extend(self._knowledge_tools(agent, context))
         router = CapabilityRouter(self.db, agent, context, bound_tools, executor=execute_tool)
         context['_skill_metadata'] = router.skill_metadata()
         context['_mcp_metadata'] = router.mcp_metadata()
@@ -835,7 +841,7 @@ class WorkflowRunner:
                 break
             current_tools = router.tools()
             requested_names = {tool.name for tool in current_tools}
-            tool_schemas = [tool_schema_for_llm(t) for t in current_tools]
+            tool_schemas = [getattr(t, "llm_schema", None) or tool_schema_for_llm(t) for t in current_tools]
             if stream:
                 turn = yield from self._stream_tool_turn(agent, messages, tool_schemas, native_thinking)
             else:
@@ -886,7 +892,11 @@ class WorkflowRunner:
                                 capability_calls += 1
                                 if capability_calls > 10:
                                     raise ValueError('能力检索和加载次数已达到上限。')
-                            result = router.invoke(matching, tool_args)
+                            if matching.type == KNOWLEDGE_TOOL_TYPE:
+                                result = self._invoke_knowledge_tool(agent, context, matching, tool_args)
+                                events.append({"event": "rag_status", "data": context["rag_status"]})
+                            else:
+                                result = router.invoke(matching, tool_args)
                             if matching.type == 'builtin_search':
                                 search_result = result.get('result_json') or {}
                                 web_sources = web_search_service.search_items_as_sources(search_result.get('items') or [])
@@ -1416,6 +1426,150 @@ class WorkflowRunner:
             public.append(item)
         return public
 
+    def _agent_knowledge_base_ids(self, agent) -> list[int]:
+        kb_ids = getattr(agent, "knowledge_base_ids", None)
+        if kb_ids is None:
+            kb_ids = [
+                row.knowledge_base_id
+                for row in self.db.query(AgentKnowledgeBase).filter(AgentKnowledgeBase.agent_id == agent.id).all()
+            ]
+        return list(kb_ids)
+
+    def _retrieve(self, agent, kb_ids: list[int], query: str, context: dict):
+        """执行 RAG 向量混合检索与重排重估；自纠模式默认关闭，关闭时仍走原生单趟路径。"""
+        retrieve_kwargs = {
+            "workspace_id": agent.workspace_id,
+            "knowledge_base_ids": kb_ids,
+            "query": query,
+            "config": context.get("rag_config") or {},
+            "runtime_config": getattr(agent, "runtime_config", None),
+        }
+        if get_settings().rag_self_correct:
+            from core.runtime.self_correct_retrieval import self_correct_retrieve
+
+            return self_correct_retrieve(self.db, **retrieve_kwargs)
+        return retrieve(self.db, **retrieve_kwargs)
+
+    def _knowledge_tools(self, agent, context: dict) -> list:
+        """
+        按需调用模式下的虚拟知识库检索工具（一个工具覆盖全部绑定的知识库）。
+
+        🎯 仅当本轮开启知识库、检索方式为 on_demand、且至少绑定了一个启用中的知识库时提供。
+            工具描述列出每个库的名称与描述——按需模式下模型会不会去查，主要取决于这段描述。
+            绑定多个库时额外提供可选参数 knowledge_base（库名枚举），不填则跨库一起检索
+            （跨库合并后统一 RRF + rerank，比让模型逐库调用更准、轮次更少）。
+        """
+        if not context.get("rag_enabled", True):
+            return []
+        if (context.get("rag_config") or {}).get("retrieval_mode") != "on_demand":
+            return []
+        kb_ids = self._agent_knowledge_base_ids(agent)
+        if not kb_ids:
+            return []
+        knowledge_bases = (
+            self.db.query(KnowledgeBase)
+            .filter(KnowledgeBase.id.in_(kb_ids), KnowledgeBase.enabled.is_(True))
+            .order_by(KnowledgeBase.id.asc())
+            .all()
+        )
+        if not knowledge_bases:
+            return []
+        ids_by_name: dict[str, list[int]] = {}
+        catalog = []
+        for kb in knowledge_bases:
+            ids_by_name.setdefault(kb.name, []).append(kb.id)
+            kb_description = (kb.description or "").strip()
+            catalog.append(f"- {kb.name}：{kb_description}" if kb_description else f"- {kb.name}")
+        description = (
+            "检索本智能体绑定的内部知识库（产品资料、业务规则、制度手册等）。"
+            "凡是询问本智能体所服务的业务、产品、服务、价格、规则、流程等事实——包括「有没有」「能不能」这类问题——"
+            "即使你觉得自己知道答案，也必须先调用本工具，再依据检索到的片段回答，不要凭记忆或常识作答。"
+            "实时新闻、天气等外部最新信息用 web_search。只有寒暄、闲聊、与业务无关的通用知识（如算术）才不调用。\n"
+            "可用知识库：\n" + "\n".join(catalog)
+        )
+        properties: dict = {
+            "query": {
+                "type": "string",
+                "description": "检索语句。结合对话上下文补全指代和省略，改写成独立完整的问题或关键词。",
+            }
+        }
+        if len(ids_by_name) > 1:
+            properties["knowledge_base"] = {
+                "type": "string",
+                "enum": list(ids_by_name),
+                "description": "只检索指定的知识库；不确定在哪个库时不要填，会检索全部知识库。",
+            }
+        llm_schema = {
+            "type": "function",
+            "function": {
+                "name": KNOWLEDGE_TOOL_NAME,
+                "description": description,
+                "parameters": {"type": "object", "properties": properties, "required": ["query"]},
+            },
+        }
+        return [SimpleNamespace(id="builtin_knowledge_search", name=KNOWLEDGE_TOOL_NAME, label="知识库检索",
+                                description=description, type=KNOWLEDGE_TOOL_TYPE, enabled=True, schema={},
+                                llm_schema=llm_schema, ids_by_name=ids_by_name)]
+
+    def _invoke_knowledge_tool(self, agent, context: dict, tool, arguments: dict) -> dict:
+        """
+        执行一次知识库检索工具调用。
+
+        🎯 片段并入 context["sources"]（按 chunk 去重），编号沿用其在本轮引用列表中的位置，
+            同一轮多次调用时编号连续，前端引用面板无需改动。
+        🛡️ 每轮最多 3 次，超出后报错促使模型直接作答；检索为空时不硬拒答，如实告诉模型没找到。
+        """
+        query = str(arguments.get("query") or arguments.get("input") or "").strip()
+        if not query:
+            raise ValueError("query 不能为空。")
+        calls = int(context.get("_knowledge_tool_calls") or 0) + 1
+        context["_knowledge_tool_calls"] = calls
+        if calls > KNOWLEDGE_TOOL_MAX_CALLS:
+            raise ValueError(f"本轮知识库检索已达 {KNOWLEDGE_TOOL_MAX_CALLS} 次上限，请根据已检索到的内容直接回答。")
+        target = arguments.get("knowledge_base")
+        kb_ids = tool.ids_by_name.get(target) if target else None
+        if not kb_ids:
+            kb_ids = [kb_id for ids in tool.ids_by_name.values() for kb_id in ids]
+
+        started = time.monotonic()
+        rag_result = self._retrieve(agent, kb_ids, query, context)
+        sources = list(context.get("sources") or [])
+
+        def key(item: dict):
+            return item.get("chunk_id") or (item.get("title"), item.get("snippet"))
+
+        positions = {key(item): index for index, item in enumerate(sources, start=1)}
+        lines = []
+        for item in rag_result.sources:
+            index = positions.get(key(item))
+            if index is None:
+                sources.append(item)
+                index = positions[key(item)] = len(sources)
+            body = item.get("content") or item.get("snippet") or ""
+            lines.append(f"[{index}] {item.get('title') or 'knowledge'}：{body}")
+        context["sources"] = sources
+        rag_config = context.get("rag_config") or {}
+        context["rag_grounded"] = bool(sources) and bool(rag_config.get("refuse_when_no_evidence", True))
+        context["rag_status"] = {
+            **rag_result.status,
+            "trigger": "tool",
+            "retrieval_mode": "on_demand",
+            "query": query,
+            "matched_chunks": len(rag_result.sources),
+            "sources_emitted": bool(rag_result.sources),
+        }
+        if lines:
+            content = (
+                "知识库检索结果：\n" + "\n\n".join(lines)
+                + "\n\n回答涉及事实的部分只依据以上片段；片段没有覆盖用户所问时，明确告诉用户知识库里没有这方面的信息，不要凭常识补充。"
+            )
+            preview = f"命中 {len(lines)} 个片段"
+        else:
+            content = "知识库中没有找到与该问题相关的内容。请如实告诉用户知识库里没有这方面的信息。"
+            preview = "未命中"
+        return {"tool": tool.name, "tool_type": tool.type, "content": content, "result_preview": preview,
+                "latency_ms": int((time.monotonic() - started) * 1000)}
+
     def _knowledge_source_text(self, sources: list[dict]) -> str:
         """
         拼装喂给 LLM 的知识片段正文。
@@ -1567,11 +1721,14 @@ class WorkflowRunner:
         是否走 RAG 完全由用户的「知识库」按钮决定，不再由模型意图路由裁决；也不再做低置信度
         澄清反问（交由用户自己表达）。未开启知识库时直接 passthrough，省去这次前置 LLM 调用，
         让普通对话直达 LLM 节点（避免「1+1」也要等一次前置推理）。
+        按需调用模式同样跳过：检索语句由模型调用 search_knowledge_base 时自己结合上下文改写。
         """
         if not context.get("rag_enabled", True):
             result = qu_service._passthrough(context["input"], reason="rag_disabled")
         elif not context.get("knowledge_base_ids"):
             result = qu_service._passthrough(context["input"], reason="no_knowledge_base")
+        elif (context.get("rag_config") or {}).get("retrieval_mode") == "on_demand":
+            result = qu_service._passthrough(context["input"], reason="on_demand")
         else:
             config = runtime.settings.get("query_understanding") or {}
             history = []
