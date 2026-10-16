@@ -156,6 +156,8 @@ def test_login_and_me(client, owner_token):
 
 
 def test_health_exposes_model_status(client, owner_token):
+    from core.config import get_settings
+
     response = client.get("/api/health")
 
     assert response.status_code == 200
@@ -165,7 +167,8 @@ def test_health_exposes_model_status(client, owner_token):
     assert model["mock"] is True
     embedding = response.json()["dependencies"]["embedding"]
     assert embedding["provider"] == "openai-compatible"
-    assert embedding["model"] == "text-embedding-v3"
+    # 跟随配置默认值，不写死模型名：默认值改过（text-embedding-v3 → BAAI/bge-m3）后此处曾长期失败
+    assert embedding["model"] == get_settings().openai_embedding_model
     assert embedding["configured"] is False
     assert embedding["available"] is False
     assert response.json()["status"] == "degraded"
@@ -213,12 +216,15 @@ def test_dashscope_key_alias_uses_dashscope_compatible_base(monkeypatch):
         get_settings.cache_clear()
 
 
-def test_default_backend_model_seed_prefers_qwen_and_keeps_gpt_explicit(client, auth_headers):
+def test_default_backend_model_seed_uses_configured_model_and_keeps_gpt_explicit(client, auth_headers):
+    from core.config import get_settings
+
     models = client.get("/api/models", headers=auth_headers)
 
     assert models.status_code == 200
     items = models.json()["items"]
-    assert [item["model_name"] for item in items[:2]] == ["qwen-plus", "qwen-vl-plus"]
+    # 第一个种子模型取自 OPENAI_MODEL 配置（默认值已改为 DeepSeek-V4-Flash），不写死模型名
+    assert [item["model_name"] for item in items[:2]] == [get_settings().openai_model, "qwen-vl-plus"]
     assert not any(item["model_name"].startswith("gpt-") for item in items)
     assert items[0]["supports_reasoning"] is True
     assert items[0]["reasoning_type"] == "prompt"
