@@ -190,6 +190,21 @@ function _handleSseEvent(raw, get, set) {
   if (event === 'token') {
     get().updateLastMessage((last) => ({ ...last, pending: false, content: (last.content || '') + data.content }));
   }
+  if (event === 'token_reset') {
+    // 工具循环里模型先说了一段话、随后决定调工具：这段话只是过程说明，不是最终回答。
+    // 从正文末尾摘掉，收进 process 列表单独展示；回到等待态，等工具结果后的下一轮正文。
+    get().updateLastMessage((last) => {
+      const content = last.content || '';
+      const note = data.content || '';
+      const kept = note && content.endsWith(note) ? content.slice(0, -note.length) : '';
+      return {
+        ...last,
+        pending: true,
+        content: kept,
+        process: note.trim() ? [...(last.process || []), note.trim()] : last.process,
+      };
+    });
+  }
   if (event === 'thinking_token') {
     // 思考轨迹独立累加到 thinking 字段，绝不拼入 content（content 是最终落库正文）
     get().updateLastMessage((last) => ({ ...last, thinking: (last.thinking || '') + data.content }));

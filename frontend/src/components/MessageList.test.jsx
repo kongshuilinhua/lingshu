@@ -57,3 +57,13 @@ describe('引用来源面板', () => {
     expect(screen.queryByRole('complementary', { name: '引用来源' })).toBeNull();
   });
 });
+
+describe('过程说明', () => {
+  it('调工具前的说明默认折叠，展开后可见，且不混进正文', () => {
+    render(<MessageList messages={[{ role: 'assistant', content: '营业到 22 点。', process: ['我先查一下。'] }]} />);
+    expect(screen.queryByText('我先查一下。')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /过程说明（1）/ }));
+    expect(screen.getByText('我先查一下。')).toBeTruthy();
+    expect(screen.getByText('营业到 22 点。')).toBeTruthy();
+  });
+});

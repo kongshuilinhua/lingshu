@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from core.db.models import (
 from core.db.models import (
     Session as ChatSession,
 )
-from core.integrations.llm import OpenAICompatibleProvider
+from core.integrations.llm import OpenAICompatibleProvider, _extract_text_tool_calls
 from core.runtime.capabilities import CapabilityRouter
 from core.runtime.conversation import conversation_context
 from core.services import query_understanding as qu_service
@@ -68,6 +69,20 @@ from core.services.user_models import (
     user_model_runtime_config,
 )
 from core.services.web_search import WebSearchError
+
+
+logger = logging.getLogger(__name__)
+
+_TEXT_TOOL_MARKERS = ("<function", "<tool_call>")
+
+
+def _drain(generator):
+    """跑完生成器、丢弃其产出的事件，返回 StopIteration 携带的返回值（非流式路径复用流式生成器）。"""
+    while True:
+        try:
+            next(generator)
+        except StopIteration as stop:
+            return stop.value
 
 
 def default_workflow() -> list[dict]:
@@ -331,6 +346,9 @@ class WorkflowRunner:
               1. `step`: 指示某个工作流节点开始/结束，并附带状态数据。
               2. `token`: 大模型实时打字流，用于 C端 界面渲染。
               3. `complete`: 整个 Run 链路圆满收官，输出完整持久化的实体与最终回答。
+              另有 `thinking_token`（思考流）、`token_reset`（工具循环里调工具前已推出的正文改判为过程说明）、
+              `runtime`（节点执行中途实时推送的运行事件，如 tool_call；对应 step 带 events_streamed=True，
+              消费方不应再重发 step.events）。
         """
         runtime, run, context = self._start_run(
             agent=agent,
@@ -360,11 +378,14 @@ class WorkflowRunner:
             if node["type"] == "LLM":
                 # LLM 节点流式输出专用生成器中继
                 output = yield from self._stream_llm_node(runtime, node, context)
+            elif node["type"] == "Tool":
+                output = yield from self._tool_node(runtime, node, context, stream=True)
             else:
                 output = self._execute_node(runtime, node, context)
             if not steps:
                 self._inject_first_node_events(output, context)
             events = output.pop("events", [])
+            events_streamed = bool(output.pop("events_streamed", False))
             context.update(output)
             is_paused = bool(output.get("paused"))
             step = self._persist_step(run, node, user_message, output, status="paused" if is_paused else "succeeded")
@@ -375,6 +396,7 @@ class WorkflowRunner:
                 "status": step.status,
                 "output": output,
                 "events": events,
+                "events_streamed": events_streamed,
             }
             steps.append(step_payload)
             yield {"event": "step", "step": step_payload}
@@ -662,149 +684,7 @@ class WorkflowRunner:
         # 3. Tool 节点：极硬核 ReAct 自适应工具决策迭代循环 (The Core Brain of Agent)
         # ==========================================
         if node_type == "Tool":
-            # 🛡️ 上游 Knowledge 节点已判定无证据并写入拒答草稿时，工具节点必须让行。
-            # 默认节点序是 start → knowledge → tool → llm → answer，工具节点会在
-            # 「模型返回纯文本、无 tool_calls」与「多轮工具轮次用尽」两处返回 draft，
-            # 覆盖掉 Knowledge 节点写入的拒答草稿——拒答契约对「知识库 + 工具」组合的
-            # agent 会失效（sources 虽已清空，拒答这半却不成立）。
-            # 判据用 rag_refusal 而非裸 draft：自定义工作流若为 LLM → Tool（先出草稿
-            # 再用工具增强），裸 draft 会让工具全部跳过，改变既有语义；rag_refusal 只在
-            # Knowledge 真的拒答时为真，不碰其它路径。
-            # 返回 {} 是干净的 no-op：context 不变，draft 保留，下游 LLM 节点走自己的
-            # 短路分支，Answer 节点从 context["draft"] 取到拒答文本。
-            if context.get("rag_refusal"):
-                return {}
-            bound_tools = self._runtime_tools(agent, node)
-            if not context.get('search_enabled', bool((agent.settings.get('tool_policy') or {}).get('web_search_enabled'))):
-                bound_tools = [tool for tool in bound_tools if tool.type != 'builtin_search']
-            tool_policy = (agent.settings.get("tool_policy") or {})
-            allowed_names = set(tool_policy.get("allowed_tool_names") or [])
-            if allowed_names:
-                bound_tools = [t for t in bound_tools if t.name in allowed_names]
-            router = CapabilityRouter(self.db, agent, context, bound_tools, executor=execute_tool)
-            context['_skill_metadata'] = router.skill_metadata()
-            context['_mcp_metadata'] = router.mcp_metadata()
-            # 🧠 设计修正：没有任何可用工具时直接空转返回。
-            # 但只要 Agent 绑定了工具，就不再因为查询理解把意图判成 chitchat/clarify
-            # 而提前剥夺工具——那会导致像「你能搜到这篇论文吗」这类问题被误判为闲聊、
-            # 模型根本看不到 arxiv_search 等工具。是否真正调用工具交由模型在
-            # tool_choice="auto" 下自行决策（纯闲聊时模型只回文本、不产生 tool_calls，
-            # 成本与原先跳过该节点一致）。
-            if not router.tools():
-                return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
-
-            # 翻译为标准符合 OpenAI/Claude 格式的 Tool Schemas 暴露给模型
-            messages = self._llm_messages(agent, context)
-            total_calls = 0
-            tools_used: list[str] = []
-            events = []
-            
-            # 🧠 魔鬼数字与硬兜底红线：
-            # - 最大工具调用预算 `max_tool_calls` 硬设定为 20。
-            # - 最多轮询上限 `_round` 为 8 轮。
-            # - 单次交互多轮工具执行的物理硬墙时间限制为 120 秒 (`max_tool_wall_time`)。
-            # 以上三重拦截指标，能够死死锁住由于 LLM 幻觉产生错误、反复触发同个重试工具、或者死循环解析报错产生的死循环调用，防止其拖死整个 Web Server 的工作线程池并榨干 Token 余额。
-            max_tool_calls = 20
-            max_tool_wall_time = 120  # seconds
-            tool_loop_start = time.monotonic()
-
-            capability_calls = 0
-            for _round in range(12):
-                if total_calls >= max_tool_calls:
-                    break
-                if time.monotonic() - tool_loop_start > max_tool_wall_time:
-                    break
-                current_tools = router.tools()
-                requested_names = {tool.name for tool in current_tools}
-                tool_schemas = [tool_schema_for_llm(t) for t in current_tools]
-                response = self.provider.chat(
-                    messages,
-                    model=agent.model,
-                    temperature=agent.temperature,
-                    runtime_config=agent.runtime_config,
-                    tools=tool_schemas,
-                )
-                
-                # 如果大模型返回了纯文本但没有工具调用指示，说明抉择完毕，直接吐出候选草稿返回
-                if response.content and not response.tool_calls:
-                    return {
-                        "draft": response.content,
-                        "tool_outputs": [],
-                        "tool_trace": _tool_trace(events),
-                        "tool_stats": {"total_calls": total_calls, "tools_used": tools_used},
-                        "events": events,
-                    }
-                
-                # 开始执行大模型呼叫的工具集
-                if response.tool_calls:
-                    assistant_msg = {"role": "assistant", "content": response.content, "tool_calls": response.tool_calls}
-                    if getattr(response, "provider_content", None):
-                        assistant_msg["anthropic_content"] = response.provider_content
-                    messages.append(assistant_msg)
-                    
-                    # 裁剪本轮工具呼叫，确保不超过总调配预算上限
-                    calls_this_round = response.tool_calls[:max_tool_calls - total_calls]
-                    for tc in calls_this_round:
-                        if time.monotonic() - tool_loop_start > max_tool_wall_time:
-                            break
-                        func = tc["function"]
-                        tool_name = func["name"]
-                        try:
-                            tool_args = json.loads(func.get("arguments") or "{}")
-                        except json.JSONDecodeError:
-                            # 🛡️ 防御性容错：模型可能直接吐出字符串而非格式化好的 JSON arguments
-                            tool_args = {"input": func.get("arguments") or ""}
-                        matching = next((t for t in current_tools if t.name == tool_name), None) if tool_name in requested_names else None
-                        started = time.monotonic()
-                        
-                        if matching:
-                            try:
-                                # 安全沙箱化调度工具执行
-                                if matching.type == 'capability':
-                                    capability_calls += 1
-                                    if capability_calls > 10:
-                                        raise ValueError('能力检索和加载次数已达到上限。')
-                                result = router.invoke(matching, tool_args)
-                                if matching.type == 'builtin_search':
-                                    search_result = result.get('result_json') or {}
-                                    web_sources = web_search_service.search_items_as_sources(search_result.get('items') or [])
-                                    context['web_sources'] = list({item.get('url'): item for item in [*(context.get('web_sources') or []), *web_sources]}.values())
-                                    context['search_status'] = {**(context.get('search_status') or {}), 'enabled': True,
-                                        'requested': True, 'reason': 'enabled' if web_sources else 'no_results',
-                                        'matched_results': len(web_sources), 'items': search_result.get('items') or [],
-                                        'sources': web_sources, 'sources_emitted': bool(web_sources), 'query': search_result.get('query') or ''}
-                                    events.append({'event': 'search_status', 'data': context['search_status']})
-                                result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
-                                event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
-                                events.append({"event": "tool_call", "data": event_data})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result.get("content") or result.get("result_preview") or ""})
-                            except ValueError as exc:
-                                if matching.type == 'builtin_search':
-                                    context['search_status'] = {**(context.get('search_status') or {}), 'reason': 'search_failed', 'error': str(exc), 'matched_results': 0}
-                                    events.append({'event': 'search_status', 'data': context['search_status']})
-                                # 🛡️ 稳妥抓取工具内部报错：当做正常的 Tool 输出反馈给 LLM，指导大模型在下一轮尝试自我修复
-                                events.append({"event": "tool_call", "data": tool_call_event(matching, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")})
-                                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"Error: {exc}"})
-                        else:
-                            deferred = router.known_mcp_tool(tool_name)
-                            code = 'tool_not_loaded' if deferred else 'tool_not_found'
-                            detail = f"Tool '{tool_name}' is authorized but not registered in this request. Use tool_search with its exact name to load its definition, then invoke it in the next request." if deferred else f"Tool '{tool_name}' not found"
-                            # 🛡️ 错误兜底：呼叫了未绑定的不存在工具
-                            events.append({"event": "tool_call", "data": tool_call_event(type("_", (), {"id": None, "name": tool_name, "type": "unknown"})(), {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code=code)})
-                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": detail})
-                        if not matching or matching.type != 'capability':
-                            total_calls += 1
-                        tools_used.append(tool_name)
-
-            # 多轮工具调用上限拦截后，由大模型根据现有对话追踪上下文产出最终回答
-            final = self.provider.chat(messages, model=agent.model, temperature=agent.temperature, runtime_config=agent.runtime_config)
-            return {
-                "draft": final.content or "",
-                "tool_outputs": [],
-                "tool_trace": _tool_trace(events),
-                "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, "max_rounds_reached": True},
-                "events": events,
-            }
+            return _drain(self._tool_node(agent, node, context, stream=False))
             
         # ==========================================
         # 4. LLM 节点：草稿提取或单独文本模型生成
@@ -856,6 +736,9 @@ class WorkflowRunner:
             - 否则，直接中继外部 OpenAICompatibleProvider 产出的 `chat_stream` 生成器，实现实时长连接输出。
         """
         draft = context.get("draft", "")
+        if draft and context.get("draft_streamed"):
+            # Tool 节点已经实时推过这段正文，这里不再重推
+            return self._llm_output(agent, context, draft)
         if draft:
             for index in range(0, len(draft), 24):
                 yield {"event": "token", "content": draft[index : index + 24]}
@@ -883,6 +766,267 @@ class WorkflowRunner:
             yield {"event": "token", "content": text}
         draft = "".join(chunks)
         return self._llm_output(agent, context, draft)
+
+    def _tool_node(self, agent, node: dict, context: dict, *, stream: bool):
+        """
+        Tool 节点：ReAct 自适应工具决策迭代循环（生成器，流式与非流式共用一套逻辑）。
+
+        🎯 流式（stream=True，run_events 走这里）：
+            - 每轮用 chat_stream(tools=...) 边收边判：content 帧实时推 token，reasoning 帧推 thinking_token；
+              流末尾若带 tool_calls 帧就执行工具进入下一轮，否则本轮正文即最终答案，
+              不再像旧实现那样先非流式生成完、再切段假装流式。
+            - 某轮已推出正文后模型又决定调工具时，补发 token_reset，前端把这段文字收进「过程说明」，
+              不计入最终回答（最终回答只取不再调工具的那一轮）。
+            - 返回值带 draft_streamed，下游 LLM 节点据此不再重推一遍草稿。
+        非流式（stream=False，run() 与 _execute_node 走这里）：每轮用 chat()，生成器不产出任何事件。
+        """
+        # 🛡️ 上游 Knowledge 节点已判定无证据并写入拒答草稿时，工具节点必须让行。
+        # 默认节点序是 start → knowledge → tool → llm → answer，工具节点会在
+        # 「模型返回纯文本、无 tool_calls」与「多轮工具轮次用尽」两处返回 draft，
+        # 覆盖掉 Knowledge 节点写入的拒答草稿——拒答契约对「知识库 + 工具」组合的
+        # agent 会失效。判据用 rag_refusal 而非裸 draft：自定义工作流若为 LLM → Tool
+        # （先出草稿再用工具增强），裸 draft 会让工具全部跳过，改变既有语义。
+        if context.get("rag_refusal"):
+            return {}
+        bound_tools = self._runtime_tools(agent, node)
+        if not context.get('search_enabled', bool((agent.settings.get('tool_policy') or {}).get('web_search_enabled'))):
+            bound_tools = [tool for tool in bound_tools if tool.type != 'builtin_search']
+        tool_policy = (agent.settings.get("tool_policy") or {})
+        allowed_names = set(tool_policy.get("allowed_tool_names") or [])
+        if allowed_names:
+            bound_tools = [t for t in bound_tools if t.name in allowed_names]
+        router = CapabilityRouter(self.db, agent, context, bound_tools, executor=execute_tool)
+        context['_skill_metadata'] = router.skill_metadata()
+        context['_mcp_metadata'] = router.mcp_metadata()
+        # 没有任何可用工具时直接空转返回。只要绑定了工具，就不因查询理解判成闲聊而剥夺工具，
+        # 是否调用交由模型在 tool_choice="auto" 下自行决策。
+        if not router.tools():
+            return {"tool_outputs": [], "tool_stats": {"total_calls": 0, "tools_used": []}}
+
+        messages = self._llm_messages(agent, context)
+        total_calls = 0
+        tools_used: list[str] = []
+        events = []
+        native_thinking = stream and bool(context.get("thinking_enabled")) and (context.get("thinking_status") or {}).get("type") == "native"
+
+        # 🧠 三重硬兜底：最多 12 轮、20 次工具调用、120 秒墙钟，锁死幻觉导致的反复调用与死循环。
+        max_tool_calls = 20
+        max_tool_wall_time = 120  # seconds
+        tool_loop_start = time.monotonic()
+
+        def finish(draft: str, *, streamed: bool, **stats) -> dict:
+            return {
+                "draft": draft,
+                "draft_streamed": streamed,
+                "tool_outputs": [],
+                "tool_trace": _tool_trace(events),
+                "tool_stats": {"total_calls": total_calls, "tools_used": tools_used, **stats},
+                "events": events,
+                # 流式路径下这些事件已逐条推送过，run_events 据此标记 step，SSE 层不再重发
+                "events_streamed": stream and flushed == len(events),
+            }
+
+        flushed = 0
+        capability_calls = 0
+        for _round in range(12):
+            if total_calls >= max_tool_calls:
+                break
+            if time.monotonic() - tool_loop_start > max_tool_wall_time:
+                break
+            current_tools = router.tools()
+            requested_names = {tool.name for tool in current_tools}
+            tool_schemas = [tool_schema_for_llm(t) for t in current_tools]
+            if stream:
+                turn = yield from self._stream_tool_turn(agent, messages, tool_schemas, native_thinking)
+            else:
+                response = self.provider.chat(
+                    messages,
+                    model=agent.model,
+                    temperature=agent.temperature,
+                    runtime_config=agent.runtime_config,
+                    tools=tool_schemas,
+                )
+                turn = {"content": response.content, "tool_calls": response.tool_calls,
+                        "provider_content": getattr(response, "provider_content", None), "streamed": False}
+
+            # 模型返回纯文本、没有工具调用：抉择完毕，本轮正文即最终回答
+            if turn["content"] and not turn["tool_calls"]:
+                return finish(turn["content"], streamed=turn["streamed"])
+
+            if turn["tool_calls"]:
+                if turn["streamed"]:
+                    # 本轮已经推出去的文字只是「调工具前的说明」，通知前端收进过程说明
+                    yield {"event": "token_reset", "content": turn["content"] or ""}
+                assistant_msg = {"role": "assistant", "content": turn["content"], "tool_calls": turn["tool_calls"]}
+                if turn.get("provider_content"):
+                    assistant_msg["anthropic_content"] = turn["provider_content"]
+                if turn.get("reasoning"):
+                    # DeepSeek 等思考模型在「思考 + 工具调用」多轮里要求回传本轮 reasoning_content
+                    assistant_msg["reasoning_content"] = turn["reasoning"]
+                messages.append(assistant_msg)
+
+                # 裁剪本轮工具呼叫，确保不超过总调配预算上限
+                calls_this_round = turn["tool_calls"][:max_tool_calls - total_calls]
+                for tc in calls_this_round:
+                    if time.monotonic() - tool_loop_start > max_tool_wall_time:
+                        break
+                    func = tc["function"]
+                    tool_name = func["name"]
+                    try:
+                        tool_args = json.loads(func.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        # 🛡️ 防御性容错：模型可能直接吐出字符串而非格式化好的 JSON arguments
+                        tool_args = {"input": func.get("arguments") or ""}
+                    matching = next((t for t in current_tools if t.name == tool_name), None) if tool_name in requested_names else None
+                    started = time.monotonic()
+
+                    if matching:
+                        try:
+                            if matching.type == 'capability':
+                                capability_calls += 1
+                                if capability_calls > 10:
+                                    raise ValueError('能力检索和加载次数已达到上限。')
+                            result = router.invoke(matching, tool_args)
+                            if matching.type == 'builtin_search':
+                                search_result = result.get('result_json') or {}
+                                web_sources = web_search_service.search_items_as_sources(search_result.get('items') or [])
+                                context['web_sources'] = list({item.get('url'): item for item in [*(context.get('web_sources') or []), *web_sources]}.values())
+                                context['search_status'] = {**(context.get('search_status') or {}), 'enabled': True,
+                                    'requested': True, 'reason': 'enabled' if web_sources else 'no_results',
+                                    'matched_results': len(web_sources), 'items': search_result.get('items') or [],
+                                    'sources': web_sources, 'sources_emitted': bool(web_sources), 'query': search_result.get('query') or ''}
+                                events.append({'event': 'search_status', 'data': context['search_status']})
+                            result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
+                            event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
+                            events.append({"event": "tool_call", "data": event_data})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result.get("content") or result.get("result_preview") or ""})
+                        except ValueError as exc:
+                            if matching.type == 'builtin_search':
+                                context['search_status'] = {**(context.get('search_status') or {}), 'reason': 'search_failed', 'error': str(exc), 'matched_results': 0}
+                                events.append({'event': 'search_status', 'data': context['search_status']})
+                            # 🛡️ 工具内部报错当作正常的 Tool 输出反馈给 LLM，让模型下一轮自我修复
+                            events.append({"event": "tool_call", "data": tool_call_event(matching, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")})
+                            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"Error: {exc}"})
+                    else:
+                        deferred = router.known_mcp_tool(tool_name)
+                        code = 'tool_not_loaded' if deferred else 'tool_not_found'
+                        detail = f"Tool '{tool_name}' is authorized but not registered in this request. Use tool_search with its exact name to load its definition, then invoke it in the next request." if deferred else f"Tool '{tool_name}' not found"
+                        # 🛡️ 错误兜底：呼叫了未绑定的不存在工具
+                        events.append({"event": "tool_call", "data": tool_call_event(type("_", (), {"id": None, "name": tool_name, "type": "unknown"})(), {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": 0}, status="error", input_preview="{}", error_code=code)})
+                        messages.append({"role": "tool", "tool_call_id": tc["id"], "content": detail})
+                    if not matching or matching.type != 'capability':
+                        total_calls += 1
+                    tools_used.append(tool_name)
+                    if stream:
+                        # 工具事件（tool_call / search_status）随调用实时推给前端，不等整个节点结束
+                        for event in events[flushed:]:
+                            yield {"event": "runtime", "data": event}
+                        flushed = len(events)
+
+        # 多轮工具调用上限拦截后，不再给工具，由大模型根据已有对话产出最终回答
+        if stream:
+            draft = yield from self._stream_answer(agent, messages, native_thinking)
+            return finish(draft, streamed=True, max_rounds_reached=True)
+        final = self.provider.chat(messages, model=agent.model, temperature=agent.temperature, runtime_config=agent.runtime_config)
+        return finish(final.content or "", streamed=False, max_rounds_reached=True)
+
+    def _stream_tool_turn(self, agent, messages: list[dict], tool_schemas: list[dict], native_thinking: bool):
+        """
+        流式跑一轮工具决策，实时推送正文/思考，返回本轮汇总：
+        {"content", "tool_calls", "provider_content", "reasoning", "streamed"}。
+
+        🛡️ 文本形式的函数调用：部分网关不给结构化 tool_calls，而是把 `<function…` / `<tool_call>`
+            写进正文（见 llm._extract_text_tool_calls）。正文开头疑似这类标记时先缓冲不推，
+            流结束后解析；解析不出调用再把缓冲的文字补推出去，正常回答只多等几个字符。
+        🛡️ 网关不支持流式工具调用：连接阶段（尚未产出任何帧）失败时，本轮退回非流式 chat() 重做。
+        """
+        chunks: list[str] = []
+        reasoning: list[str] = []
+        held: list[str] = []
+        holding = True  # 正文开头仍可能是文本形式函数调用的标记
+        tool_calls = None
+        provider_content = None
+        streamed = False
+        emitted = False
+        try:
+            for frame in self.provider.chat_stream(
+                messages,
+                model=agent.model,
+                temperature=agent.temperature,
+                runtime_config=agent.runtime_config,
+                tools=tool_schemas,
+                thinking=native_thinking,
+            ):
+                emitted = True
+                if isinstance(frame, str):
+                    frame = {"type": "content", "text": frame}
+                kind = frame.get("type")
+                if kind == "tool_calls":
+                    tool_calls = frame.get("calls") or None
+                    provider_content = frame.get("provider_content")
+                    continue
+                text = frame.get("text") or ""
+                if not text:
+                    continue
+                if kind == "reasoning":
+                    reasoning.append(text)
+                    yield {"event": "thinking_token", "content": text}
+                    continue
+                chunks.append(text)
+                if holding:
+                    held.append(text)
+                    head = "".join(held).lstrip()
+                    if not head or any(marker.startswith(head) or head.startswith(marker) for marker in _TEXT_TOOL_MARKERS):
+                        continue
+                    holding = False
+                    text, held = "".join(held), []
+                streamed = True
+                yield {"event": "token", "content": text}
+        except RuntimeError:
+            if emitted:
+                raise
+            logger.warning("Streaming tool turn failed before first frame; retrying without streaming", exc_info=True)
+            response = self.provider.chat(
+                messages, model=agent.model, temperature=agent.temperature,
+                runtime_config=agent.runtime_config, tools=tool_schemas,
+            )
+            return {"content": response.content, "tool_calls": response.tool_calls,
+                    "provider_content": getattr(response, "provider_content", None), "reasoning": "", "streamed": False}
+
+        content = "".join(chunks)
+        if not tool_calls and any(marker in content for marker in _TEXT_TOOL_MARKERS):
+            parsed = _extract_text_tool_calls(content)
+            if parsed:
+                return {"content": content if streamed else None, "tool_calls": parsed,
+                        "provider_content": None, "reasoning": "".join(reasoning), "streamed": streamed}
+        if held:
+            # 缓冲的开头最终没解析出函数调用：按普通正文补推
+            streamed = True
+            yield {"event": "token", "content": "".join(held)}
+        return {"content": content or None, "tool_calls": tool_calls, "provider_content": provider_content,
+                "reasoning": "".join(reasoning), "streamed": streamed}
+
+    def _stream_answer(self, agent, messages: list[dict], native_thinking: bool):
+        """不带工具流式生成最终回答（工具轮次用尽后的收尾），返回拼好的正文。"""
+        chunks = []
+        for frame in self.provider.chat_stream(
+            messages,
+            model=agent.model,
+            temperature=agent.temperature,
+            runtime_config=agent.runtime_config,
+            thinking=native_thinking,
+        ):
+            if isinstance(frame, str):
+                frame = {"type": "content", "text": frame}
+            text = frame.get("text") or ""
+            if not text or frame.get("type") == "tool_calls":
+                continue
+            if frame.get("type") == "reasoning":
+                yield {"event": "thinking_token", "content": text}
+                continue
+            chunks.append(text)
+            yield {"event": "token", "content": text}
+        return "".join(chunks)
 
     def _llm_messages(self, agent, context: dict) -> list[dict]:
         """
