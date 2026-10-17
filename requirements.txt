@@ -27,6 +27,8 @@ requests==2.32.5
 jieba==0.42.1
 rank-bm25==0.2.2
 prometheus-client==0.21.1
+# Langfuse 链路追踪（软依赖：未配置 LANGFUSE_* 时不启用）。钉死版本，升级时只需核对 core/observability/tracing.py
+langfuse==5.0.1
 minio==7.2.12
 
 pytest==8.3.4

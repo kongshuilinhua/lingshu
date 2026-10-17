@@ -170,6 +170,14 @@ def shutdown_mcp_clients() -> None:
     close_all_mcp_clients()
 
 
+@app.on_event("shutdown")
+def flush_tracing() -> None:
+    # 进程退出前把 Langfuse 后台队列里尚未上报的观测发出去
+    from core.observability import tracing
+
+    tracing.shutdown()
+
+
 # ── 健康检查 ──────────────────────────────────────────────
 
 @app.get("/api/health")

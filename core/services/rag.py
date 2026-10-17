@@ -14,6 +14,7 @@ from core.config import get_settings
 from core.db.models import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeParentChunk
 from core.integrations.llm import OpenAICompatibleProvider
 from core.integrations import vector_store as vector_store_module
+from core.observability import tracing
 from core.observability.metrics import record_cache
 from core.services.rag_cache import redis_store, ttl_with_jitter
 from core.services.query_translate import translate_query
@@ -63,6 +64,30 @@ def retrieve(
         6. 进行“证据度校验（_has_evidence）”判定是否命中真实证据，防止无关闲聊被强制套上知识库导致幻觉。
         7. 回写 Redis 缓存，输出最终 Sources 片段。
     """
+    with tracing.span("rag.retrieve", as_type="retriever", input=query,
+                      metadata={"knowledge_base_ids": knowledge_base_ids}) as observation:
+        result = _retrieve(db, workspace_id=workspace_id, knowledge_base_ids=knowledge_base_ids, query=query,
+                           config=config, runtime_config=runtime_config)
+        status = result.status
+        observation.update(
+            output=[{"title": item.get("title"), "snippet": item.get("snippet"), "score": item.get("score"),
+                     "dense_score": item.get("dense_score"), "bm25_score": item.get("bm25_score")} for item in result.sources],
+            metadata={"reason": status.get("reason"), "no_evidence": status.get("no_evidence"),
+                      "dense": status.get("dense"), "bm25": status.get("bm25"), "rrf": status.get("rrf"),
+                      "rerank": status.get("rerank"), "cache": status.get("cache"), "top_k": status.get("top_k")},
+        )
+        return result
+
+
+def _retrieve(
+    db: Session,
+    *,
+    workspace_id: int,
+    knowledge_base_ids: list[int],
+    query: str,
+    config: dict,
+    runtime_config: dict | None = None,
+) -> RagResult:
     settings = get_settings()
     started_status = _base_status(query, knowledge_base_ids, config)
     if not knowledge_base_ids:
@@ -370,7 +395,12 @@ def _rerank(provider: OpenAICompatibleProvider, *, query: str, hits: list[dict],
     Rerank 深度多阶段排序。
     """
     documents = [hit["text"] for hit in hits]
-    ranked = provider.rerank(query, documents, top_n=min(top_n, len(documents)), model=model)
+    with tracing.span("rag.rerank", input={"query": query, "documents": len(documents)},
+                      metadata={"model": model, "top_n": top_n}) as observation:
+        ranked = provider.rerank(query, documents, top_n=min(top_n, len(documents)), model=model)
+        observation.update(output=[{"index": item.get("index"), "score": item.get("relevance_score"),
+                                    "text": documents[item["index"]][:120] if 0 <= item.get("index", -1) < len(documents) else None}
+                                   for item in ranked])
     output = []
     used = set()
     for item in ranked:

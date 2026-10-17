@@ -32,6 +32,7 @@ from core.db.models import (
     Session as ChatSession,
 )
 from core.integrations.llm import OpenAICompatibleProvider, _extract_text_tool_calls
+from core.observability import tracing
 from core.runtime.capabilities import CapabilityRouter
 from core.runtime.conversation import conversation_context
 from core.services import query_understanding as qu_service
@@ -186,6 +187,33 @@ class WorkflowRunner:
             每一个 Run 代表一次用户交互，涉及多达几十次数据库读写。本方法在开始和结束时精确圈定
             SQLAlchemy 事务边界（db.commit），确保即使中间某个节点崩溃，前面的运行步骤依旧能持久化，为系统可观测性留下链路 Trace。
         """
+        with self._run_trace(agent, chat_session, user_message, mode, current_message_id, _agent_call_stack) as trace:
+            result = self._run(
+                agent=agent, chat_session=chat_session, user_message=user_message, mode=mode, variables=variables,
+                rag_enabled=rag_enabled, rag_options=rag_options, thinking_enabled=thinking_enabled,
+                search_enabled=search_enabled, attachments=attachments, _agent_call_stack=_agent_call_stack,
+                current_message_id=current_message_id, model_override=model_override,
+            )
+            trace.update(output=result[1])
+            return result
+
+    def _run(
+        self,
+        *,
+        agent: Agent,
+        chat_session: ChatSession,
+        user_message: str,
+        mode: str,
+        variables: dict | None,
+        rag_enabled: bool | None,
+        rag_options: dict | None,
+        thinking_enabled: bool | None,
+        search_enabled: bool | None,
+        attachments: list[dict] | None,
+        _agent_call_stack: list[int] | None,
+        current_message_id: int | None,
+        model_override: dict | None,
+    ) -> tuple[Run, str, list[dict], list[dict]]:
         runtime = self._runtime_agent(agent, mode, chat_session.user_id, model_override)
         self.runtime = runtime
         upload_ids = [str(item.get("id")) for item in attachments or [] if item.get("id")]
@@ -274,7 +302,9 @@ class WorkflowRunner:
             if node.get("id") in executed or len(executed) >= MAX_GRAPH_STEPS:
                 break
             executed.add(node.get("id"))
-            output = self._execute_node(runtime, node, context)
+            with self._node_span(node, context) as node_span:
+                output = self._execute_node(runtime, node, context)
+                node_span.update(output=self._node_trace_output(node, output))
             if not steps:
                 self._inject_first_node_events(output, context)
             events = output.pop("events", [])
@@ -356,6 +386,33 @@ class WorkflowRunner:
               `runtime`（节点执行中途实时推送的运行事件，如 tool_call；对应 step 带 events_streamed=True，
               消费方不应再重发 step.events）。
         """
+        with self._run_trace(agent, chat_session, user_message, mode, current_message_id, _agent_call_stack) as trace:
+            final = yield from self._run_events(
+                agent=agent, chat_session=chat_session, user_message=user_message, mode=mode, variables=variables,
+                rag_enabled=rag_enabled, rag_options=rag_options, thinking_enabled=thinking_enabled,
+                search_enabled=search_enabled, attachments=attachments, async_memory=async_memory,
+                _agent_call_stack=_agent_call_stack, current_message_id=current_message_id, model_override=model_override,
+            )
+            trace.update(output=final)
+
+    def _run_events(
+        self,
+        *,
+        agent: Agent,
+        chat_session: ChatSession,
+        user_message: str,
+        mode: str,
+        variables: dict | None,
+        rag_enabled: bool | None,
+        rag_options: dict | None,
+        thinking_enabled: bool | None,
+        search_enabled: bool | None,
+        attachments: list[dict] | None,
+        async_memory: bool,
+        _agent_call_stack: list[int] | None,
+        current_message_id: int | None,
+        model_override: dict | None,
+    ):
         runtime, run, context = self._start_run(
             agent=agent,
             chat_session=chat_session,
@@ -381,13 +438,15 @@ class WorkflowRunner:
             if node.get("id") in executed or len(executed) >= MAX_GRAPH_STEPS:
                 break
             executed.add(node.get("id"))
-            if node["type"] == "LLM":
-                # LLM 节点流式输出专用生成器中继
-                output = yield from self._stream_llm_node(runtime, node, context)
-            elif node["type"] == "Tool":
-                output = yield from self._tool_node(runtime, node, context, stream=True)
-            else:
-                output = self._execute_node(runtime, node, context)
+            with self._node_span(node, context) as node_span:
+                if node["type"] == "LLM":
+                    # LLM 节点流式输出专用生成器中继
+                    output = yield from self._stream_llm_node(runtime, node, context)
+                elif node["type"] == "Tool":
+                    output = yield from self._tool_node(runtime, node, context, stream=True)
+                else:
+                    output = self._execute_node(runtime, node, context)
+                node_span.update(output=self._node_trace_output(node, output))
             if not steps:
                 self._inject_first_node_events(output, context)
             events = output.pop("events", [])
@@ -410,7 +469,7 @@ class WorkflowRunner:
                 run.status = "paused"
                 self.db.commit()
                 yield {"event": "paused", "data": {"node_id": node.get("id"), "prompt": output.get("approval_prompt")}}
-                return
+                return "[paused]"
             next_id = resolve_next(node, output, context)
             i = advance(i, next_id, runtime.workflow)
 
@@ -442,6 +501,7 @@ class WorkflowRunner:
                 "event": "memory_compaction",
                 "data": compaction_event_copy,
             }
+        return final_answer
 
     def _start_run(
         self,
@@ -887,6 +947,9 @@ class WorkflowRunner:
                     started = time.monotonic()
 
                     if matching:
+                        tool_span_manager = tracing.span(f"tool:{tool_name}", as_type="tool", input=tool_args,
+                                                         metadata={"tool_type": matching.type})
+                        tool_span = tool_span_manager.__enter__()
                         try:
                             if matching.type == 'capability':
                                 capability_calls += 1
@@ -907,6 +970,7 @@ class WorkflowRunner:
                                     'sources': web_sources, 'sources_emitted': bool(web_sources), 'query': search_result.get('query') or ''}
                                 events.append({'event': 'search_status', 'data': context['search_status']})
                             result["latency_ms"] = result.get("latency_ms", int((time.monotonic() - started) * 1000))
+                            tool_span.update(output=result.get("content") or result.get("result_preview"))
                             event_data = tool_call_event(matching, result, input_preview=json.dumps(tool_args, ensure_ascii=False))
                             events.append({"event": "tool_call", "data": event_data})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result.get("content") or result.get("result_preview") or ""})
@@ -917,6 +981,9 @@ class WorkflowRunner:
                             # 🛡️ 工具内部报错当作正常的 Tool 输出反馈给 LLM，让模型下一轮自我修复
                             events.append({"event": "tool_call", "data": tool_call_event(matching, {"tool": tool_name, "content": "", "result_preview": "", "latency_ms": int((time.monotonic() - started) * 1000), "error": str(exc)}, status="error", input_preview=json.dumps(tool_args, ensure_ascii=False), error_code="tool_error")})
                             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": f"Error: {exc}"})
+                            tool_span.update(level="ERROR", status_message=str(exc)[:500])
+                        finally:
+                            tool_span_manager.__exit__(None, None, None)
                     else:
                         deferred = router.known_mcp_tool(tool_name)
                         code = 'tool_not_loaded' if deferred else 'tool_not_found'
@@ -1037,6 +1104,49 @@ class WorkflowRunner:
             chunks.append(text)
             yield {"event": "token", "content": text}
         return "".join(chunks)
+
+    def _run_trace(self, agent, chat_session, user_message: str, mode: str, current_message_id, agent_call_stack):
+        """一次工作流运行的根 trace。trace id 由本轮用户消息 id 派生，用户点赞/点踩时据此回挂打分。
+
+        🛡️ 追踪必须是纯旁路：未启用时直接返回 no-op，不读取 agent / session 的任何属性；
+            启用时也只用 getattr 兜底读取，埋点永远不能让一次运行失败。
+        """
+        if not tracing.enabled():
+            return tracing.span("noop")
+        name = f"agent:{getattr(agent, 'name', None) or getattr(agent, 'id', '')}"
+        agent_id = getattr(agent, "id", None)
+        if agent_call_stack:
+            # 子智能体（Agent-as-Tool）作为父 trace 下的一个 span，不另起 trace
+            return tracing.span(name, as_type="agent", input=user_message, metadata={"agent_id": agent_id, "mode": mode})
+        return tracing.trace(
+            name,
+            trace_id=tracing.trace_id_for(f"lingshu-message-{current_message_id}") if current_message_id else None,
+            user_id=getattr(chat_session, "user_id", None),
+            session_id=getattr(chat_session, "id", None),
+            tags=[f"agent:{agent_id}", mode],
+            metadata={"agent_id": agent_id, "workspace_id": getattr(agent, "workspace_id", None), "mode": mode},
+            input=user_message,
+        )
+
+    @staticmethod
+    def _node_span(node: dict, context: dict):
+        as_type = {"Knowledge": "retriever", "Tool": "agent", "LLM": "chain"}.get(node["type"], "span")
+        return tracing.span(f"node:{node['type']}", as_type=as_type, metadata={"node_id": node.get("id")},
+                            input=context.get("input") if node["type"] == "Start" else None)
+
+    @staticmethod
+    def _node_trace_output(node: dict, output: dict) -> dict | None:
+        """节点输出摘要：去掉大字段（events、完整 sources），保留排查需要的状态。未启用追踪时不计算。"""
+        if not tracing.enabled() or not isinstance(output, dict):
+            return None
+        summary = {key: value for key, value in output.items()
+                   if key not in {"events", "sources", "tool_trace", "draft", "answer"}}
+        if output.get("sources"):
+            summary["sources"] = [{"title": item.get("title"), "score": item.get("score"),
+                                   "dense_score": item.get("dense_score")} for item in output["sources"]]
+        if output.get("draft") or output.get("answer"):
+            summary["text"] = output.get("answer") or output.get("draft")
+        return summary
 
     def _llm_messages(self, agent, context: dict) -> list[dict]:
         """

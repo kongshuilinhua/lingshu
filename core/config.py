@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # 默认关闭：只允许公网 HTTPS。仅作用于「我的模型」的网关（拉取列表、连接测试、聊天调用），
     # MCP、HTTP 工具、web reader 的 SSRF 防护不受影响；开启后云元数据地址仍被拒绝。
     user_model_allow_private_network: bool = Field(default=False, alias="USER_MODEL_ALLOW_PRIVATE_NETWORK")
+    # 📈 Langfuse 链路追踪（可选）：三项都配置且已安装 langfuse 时启用，否则全部埋点为 no-op。
+    # mock 模式下始终关闭，测试流量不进监控。
+    langfuse_public_key: str | None = Field(default=None, alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_secret_key: str | None = Field(default=None, alias="LANGFUSE_SECRET_KEY")
+    langfuse_base_url: str | None = Field(default=None, alias="LANGFUSE_BASE_URL")
+    langfuse_environment: str | None = Field(default=None, alias="LANGFUSE_ENVIRONMENT")
+    langfuse_sample_rate: float = Field(default=1.0, ge=0.0, le=1.0, alias="LANGFUSE_SAMPLE_RATE")
     skill_sandbox_image: str = Field(default="", alias="SKILL_SANDBOX_IMAGE")
     mcp_oauth_redirect_url: str = Field(default="", alias="MCP_OAUTH_REDIRECT_URL")
     mcp_client_metadata_url: str = Field(default="", alias="MCP_CLIENT_METADATA_URL")

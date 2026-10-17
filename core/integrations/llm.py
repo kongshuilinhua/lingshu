@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from core.config import get_settings
 from core.integrations import anthropic_protocol
 from core.integrations.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
+from core.observability import tracing
 from core.security.outbound_http import open_model_gateway
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,8 @@ class ChatResponse:
     content: str | None = None
     tool_calls: list[dict] | None = None
     provider_content: list[dict] | None = None
+    # token 用量 {input, output, total}；网关未返回时为 None（仅用于链路追踪，不参与业务逻辑）
+    usage: dict | None = None
 
 
 # 🛡️ 兼容垫片：部分模型/网关（典型如 Qwen 系）不会把函数调用放进 OpenAI 标准的
@@ -202,6 +205,26 @@ class OpenAICompatibleProvider:
         thinking: bool = False,
         tool_choice=None,
     ) -> ChatResponse:
+        """非流式模型调用（带链路追踪的入口，实际调用见 _chat）。"""
+        with tracing.generation("chat", model=self._traced_model(model, runtime_config), input=messages,
+                                model_parameters=self._traced_parameters(temperature, runtime_config, tools, thinking)) as observation:
+            response = self._chat(messages, model=model, temperature=temperature, runtime_config=runtime_config,
+                                  tools=tools, thinking=thinking, tool_choice=tool_choice)
+            observation.update(output={"content": response.content, "tool_calls": response.tool_calls} if response.tool_calls
+                               else response.content, usage_details=response.usage)
+            return response
+
+    def _chat(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float = 0.4,
+        runtime_config: dict | None = None,
+        tools: list[dict] | None = None,
+        thinking: bool = False,
+        tool_choice=None,
+    ) -> ChatResponse:
         """
         同步文本生成方法（支持 Tool Call 参数请求）。
 
@@ -280,9 +303,52 @@ class OpenAICompatibleProvider:
             breaker.record_failure()
             raise
         breaker.record_success()
-        return self._parse_chat_response(data)
+        result = self._parse_chat_response(data)
+        result.usage = self._openai_usage(data.get("usage"))
+        return result
 
     def chat_stream(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float = 0.4,
+        runtime_config: dict | None = None,
+        tools: list[dict] | None = None,
+        thinking: bool = False,
+        tool_choice=None,
+    ) -> Iterable[dict]:
+        """
+        流式模型调用（带链路追踪的入口，实际调用见 _chat_stream）。
+
+        usage 帧在这里被截下记入 generation，不转发给调用方；首个正文/思考帧记为首字时间。
+        """
+        with tracing.generation("chat_stream", model=self._traced_model(model, runtime_config), input=messages,
+                                model_parameters=self._traced_parameters(temperature, runtime_config, tools, thinking)) as observation:
+            content: list[str] = []
+            reasoning: list[str] = []
+            tool_calls = None
+            for frame in self._chat_stream(messages, model=model, temperature=temperature, runtime_config=runtime_config,
+                                           tools=tools, thinking=thinking, tool_choice=tool_choice):
+                kind = frame.get("type") if isinstance(frame, dict) else "content"
+                if kind == "usage":
+                    observation.update(usage_details=frame.get("usage"))
+                    continue
+                if kind == "tool_calls":
+                    tool_calls = frame.get("calls")
+                else:
+                    text = frame.get("text") if isinstance(frame, dict) else frame
+                    if text:
+                        observation.mark_first_token()
+                        (reasoning if kind == "reasoning" else content).append(text)
+                yield frame
+            output: dict | str = "".join(content)
+            if tool_calls or reasoning:
+                output = {"content": output, **({"tool_calls": tool_calls} if tool_calls else {}),
+                          **({"reasoning": "".join(reasoning)} if reasoning else {})}
+            observation.update(output=output)
+
+    def _chat_stream(
         self,
         messages: list[dict],
         *,
@@ -321,7 +387,7 @@ class OpenAICompatibleProvider:
         api_key = self._api_key(settings, runtime_config, purpose="chat")
         if settings.mock_llm:
             self.last_chat_mock = True
-            text = self.chat(messages, model=model, temperature=temperature, runtime_config=runtime_config, tools=tools, thinking=thinking)
+            text = self._chat(messages, model=model, temperature=temperature, runtime_config=runtime_config, tools=tools, thinking=thinking)
             if text.tool_calls:
                 yield {"type": "tool_calls", "calls": text.tool_calls}
                 return
@@ -370,6 +436,9 @@ class OpenAICompatibleProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
+        if tracing.enabled():
+            # 流式默认不返回 token 用量；只在开启链路追踪时才请求，避免给不支持的网关平添风险
+            payload["stream_options"] = {"include_usage": True}
         post_kwargs = {"public_only": True} if (runtime_config or {}).get("untrusted_base_url") else {}
         try:
             emitted = False
@@ -379,7 +448,8 @@ class OpenAICompatibleProvider:
                     yield frame
             except RuntimeError as exc:
                 # 只有尚未产出任何帧（连接阶段即被拒）才可安全重试
-                if emitted or not self._drop_rejected_enable_thinking(payload, exc):
+                if emitted or not (self._drop_rejected_enable_thinking(payload, exc)
+                                   or self._drop_rejected_stream_options(payload, exc)):
                     raise
                 yield from self._post_json_stream(url, payload, api_key, **post_kwargs)
         except Exception:
@@ -388,6 +458,13 @@ class OpenAICompatibleProvider:
         breaker.record_success()
 
     def embed(self, text: str, *, runtime_config: dict | None = None) -> list[float]:
+        """单条向量化（带链路追踪的入口；只在已有 trace 内记录，入库批量向量化不记录）。"""
+        with tracing.generation("embed", model=get_settings().openai_embedding_model, input=text, as_type="embedding") as observation:
+            vector = self._embed(text, runtime_config=runtime_config)
+            observation.update(output={"dimensions": len(vector)})
+            return vector
+
+    def _embed(self, text: str, *, runtime_config: dict | None = None) -> list[float]:
         """
         文本向量化嵌入（Embedding）。
 
@@ -725,6 +802,9 @@ class OpenAICompatibleProvider:
                     except json.JSONDecodeError:
                         continue
                     self._collect_tool_call_deltas(data, pending_calls)
+                    usage = self._openai_usage(data.get("usage")) if data.get("usage") else None
+                    if usage:
+                        yield {"type": "usage", "usage": usage}
                     yield from self._stream_delta(data)
                 if pending_calls:
                     yield {"type": "tool_calls", "calls": self._finish_tool_calls(pending_calls)}
@@ -791,6 +871,34 @@ class OpenAICompatibleProvider:
             # 🛡️ DashScope 协议约束：enable_thinking=true 仅流式调用支持，
             #    非流式请求强制关闭，避免同步路径（run/工具决策等）开思考时直接 400。
             payload["enable_thinking"] = bool(thinking) and bool(payload.get("stream"))
+
+    @staticmethod
+    def _drop_rejected_stream_options(payload: dict, exc: Exception) -> bool:
+        """端点不认 stream_options（个别 OpenAI 兼容网关）时去掉它重试；代价只是这次拿不到 token 用量。"""
+        text = str(exc)
+        if "stream_options" not in payload or "HTTP 400" not in text or "stream_options" not in text:
+            return False
+        payload.pop("stream_options", None)
+        return True
+
+    @staticmethod
+    def _openai_usage(usage) -> dict | None:
+        if not isinstance(usage, dict):
+            return None
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        if not prompt and not completion:
+            return None
+        return {"input": prompt, "output": completion, "total": int(usage.get("total_tokens") or prompt + completion)}
+
+    def _traced_model(self, model: str | None, runtime_config: dict | None) -> str:
+        return model or (runtime_config or {}).get("chat_model") or get_settings().openai_model
+
+    @staticmethod
+    def _traced_parameters(temperature, runtime_config: dict | None, tools, thinking: bool) -> dict:
+        return {"temperature": temperature, "provider": (runtime_config or {}).get("provider") or "openai-compatible",
+                "max_tokens": (runtime_config or {}).get("max_tokens"), "thinking": bool(thinking),
+                "tools": [tool.get("function", {}).get("name") for tool in tools or []] or None}
 
     @staticmethod
     def _drop_rejected_enable_thinking(payload: dict, exc: Exception) -> bool:
