@@ -145,7 +145,13 @@ def parse_response(data: dict) -> dict:
 
 
 def stream_frames(response):
-    """Consume native SSE, including split JSON tool arguments and error events."""
+    """Consume native SSE, including split JSON tool arguments and error events.
+
+    Text and thinking are yielded incrementally. When the turn requested tools, a single
+    ``{"type": "tool_calls", "calls": [...], "provider_content": [...]}`` frame is yielded at
+    the end; ``provider_content`` keeps every block (thinking signatures included) so the
+    next round can replay the assistant turn unchanged.
+    """
     pending = []
     blocks = {}
     completed = False
@@ -178,23 +184,32 @@ def stream_frames(response):
                 yield {"type": "content", "text": block["text"]}
         elif kind == "content_block_delta":
             delta = data.get("delta") or {}
+            state = blocks.setdefault(data.get("index", len(blocks)), {"block": {}, "json": ""})
+            block = state["block"]
             if delta.get("type") == "text_delta":
+                block.setdefault("type", "text")
+                block["text"] = block.get("text", "") + delta.get("text", "")
                 yield {"type": "content", "text": delta.get("text", "")}
             elif delta.get("type") == "thinking_delta":
+                block.setdefault("type", "thinking")
+                block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
                 yield {"type": "reasoning", "text": delta.get("thinking", "")}
+            elif delta.get("type") == "signature_delta":
+                block["signature"] = block.get("signature", "") + delta.get("signature", "")
             elif delta.get("type") == "input_json_delta":
-                state = blocks[data["index"]]
                 state["json"] += delta.get("partial_json", "")
                 if len(state["json"]) > 1_000_000:
                     raise RuntimeError("Model tool arguments are too large")
         elif kind == "content_block_stop":
             state = blocks.get(data["index"])
-            if state and state["block"].get("type") == "tool_use":
-                if state["json"]:
-                    state["block"]["input"] = json.loads(state["json"])
-                yield {"type": "tool_call", "tool_call": normalized_tool(state["block"])}
+            if state and state["block"].get("type") == "tool_use" and state["json"]:
+                state["block"]["input"] = json.loads(state["json"])
         elif kind == "message_stop":
             completed = True
             break
     if not completed:
         raise RuntimeError("Model call failed: incomplete Anthropic stream")
+    ordered = [blocks[index]["block"] for index in sorted(blocks) if blocks[index]["block"].get("type")]
+    calls = [normalized_tool(block) for block in ordered if block.get("type") == "tool_use"]
+    if calls:
+        yield {"type": "tool_calls", "calls": calls, "provider_content": copy.deepcopy(ordered)}

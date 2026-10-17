@@ -24,6 +24,7 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
                 {message.thinking && (
                   <ThinkingPanel thinking={message.thinking} inProgress={Boolean(message.pending && !message.content)} />
                 )}
+                {message.process?.length > 0 && <ProcessNotes notes={message.process} />}
                 {message.pending && !message.content
                   ? (!message.thinking && <p className="message-pending">思考中...</p>)
                   : <MarkdownContent content={message.content || ''} />}
@@ -86,6 +87,21 @@ export function ThinkingPanel({ thinking, inProgress }) {
         <ChevronDown size={14} className={`thinking-chevron ${open ? 'open' : ''}`} />
       </button>
       {open && <pre className="message-thinking-body">{thinking}</pre>}
+    </div>
+  );
+}
+
+export function ProcessNotes({ notes }) {
+  // 调工具前模型顺口说的话（「我先查一下」）：默认折叠，不混进最终回答
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="message-thinking message-process">
+      <button type="button" className="message-thinking-toggle" onClick={() => setOpen((value) => !value)}>
+        <Search size={14} />
+        <span>过程说明（{notes.length}）</span>
+        <ChevronDown size={14} className={`thinking-chevron ${open ? 'open' : ''}`} />
+      </button>
+      {open && <pre className="message-thinking-body">{notes.join('\n\n')}</pre>}
     </div>
   );
 }

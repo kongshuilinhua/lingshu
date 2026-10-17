@@ -63,6 +63,22 @@ describe('useChatStore 流式聊天', () => {
     expect(useChatStore.getState().busy).toBe(false);
   });
 
+  it('token_reset 把调工具前的正文收进过程说明，最终回答只留下一轮正文', async () => {
+    const { response } = streamResponse([
+      sse('token', { content: '我先查' }),
+      sse('token', { content: '一下。' }),
+      sse('token_reset', { content: '我先查一下。' }),
+      sse('token', { content: '营业到 22 点。' }),
+    ]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
+
+    await useChatStore.getState().sendMessage(BASE_ARGS);
+
+    const last = useChatStore.getState().messages.at(-1);
+    expect(last.content).toBe('营业到 22 点。');
+    expect(last.process).toEqual(['我先查一下。']);
+  });
+
   it('畸形数据帧被跳过，已收到的正文不被破坏', async () => {
     const { response } = streamResponse([
       sse('token', { content: '前' }),

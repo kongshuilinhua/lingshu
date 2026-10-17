@@ -27,6 +27,7 @@ import { ChatComposer } from '../components/chat/ChatComposer.jsx';
 import { McpBindingPanel } from '../components/McpBindingPanel.jsx';
 import { SkillBindingPanel } from '../components/SkillBindingPanel.jsx';
 import { AgentSearchSetting } from '../components/AgentSearchSetting.jsx';
+import { RetrievalModeSetting } from '../components/RetrievalModeSetting.jsx';
 import {
   findModelForForm,
   modelCapabilityWarning,
@@ -78,7 +79,8 @@ function debugEventSummary(event) {
   }
   if (event.event === 'rag_status') {
     const enabled = event.enabled === false ? 'disabled' : 'enabled';
-    const source = event.effective_source || 'default';
+    if (event.reason === 'on_demand') return `${enabled} · 按需调用，等待模型决定是否检索`;
+    const source = event.trigger === 'tool' ? `tool「${event.query || ''}」` : (event.effective_source || 'default');
     const dense = event.dense?.matched ?? 0;
     const bm25 = event.bm25?.matched ?? 0;
     const rrf = event.rrf?.matched ?? event.matched_chunks ?? 0;
@@ -491,6 +493,19 @@ export function BuilderView(props) {
               </button>
             </div>
             <div className="coze-accordion-body">
+              {agentForm.knowledge_base_ids.length > 0 && (
+                <RetrievalModeSetting
+                  mode={agentForm.rag?.retrieval_mode || 'auto'}
+                  disabled={!canEditActive}
+                  missingDescriptions={knowledgeBases
+                    .filter((kb) => agentForm.knowledge_base_ids.includes(kb.id) && !(kb.description || '').trim())
+                    .map((kb) => kb.name)}
+                  onChange={(retrievalMode) => setAgentForm({
+                    ...agentForm,
+                    rag: { ...(agentForm.rag || { enabled_by_default: true, top_k: 4 }), retrieval_mode: retrievalMode },
+                  })}
+                />
+              )}
               {knowledgeBases.filter(kb => agentForm.knowledge_base_ids.includes(kb.id)).map((kb) => {
                 const isSelectedForUpload = String(docForm.kb_id) === String(kb.id);
                 return (

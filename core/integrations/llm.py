@@ -301,6 +301,10 @@ class OpenAICompatibleProvider:
             - `content` 帧是回答正文 Token；`reasoning` 帧是原生推理模型（如 Qwen3 系列开启
               enable_thinking 后）的思考轨迹流，两条通道彻底分离，消费方绝不允许把
               reasoning 帧拼进最终回答（否则会污染存库正文与会话记忆）。
+            - 传入 tools 且模型决定调用工具时，流末尾额外产出一帧
+              `{"type": "tool_calls", "calls": [...], "provider_content"?: [...]}`：
+              calls 与非流式 chat() 的 tool_calls 同构；provider_content 仅 Anthropic 协议携带，
+              供下一轮原样回放（含 thinking 签名）。
 
         🧠 深度思考（thinking）：
             - 对识别为 Qwen3 系列的模型显式下发 DashScope 的 `enable_thinking` 扩展参数：
@@ -319,7 +323,7 @@ class OpenAICompatibleProvider:
             self.last_chat_mock = True
             text = self.chat(messages, model=model, temperature=temperature, runtime_config=runtime_config, tools=tools, thinking=thinking)
             if text.tool_calls:
-                yield {"type": "content", "text": json.dumps({"tool_calls": text.tool_calls}, ensure_ascii=False)}
+                yield {"type": "tool_calls", "calls": text.tool_calls}
                 return
             if thinking:
                 # 🛡️ 脱机联调对齐：thinking 开启时仿真一段思考流，保证前端/工作流的独立通道无 API Key 也可联调
@@ -366,7 +370,6 @@ class OpenAICompatibleProvider:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = self._openai_tool_choice(tool_choice)
-        # 🎯 编排流转：有工具绑定时，实际上由工作流 runtime 模块使用非流式 chat() 做决策，流式仅在最后的最终回答生成阶段触发
         post_kwargs = {"public_only": True} if (runtime_config or {}).get("untrusted_base_url") else {}
         try:
             emitted = False
@@ -707,6 +710,9 @@ class OpenAICompatibleProvider:
                 if protocol == "anthropic":
                     yield from anthropic_protocol.stream_frames(response)
                     return
+                # 流式 tool_calls 按 index 分片到达（id/name 通常只在首片，arguments 逐片拼接），
+                # 收齐后在流末尾一次性产出 tool_calls 帧。
+                pending_calls: dict[int, dict] = {}
                 for raw_line in response:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line or not line.startswith("data:"):
@@ -718,7 +724,10 @@ class OpenAICompatibleProvider:
                         data = json.loads(payload_text)
                     except json.JSONDecodeError:
                         continue
+                    self._collect_tool_call_deltas(data, pending_calls)
                     yield from self._stream_delta(data)
+                if pending_calls:
+                    yield {"type": "tool_calls", "calls": self._finish_tool_calls(pending_calls)}
         except urllib.error.HTTPError as exc:
             detail = exc.read(4096).decode("utf-8", errors="replace").replace(api_key, "[secret]")[:800]
             raise RuntimeError(
@@ -728,6 +737,40 @@ class OpenAICompatibleProvider:
             raise RuntimeError(
                 f"Model call failed: cannot connect to model gateway {url}. Check endpoint, proxy, certs and API key. Raw error: {exc}"
             ) from exc
+
+    @staticmethod
+    def _collect_tool_call_deltas(data: dict, pending: dict[int, dict]) -> None:
+        """把一条 SSE 报文里的 delta.tool_calls 分片并入 pending（按 index 归并）。"""
+        for choice in data.get("choices") or []:
+            delta = (choice or {}).get("delta") or {}
+            for item in delta.get("tool_calls") or []:
+                if not isinstance(item, dict):
+                    continue
+                index = item.get("index")
+                if not isinstance(index, int):
+                    index = len(pending)
+                state = pending.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                if item.get("id"):
+                    state["id"] = item["id"]
+                function = item.get("function") or {}
+                if function.get("name") and not state["name"]:
+                    state["name"] = function["name"]
+                if isinstance(function.get("arguments"), str):
+                    state["arguments"] += function["arguments"]
+                    if len(state["arguments"]) > 1_000_000:
+                        raise RuntimeError("Model tool arguments are too large")
+
+    @staticmethod
+    def _finish_tool_calls(pending: dict[int, dict]) -> list[dict]:
+        calls = []
+        for index in sorted(pending):
+            state = pending[index]
+            if not state["name"]:
+                continue
+            call_id = state["id"] or f"call_{index}_{hashlib.md5(state['arguments'].encode()).hexdigest()[:8]}"
+            calls.append({"id": call_id, "type": "function",
+                          "function": {"name": state["name"], "arguments": state["arguments"] or "{}"}})
+        return calls
 
     @staticmethod
     def _openai_tool_choice(choice):

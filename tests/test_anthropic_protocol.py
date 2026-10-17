@@ -108,8 +108,37 @@ def test_native_stream_separates_text_thinking_and_tool_arguments(live_settings,
     monkeypatch.setattr(llm, 'open_model_gateway', lambda request, **kwargs: sse(events))
     frames = list(llm.OpenAICompatibleProvider().chat_stream([{'role': 'user', 'content': 'hi'}], runtime_config=RUNTIME))
     assert frames[:2] == [{'type': 'reasoning', 'text': 'plan'}, {'type': 'content', 'text': 'answer'}]
-    assert frames[2]['tool_call']['id'] == 'toolu_s'
-    assert json.loads(frames[2]['tool_call']['function']['arguments']) == {'text': 'ok'}
+    assert frames[2]['type'] == 'tool_calls'
+    assert frames[2]['calls'][0]['id'] == 'toolu_s'
+    assert json.loads(frames[2]['calls'][0]['function']['arguments']) == {'text': 'ok'}
+    # provider_content 保留完整块序列，供下一轮原样回放
+    assert [block['type'] for block in frames[2]['provider_content']] == ['thinking', 'text', 'tool_use']
+    assert frames[2]['provider_content'][2]['input'] == {'text': 'ok'}
+
+
+def test_native_stream_keeps_thinking_signature_for_replay():
+    events = [
+        {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'thinking', 'thinking': ''}},
+        {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'thinking_delta', 'thinking': 'plan'}},
+        {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'signature_delta', 'signature': 'sig'}},
+        {'type': 'content_block_stop', 'index': 0},
+        {'type': 'content_block_start', 'index': 1, 'content_block': {'type': 'tool_use', 'id': 'toolu_a', 'name': 'echo', 'input': {}}},
+        {'type': 'content_block_stop', 'index': 1}, {'type': 'message_stop'},
+    ]
+    frames = list(protocol.stream_frames(sse(events)))
+    assert frames[0] == {'type': 'reasoning', 'text': 'plan'}
+    replay = frames[-1]['provider_content']
+    assert replay[0] == {'type': 'thinking', 'thinking': 'plan', 'signature': 'sig'}
+    assert replay[1]['input'] == {}
+
+
+def test_native_stream_without_tools_emits_no_tool_calls_frame():
+    events = [
+        {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+        {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'hi'}},
+        {'type': 'content_block_stop', 'index': 0}, {'type': 'message_stop'},
+    ]
+    assert list(protocol.stream_frames(sse(events))) == [{'type': 'content', 'text': 'hi'}]
 
 
 def test_stream_error_and_truncated_stream_are_not_successful_answers():

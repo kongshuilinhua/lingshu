@@ -5711,3 +5711,48 @@ body.dark .coze-accordion-item {
 }
 
 
+
+/* 知识库检索方式（自动检索 / 按需调用） */
+.retrieval-mode-setting {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.retrieval-mode-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.retrieval-mode-label {
+  color: #64748b;
+  margin-right: 4px;
+}
+.retrieval-mode-options label {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid #dfe4ef;
+  border-radius: 999px;
+  cursor: pointer;
+  color: #334155;
+  background: #fff;
+}
+.retrieval-mode-options label.active {
+  border-color: #4d43e6;
+  color: #4d43e6;
+  background: rgba(77, 67, 230, 0.06);
+}
+.retrieval-mode-options input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.retrieval-mode-hint {
+  color: #94a3b8;
+  font-size: 11px;
+}
+.retrieval-mode-warning {
+  color: #b45309;
+  font-size: 11px;
+}

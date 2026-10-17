@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -23,6 +25,8 @@ class AgentRagConfig(BaseModel):
     rerank_top_n: int | None = Field(default=None, ge=1, le=20)
     cache_enabled: bool | None = None
     refuse_when_no_evidence: bool | None = None
+    # auto：每轮先检索；on_demand：知识库作为工具由模型按需调用。None 表示沿用已有设置/默认值。
+    retrieval_mode: Literal["auto", "on_demand"] | None = None
 
 
 class AgentVariable(BaseModel):

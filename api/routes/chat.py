@@ -125,10 +125,18 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
             elif event["event"] == "thinking_token":
                 # 🎯 思考轨迹独立通道：只透传给前端实时渲染，不参与 answer 拼装，也绝不写入 Message
                 yield sse_event("thinking_token", {"content": event.get("content", "")})
+            elif event["event"] == "token_reset":
+                # 工具循环里模型先说了一段话、随后决定调工具：前端把已显示的正文收进过程说明
+                yield sse_event("token_reset", {"content": event.get("content", "")})
+            elif event["event"] == "runtime":
+                # 节点执行中途实时推送的运行事件（如工具循环里的 tool_call / search_status）
+                runtime_event = event["data"]
+                yield sse_event(runtime_event.get("event", "tool_call"), runtime_event.get("data", {}))
             elif event["event"] == "step":
                 step = event["step"]
-                for runtime_event in step.get("events", []):
-                    yield sse_event(runtime_event.get("event", "tool_call"), runtime_event.get("data", {}))
+                if not step.get("events_streamed"):
+                    for runtime_event in step.get("events", []):
+                        yield sse_event(runtime_event.get("event", "tool_call"), runtime_event.get("data", {}))
                 yield sse_event("run_step", step)
             elif event["event"] == "complete":
                 run = event["run"]

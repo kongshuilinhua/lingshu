@@ -361,7 +361,7 @@ def test_all_disabled_knowledge_bases_refuse_without_rewriting_ids(client, auth_
         json={
             "name": "Disabled KB Agent",
             "knowledge_base_ids": [kb_id],
-            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True},
+            "rag": {"enabled_by_default": True, "refuse_when_no_evidence": True, "retrieval_mode": "auto"},
         },
     ).json()["agent"]["id"]
 
@@ -415,7 +415,7 @@ def test_chat_rag_options_emit_hybrid_status(client, auth_headers):
         json={
             "name": "Hybrid Agent",
             "knowledge_base_ids": [kb_id],
-            "rag": {"enabled_by_default": True, "top_k": 1},
+            "rag": {"enabled_by_default": True, "top_k": 1, "retrieval_mode": "auto"},
         },
     )
     agent_id = agent.json()["agent"]["id"]

@@ -53,6 +53,7 @@ DEFAULT_RAG = {
     "cache_enabled": True,
     "refuse_when_no_evidence": True,
 }
+RAG_RETRIEVAL_MODES = ("auto", "on_demand")
 DEFAULT_TOOL_POLICY = {"mode": "auto", "allowed_tool_names": [], "web_search_enabled": False}
 DEFAULT_QUERY_UNDERSTANDING = {
     "enabled": True,
@@ -169,7 +170,8 @@ def create_agent(db: Session, *, workspace_id: int, user_id: int, payload: dict)
             suggested_questions=normalize_questions(payload.get("suggested_questions")),
             variables=normalize_variables(payload.get("variables")),
             memory=normalize_memory(payload.get("memory")),
-            rag=normalize_rag(payload.get("rag")),
+            # 新建智能体默认「按需调用」：调用方没明确指定检索方式时才写入
+            rag=normalize_rag({"retrieval_mode": "on_demand", **dict(_rag_payload(payload.get("rag")))}),
             tool_policy=normalize_tool_policy(payload.get("tool_policy")),
             query_understanding=normalize_query_understanding(payload.get("query_understanding")),
         )
@@ -204,7 +206,11 @@ def update_agent(db: Session, agent: Agent, payload: dict) -> Agent:
         if "memory" in payload:
             settings.memory = normalize_memory(payload["memory"])
         if "rag" in payload:
-            settings.rag = normalize_rag(payload["rag"])
+            incoming = _rag_payload(payload["rag"])
+            # 未显式传检索方式的更新（旧客户端、只改 top_k 等）保留原检索方式，不被回落成 auto
+            if "retrieval_mode" not in incoming and (settings.rag or {}).get("retrieval_mode"):
+                incoming["retrieval_mode"] = settings.rag["retrieval_mode"]
+            settings.rag = normalize_rag(incoming)
         if "tool_policy" in payload:
             settings.tool_policy = normalize_tool_policy(payload["tool_policy"])
         if "query_understanding" in payload:
@@ -510,6 +516,13 @@ def normalize_memory(value) -> dict:
     return {"enabled": bool(data.get("enabled", False)), "strategy": strategy, "max_messages": max(1, min(max_messages, 100))}
 
 
+def _rag_payload(value) -> dict:
+    """把请求里的 rag 配置转成只含显式字段的 dict（pydantic 模型去掉 None，保证默认值能兜底）。"""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    return {key: item for key, item in dict(value or {}).items() if item is not None}
+
+
 def normalize_rag(value) -> dict:
     """
     规整 RAG 混合召回和算分重排参数。
@@ -531,8 +544,12 @@ def normalize_rag(value) -> dict:
     bm25_top_k = int(data.get("bm25_top_k") or settings.rag_bm25_top_k)
     rrf_k = int(data.get("rrf_k") or settings.rag_rrf_k)
     rerank_top_n = int(data.get("rerank_top_n") or settings.rag_rerank_top_n)
+    # 检索方式：auto = 每轮先检索再回答；on_demand = 知识库作为工具，由模型按需调用。
+    # 没有该字段的旧数据（已有智能体、已发布快照）一律按 auto，行为不变；新建智能体由创建入口显式写 on_demand。
+    retrieval_mode = data.get("retrieval_mode") if data.get("retrieval_mode") in RAG_RETRIEVAL_MODES else "auto"
     return {
         "enabled_by_default": bool(data.get("enabled_by_default", True)),
+        "retrieval_mode": retrieval_mode,
         "top_k": max(1, min(top_k, 20)),
         "dense_top_k": max(1, min(dense_top_k, 50)),
         "bm25_top_k": max(1, min(bm25_top_k, 50)),
