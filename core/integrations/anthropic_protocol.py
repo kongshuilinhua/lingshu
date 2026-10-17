@@ -141,7 +141,19 @@ def parse_response(data: dict) -> dict:
         raise RuntimeError("Model returned an invalid Anthropic response")
     calls = [normalized_tool(block) for block in blocks if block.get("type") == "tool_use"]
     return {"content": "".join(block.get("text", "") for block in blocks if block.get("type") == "text"),
-            "tool_calls": calls or None, "provider_content": copy.deepcopy(blocks)}
+            "tool_calls": calls or None, "provider_content": copy.deepcopy(blocks),
+            "usage": usage_details(data.get("usage"))}
+
+
+def usage_details(usage) -> dict | None:
+    """Anthropic usage → 统一的 {input, output, total}（含缓存读写 token 时一并计入 input）。"""
+    if not isinstance(usage, dict):
+        return None
+    prompt = sum(int(usage.get(key) or 0) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    completion = int(usage.get("output_tokens") or 0)
+    if not prompt and not completion:
+        return None
+    return {"input": prompt, "output": completion, "total": prompt + completion}
 
 
 def stream_frames(response):
@@ -154,6 +166,7 @@ def stream_frames(response):
     """
     pending = []
     blocks = {}
+    usage: dict = {}
     completed = False
     for raw_line in response:
         line = raw_line.decode("utf-8").rstrip("\r\n")
@@ -174,7 +187,11 @@ def stream_frames(response):
                             "rate_limit_error", "api_error", "overloaded_error"}:
                 code = "unknown"
             raise RuntimeError("Model call failed: Anthropic stream error " + code)
-        if kind == "content_block_start":
+        if kind == "message_start":
+            usage.update((data.get("message") or {}).get("usage") or {})
+        elif kind == "message_delta":
+            usage.update({key: value for key, value in (data.get("usage") or {}).items() if value is not None})
+        elif kind == "content_block_start":
             index = data["index"]
             if len(blocks) >= 500:
                 raise RuntimeError("Model stream has too many blocks")
@@ -213,3 +230,6 @@ def stream_frames(response):
     calls = [normalized_tool(block) for block in ordered if block.get("type") == "tool_use"]
     if calls:
         yield {"type": "tool_calls", "calls": calls, "provider_content": copy.deepcopy(ordered)}
+    details = usage_details(usage)
+    if details:
+        yield {"type": "usage", "usage": details}
