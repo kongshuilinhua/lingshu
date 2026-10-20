@@ -29,10 +29,11 @@ from core.services.knowledge import (
     run_document_ingestion,
     run_kb_reindex,
 )
+from core.services.rag import retrieve
 from core.services.rag_cache import redis_store
 from core.tasks.dispatch import dispatch
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ router = APIRouter(prefix="/api/knowledge-bases", tags=["knowledge"])
 
 
 class ResegmentRequest(BaseModel):
-    parse_mode: str = "precise"
+    # 注意：曾经有一个 `parse_mode` 字段，但它从未被任何代码读取（切分只认 segment_mode），
+    # 前端也从未提交过它。已移除，避免调用方误以为“精确/快速解析”是可选行为。
     segment_mode: str = "auto"
     delimiter: str | None = "##"
     max_chunk_len: int = 5000
@@ -278,3 +280,62 @@ def update_kb(kb_id: int, request: KnowledgeBaseUpdateRequest, membership: Works
     db.commit()
     db.refresh(kb)
     return {"knowledge_base": knowledge_base_summary(kb)}
+
+
+class RetrievalTestRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=6, ge=1, le=20)
+    rerank_enabled: bool = True
+
+
+@router.post("/{kb_id}/retrieval-test")
+def retrieval_test(kb_id: int, request: RetrievalTestRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """
+    召回测试：对单个知识库跑一遍真实检索链路，返回每个片段在各通道的分数。
+
+    🎯 用于调 RAG：看某个问题到底能不能命中、命中的是哪段、是向量还是关键词命中的、
+        rerank 把它排到了第几。走的是和对话完全相同的 retrieve()，所见即对话时所得。
+    🛡️ 关闭缓存：调参时要看实时结果，命中旧缓存会让刚改的分块/文档看起来没生效。
+        停用的知识库直接返回 reason=all_knowledge_bases_disabled，与对话时的行为一致。
+    """
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="请输入测试问题")
+    config = {
+        "top_k": request.top_k,
+        "rerank_enabled": request.rerank_enabled,
+        "cache_enabled": False,
+        "parent_expansion": False,
+    }
+    started = time.monotonic()
+    result = retrieve(db, workspace_id=membership.workspace_id, knowledge_base_ids=[kb.id], query=query, config=config)
+    status = result.status
+    return {
+        "query": query,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "status": {
+            "reason": status.get("reason"),
+            "dense": status.get("dense"),
+            "bm25": status.get("bm25"),
+            "rrf": status.get("rrf"),
+            "rerank": status.get("rerank"),
+            "translate": status.get("translate"),
+            "no_evidence": status.get("no_evidence"),
+        },
+        "items": [
+            {
+                "chunk_id": item.get("chunk_id"),
+                "document_id": item.get("document_id"),
+                "title": item.get("title"),
+                "section": item.get("section"),
+                "page": item.get("page"),
+                "snippet": item.get("content") or item.get("snippet"),
+                "score": item.get("score"),
+                "dense_score": item.get("dense_score"),
+                "bm25_score": item.get("bm25_score"),
+                "channel": item.get("retrieval_channel"),
+            }
+            for item in result.sources
+        ],
+    }

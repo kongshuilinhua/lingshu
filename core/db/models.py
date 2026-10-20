@@ -643,6 +643,9 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(20))  # 'user' / 'assistant'
     content: Mapped[str] = mapped_column(LongText)
     sources: Mapped[list] = mapped_column(JSON, default=list)  # 用于回显大模型回答的知识库召回引用
+    # 生成这条助手回答的那次运行；用于「运行详情」回看各节点。用户消息与旧数据为空。
+    # 不建外键：删会话时运行与消息各自清理，避免级联顺序问题。
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
@@ -656,7 +659,10 @@ class Run(Base):
     workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
     agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(20), default="running")  # 'running' / 'succeeded' / 'failed'
+    status: Mapped[str] = mapped_column(String(20), default="running")  # 'running' / 'paused' / 'succeeded' / 'failed' / 'rejected'
+    # 暂停在 HumanApproval 节点时保存的可恢复状态：节点后的上下文快照、工作流、下一跳与模式。
+    # 恢复接口据此从暂停点继续执行，而不是从头重跑（重跑会丢掉已检索的证据与工具结果）。
+    resume_state: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -678,6 +684,8 @@ class RunStep(Base):
     status: Mapped[str] = mapped_column(String(20))
     input: Mapped[dict] = mapped_column(JSON, default=dict)
     output: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 节点耗时（毫秒），运行详情据此标出慢节点；旧数据为空
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

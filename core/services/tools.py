@@ -11,7 +11,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone as _timezone
 
-import random
 import string
 import uuid
 import httpx
@@ -109,29 +108,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
         },
         "execute": lambda ctx: _exec_arxiv_search(ctx),
     },
-    "image_search": {
-        "description": "免 Key 搜索并推荐精美无水印的免版权高清大图 URL 列表。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "图片搜索意图关键词"},
-                "count": {"type": "integer", "description": "生成图片数，默认 3"}
-            },
-            "required": ["query"],
-        },
-        "execute": lambda ctx: _exec_image_search(ctx),
-    },
-    "news_search": {
-        "description": "获取全球当前最火热的科技或每日新闻头条资讯列表。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "category": {"type": "string", "description": "新闻分类，例如 tech (科技)、life (生活)"}
-            },
-            "required": [],
-        },
-        "execute": lambda ctx: _exec_news_search(ctx),
-    },
     "qr_generator": {
         "description": "输入文本或 URL，生成一张可供扫码识别的高清二维码图片 URL。",
         "parameters": {
@@ -189,49 +165,6 @@ BUILTIN_TOOLS: dict[str, dict] = {
             "required": ["city"],
         },
         "execute": lambda ctx: _exec_weather_lookup(ctx),
-    },
-    "horoscope": {
-        "description": "查询十二星座的今日及本周运势指数、幸运颜色及爱情综合解读。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "sign": {"type": "string", "description": "星座名称，例如 处女座、白羊座。"},
-                "period": {"type": "string", "description": "运势运程周期: today、week。"}
-            },
-            "required": ["sign"],
-        },
-        "execute": lambda ctx: _exec_horoscope(ctx),
-    },
-    "joke_generator": {
-        "description": "随机生成一则开心、冷幽默或程序员专署的双语冷笑话。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "lang": {"type": "string", "description": "语言限制: zh (中文), en (英文)"}
-            },
-            "required": [],
-        },
-        "execute": lambda ctx: _exec_joke_generator(ctx),
-    },
-    "advice_slip": {
-        "description": "情感树洞，随机推荐一条温暖、有智慧的人生感悟与日常生活小建议。",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-        "execute": lambda ctx: _exec_advice_slip(ctx),
-    },
-    "bored_activity": {
-        "description": "为感到闲暇无聊的用户，量身定制并随机推荐一项有趣的日常体验活动清单。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "type": {"type": "string", "description": "活动类型: recreation (娱乐), social (社交)"}
-            },
-            "required": [],
-        },
-        "execute": lambda ctx: _exec_bored_activity(ctx),
     },
     "password_generator": {
         "description": "生成指定长度、包含大小写字母、数字 and 符号的高强度安全随机密码。",
@@ -936,37 +869,6 @@ def _exec_arxiv_search(args: dict) -> dict:
         return {"content": json.dumps({"error": str(e)}), "result_preview": f"arXiv Error: {str(e)}"}
 
 
-def _exec_image_search(args: dict) -> dict:
-    """寻找精美图片推荐。"""
-    query = str(args.get("query") or "").strip()
-    count = int(args.get("count") or 3)
-    if not query:
-        return {"content": json.dumps({"error": "Query cannot be empty"}), "result_preview": "Error: Empty Query"}
-    images = [
-        {"url": "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=800&q=80", "title": f"Abstract colored mesh for {query}"},
-        {"url": "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&q=80", "title": f"Deep space nebula for {query}"},
-        {"url": "https://images.unsplash.com/photo-1518770660439-4636190af475?w=800&q=80", "title": f"Electronics hardware tech for {query}"}
-    ][:count]
-    payload = {"query": query, "images": images}
-    return {"content": json.dumps(payload, ensure_ascii=False), "result_preview": f"Found {len(images)} images"}
-
-
-def _exec_news_search(args: dict) -> dict:
-    """新闻头条获取。"""
-    category = str(args.get("category") or "tech").strip().lower()
-    tech_news = [
-        {"title": "OpenAI 宣布推出全新一代智能体操作系统", "source": "极客公园", "time": "1小时前"},
-        {"title": "英伟达市值再创新高，新一代 Blackwell 芯片供不应求", "source": "华尔街见闻", "time": "3小时前"},
-        {"title": "国内多模态大模型在最新学术评测中包揽前三", "source": "量子位", "time": "今天"}
-    ]
-    life_news = [
-        {"title": "全球夏季旅游热门目的地榜单公布，大理、丽江蝉联前三", "source": "携程旅游", "time": "2小时前"},
-        {"title": "健康膳食指南发布：推荐每日摄入全谷物以增强心肺耐力", "source": "人民健康网", "time": "5小时前"}
-    ]
-    news = tech_news if category == "tech" else life_news
-    return {"content": json.dumps({"category": category, "news": news}, ensure_ascii=False), "result_preview": f"Top News: {news[0]['title']}"}
-
-
 def _exec_qr_generator(args: dict) -> dict:
     """生成二维码图片。"""
     text = str(args.get("text") or "").strip()
@@ -1062,50 +964,6 @@ def _exec_weather_lookup(args: dict) -> dict:
         return {"content": json.dumps({"error": f"Failed to get weather for {city}"}), "result_preview": "Weather error"}
     except Exception as e:
         return {"content": json.dumps({"error": str(e)}), "result_preview": f"Weather Error: {str(e)}"}
-
-
-def _exec_horoscope(args: dict) -> dict:
-    """星座每日运势。"""
-    sign = str(args.get("sign") or "白羊座").strip()
-    fortunes = [
-        "今天整体运势爆棚，不仅在工作上能得到贵人相助，桃花运也开始直线攀升！建议穿红色或橙色衣物以吸纳好运。",
-        "今天需要保持沉稳，财运方面可能有一笔意外的惊喜，但切忌盲目跟风理财。多与朋友聚会有利于舒缓压力。"
-    ]
-    fortune = fortunes[0] if len(sign) % 2 == 0 else fortunes[1]
-    payload = {"sign": sign, "summary": fortune, "work_index": "85%", "love_index": "90%", "lucky_color": "紫色"}
-    return {"content": json.dumps(payload, ensure_ascii=False), "result_preview": f"{sign}今日运势: {fortune[:50]}..."}
-
-
-def _exec_joke_generator(args: dict) -> dict:
-    """随机冷笑话推荐。"""
-    jokes = [
-        {"setup": "为什么电脑永远吃不饱？", "punchline": "因为它们总是吃比特（Bytes）！"},
-        {"setup": "什么动物最爱问为什么？", "punchline": "是八哥（Bug），因为大模型程序里天天全是它！"}
-    ]
-    joke = random.choice(jokes)
-    return {"content": json.dumps(joke, ensure_ascii=False), "result_preview": f"{joke['setup']} {joke['punchline']}"}
-
-
-def _exec_advice_slip(args: dict) -> dict:
-    """心灵树洞。"""
-    advices = [
-        "永远不要在愤怒时做决定，等半个小时后再说。",
-        "大自然是最好的解药。当你感到心烦意乱时，出门散步 15 分钟会产生奇迹。",
-        "少说多听。当你倾听时，你在学习；当你说话时，你只是在重复已知的东西。"
-    ]
-    advice = random.choice(advices)
-    return {"content": json.dumps({"advice": advice}, ensure_ascii=False), "result_preview": advice}
-
-
-def _exec_bored_activity(args: dict) -> dict:
-    """对抗无聊点子推荐。"""
-    activities = [
-        {"activity": "尝试画一幅极简的简笔自画像，并写上一句激励自己的话", "type": "recreation"},
-        {"activity": "整理一下电脑桌面和书桌，把不需要的东西全部扔掉，感受断舍离", "type": "organization"},
-        {"activity": "给一位至少三个月没有联系的老朋友发一条简单的问候短消息", "type": "social"}
-    ]
-    act = random.choice(activities)
-    return {"content": json.dumps(act, ensure_ascii=False), "result_preview": act["activity"]}
 
 
 def _exec_password_generator(args: dict) -> dict:
@@ -1224,6 +1082,14 @@ def _execute_http_tool(tool: Tool, context: dict) -> dict:
                     raise ValueError("Tool response is too large")
                 text = raw.decode("utf-8", errors="replace")
                 result_json = _safe_json(text)
+                # response_path 裁剪：工具作者常配置 `$.data.items` 之类，只把业务数据交给模型，
+                # 避免上游的元数据/翻页信息占满上下文。旧实现只存不用，配置了等于没配。
+                # 解析失败时保留完整响应，不因为路径写错就吞掉工具结果。
+                if result_json is not None and (tool.response_path or "$") != "$":
+                    picked = _pick_json_path(result_json, tool.response_path)
+                    if picked is not _MISSING:
+                        result_json = picked
+                        text = json.dumps(picked, ensure_ascii=False)
                 return {
                     "tool": tool.name,
                     "tool_type": tool.type,
@@ -1296,6 +1162,95 @@ def _safe_json(text: str):
         return json.loads(text)
     except json.JSONDecodeError:
         return None
+
+
+class _MissingPath:
+    """response_path 取不到值时的哨兵，与合法的 null 区分开。"""
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试可见
+        return "<missing>"
+
+
+_MISSING = _MissingPath()
+
+
+def _pick_json_path(payload, path: str):
+    """
+    按点号/方括号路径从 JSON 响应里取值，供 HTTP 工具的 response_path 裁剪返回值。
+
+    支持 `$.data.items`、`data.items`、`$.items[0]`、`$.items[0].name` 与 `$[*].id`
+    这类常见写法；用的是「路径取值」而不是完整 JSONPath 表达式引擎——项目不引入
+    未确认的第三方库，且工具作者实际需要的场景就是「深入几层取业务字段」。
+
+    路径不存在或语法无法识别时返回 `_MISSING`，调用方据此保留完整响应，
+    避免因为路径写错就把工具结果整个吞掉（模型看不到任何内容的故障比多给点上下文更糟）。
+    """
+    stripped = str(path or "$").strip()
+    # 统一去掉起始的 `$`，后续按段解析
+    if stripped.startswith("$"):
+        stripped = stripped[1:]
+    if not stripped:
+        # 纯 `$` 表示不裁剪，返回原值
+        return payload
+    segments: list[str | int | None] = []
+    # 拆 `[0]` / `[*]` / `.name`
+    token = ""
+    i = 0
+    while i < len(stripped):
+        char = stripped[i]
+        if char == "[":
+            if token:
+                segments.append(token)
+                token = ""
+            end = stripped.find("]", i)
+            if end == -1:
+                return _MISSING
+            inner = stripped[i + 1:end].strip().strip("'\"")
+            segments.append(None if inner == "*" else int(inner) if inner.lstrip("-").isdigit() else inner)
+            i = end + 1
+            continue
+        if char == ".":
+            if token:
+                segments.append(token)
+                token = ""
+            i += 1
+            continue
+        token += char
+        i += 1
+    if token:
+        segments.append(token)
+
+    current = payload
+    for position, segment in enumerate(segments):
+        if segment is None:
+            # `[*]` 通配：对当前列表逐个取剩余路径。
+            # 用 position 而不是 segments.index(segment)——同一个值在路径里重复出现时
+            # index() 会定位到第一次出现的位置，导致剩余路径取错。
+            if not isinstance(current, list):
+                return _MISSING
+            rest = segments[position + 1:]
+            remainder = "$" + "".join(
+                f"[{item}]" if isinstance(item, int) else f".{item}" for item in rest
+            ) if rest else "$"
+            collected = [
+                value for item in current
+                if (value := _pick_json_path(item, remainder)) is not _MISSING
+            ]
+            return collected
+        if isinstance(current, list):
+            if not isinstance(segment, int):
+                return _MISSING
+            if segment >= len(current) or segment < -len(current):
+                return _MISSING
+            current = current[segment]
+            continue
+        if isinstance(current, dict):
+            if segment not in current:
+                return _MISSING
+            current = current[segment]
+            continue
+        return _MISSING
+    return current
 
 
 def _preview(value, limit: int = 500) -> str:

@@ -11,6 +11,7 @@ from api.access import (
 from api.deps import get_current_membership
 from api.schemas import (
     AgentCreateRequest,
+    AgentSubAgentBindingsRequest,
     AgentUpdateRequest,
     MemoryProfileUpdateRequest,
     WorkflowUpdateRequest,
@@ -21,11 +22,13 @@ from core.runtime.graph import validate_graph
 from core.runtime.workflow import default_workflow
 from core.security.permissions import can_manage
 from core.services.agents import (
+    agent_sub_agent_bindings,
     agent_summary,
     create_agent,
     ensure_template_agents_published,
     get_agent_detail,
     publish_agent,
+    replace_agent_sub_agent_bindings,
     update_agent,
 )
 from core.services.agents import (
@@ -213,3 +216,29 @@ def update_workflow(agent_id: int, request: WorkflowUpdateRequest, membership: W
         workflow.nodes = request.nodes
     db.commit()
     return {"nodes": workflow.nodes}
+
+
+@router.get("/{agent_id}/sub-agent-bindings")
+def get_sub_agent_bindings(agent_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """读取当前智能体可作为工具调用的子智能体列表。"""
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_read_access(agent, membership)
+    return {"items": agent_sub_agent_bindings(db, agent.id)}
+
+
+@router.put("/{agent_id}/sub-agent-bindings")
+def put_sub_agent_bindings(agent_id: int, request: AgentSubAgentBindingsRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """全量覆盖子智能体绑定：绑定后模型可在对话中按需委派任务给它们。"""
+    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
+    require_agent_write_access(agent, membership)
+    try:
+        replace_agent_sub_agent_bindings(
+            db,
+            agent,
+            [item.model_dump() for item in request.items],
+            workspace_id=membership.workspace_id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"items": agent_sub_agent_bindings(db, agent.id)}

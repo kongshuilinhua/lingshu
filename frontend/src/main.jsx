@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { AgentAvatar, UserAvatar } from './components/AgentAvatar.jsx';
 import { ConfirmDialog } from './components/ConfirmDialog.jsx';
+import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 
 import {
   AlertTriangle,
@@ -55,6 +56,7 @@ const ReviewHome = lazyNamed(() => import('./pages/ReviewHome.jsx'), 'ReviewHome
 const MembersHome = lazyNamed(() => import('./pages/MembersHome.jsx'), 'MembersHome');
 const KnowledgeHome = lazyNamed(() => import('./pages/KnowledgeHome.jsx'), 'KnowledgeHome');
 const UserModelsHome = lazyNamed(() => import('./pages/UserModelsHome.jsx'), 'UserModelsHome');
+const ToolsHome = lazyNamed(() => import('./pages/ToolsHome.jsx'), 'ToolsHome');
 
 function PageFallback() {
   return <p className="empty-state">加载中...</p>;
@@ -169,6 +171,7 @@ function App() {
     setRagEnabled, setThinkingEnabled, setSearchEnabled, setChatAttachments,
     setUploadingAttachment, setDraft, setError, setHomePrompt,
     startNewChat: storeStartNewChat, sendMessage: storeSendMessage,
+    resolveApproval,
   } = useChatStore();
   const [documents, setDocuments] = useState([]);
   const [toastMsg, setToastMsg] = useState('');
@@ -1065,6 +1068,11 @@ function App() {
     setFeedbackByMessage((items) => ({ ...items, [messageId]: data.feedback.rating }));
   }
 
+  // 运行详情按需加载：消息展开「运行详情」时才拉取该次运行的节点记录
+  async function loadRunSteps(runId) {
+    return api(`/api/runs/${runId}/steps`, { token });
+  }
+
   const chatModeRef = useRef(chatMode);
   useEffect(() => {
     chatModeRef.current = chatMode;
@@ -1373,6 +1381,8 @@ function App() {
     sources,
     startNewChat: () => confirmNavigation(startNewChat),
     submitFeedback,
+    resolveApproval,
+    loadRunSteps,
     deleteMemoryProfile,
     approveReview,
     rejectReview,
@@ -1546,6 +1556,8 @@ function HomeView(props) {
     sources,
     startNewChat,
     submitFeedback,
+    resolveApproval,
+    loadRunSteps,
     approveReview,
     rejectReview,
     reviewItems,
@@ -1841,6 +1853,8 @@ function HomeView(props) {
             setSearchEnabled={setSearchEnabled}
             sources={sources}
             submitFeedback={submitFeedback}
+            resolveApproval={resolveApproval}
+            loadRunSteps={loadRunSteps}
             ragRuntime={ragRuntime}
             webSearchRuntime={webSearchRuntime}
             thinkingEnabled={thinkingEnabled}
@@ -1873,6 +1887,7 @@ function HomeView(props) {
             uploadDocument={uploadDocument}
             uploadKnowledgeFile={uploadKnowledgeFile}
             loadDocuments={loadDocuments}
+            runRetrievalTest={(kbId, payload) => api(`/api/knowledge-bases/${kbId}/retrieval-test`, { token, method: 'POST', body: payload })}
             notify={notify}
           />
         )}
@@ -1929,6 +1944,19 @@ function HomeView(props) {
         )}
 
 
+
+        {activeNav === 'tools' && (
+          <ToolsHome
+            createToolConfig={createToolConfig}
+            deleteToolConfig={deleteToolConfig}
+            openBuilder={() => confirmNavigation(() => { setView('builder'); setActiveNav('agents'); })}
+            requestDeleteConfirm={requestDeleteConfirm}
+            setProfileError={setProfileError}
+            testToolConfig={testToolConfig}
+            tools={tools}
+            updateToolConfig={updateToolConfig}
+          />
+        )}
 
         {activeNav === 'reviews' && canManage && (
           <ReviewHome
@@ -2140,35 +2168,4 @@ function ProfileDialog({
   );
 }
 
-class AppErrorBoundary extends Component {
-  constructor(props) {
-    super(props);
-    this.state = { error: null };
-  }
-
-  static getDerivedStateFromError(error) {
-    return { error };
-  }
-
-  componentDidCatch(error, info) {
-    console.error(error, info);
-  }
-
-  render() {
-    if (this.state.error) {
-      return (
-        <main className="fatal-error" style={{ padding: '20px', maxWidth: '800px', margin: '50px auto' }}>
-          <h1>页面渲染失败</h1>
-          <p style={{ color: '#d9383a', fontWeight: 'bold' }}>{this.state.error.message}</p>
-          <pre style={{ textAlign: 'left', background: '#fafafa', border: '1px solid #eaeaea', borderRadius: '6px', padding: '15px', overflow: 'auto', fontSize: '11px', lineHeight: '1.5', fontFamily: 'monospace', color: '#333' }}>
-            {this.state.error.stack}
-          </pre>
-          <button type="button" onClick={() => window.location.reload()} style={{ marginTop: '15px', padding: '8px 16px', background: '#181b25', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>刷新页面</button>
-        </main>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-createRoot(document.getElementById('root')).render(<AppErrorBoundary><UnsavedChangesProvider><App /></UnsavedChangesProvider></AppErrorBoundary>);
+createRoot(document.getElementById('root')).render(<ErrorBoundary><UnsavedChangesProvider><App /></UnsavedChangesProvider></ErrorBoundary>);

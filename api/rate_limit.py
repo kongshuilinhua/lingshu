@@ -2,27 +2,24 @@
 灵枢 Agent 平台 —— API 频率限制模块。
 
 🎯 架构角色：
-    - slowapi（内存计数器）：保留作进程内兜底；多 worker 下各算各的，仅作粗粒度全局默认。
-    - `redis_rate_limit`：基于 Redis ZSET 滑动窗口的分布式限流依赖，进程间共享计数，
-      多 worker / 多实例下额度一致；Redis 不可用时 fail-open 放行（软依赖）。
+    只保留一条限流链路：基于 Redis ZSET 滑动窗口的分布式限流依赖，进程间共享计数，
+    多 worker / 多实例下额度一致；Redis 不可用时 fail-open 放行（软依赖）。
+
+    历史上这里还配置过 slowapi 的内存计数器（`default_limits=["200/minute"]`），
+    但它既没注册 `SlowAPIMiddleware` 也从未被任何端点用 `@limiter.limit` 装饰，
+    实际从未生效——已移除，避免「看起来有全局限流」的错觉。
+    需要全局限流时应改用本模块的 `redis_rate_limit`，它才是多副本下正确的实现。
 
     建议配额：
-    - 全局默认：200 请求/分钟
     - 聊天流式端点：30 请求/分钟（高消耗）
     - 注册端点：10 请求/分钟（防滥用）
+    - 登录端点：20 请求/分钟
 """
 
 from collections.abc import Callable
 
 from fastapi import HTTPException, Request, status
-from slowapi import Limiter
 from slowapi.util import get_remote_address
-
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=["200/minute"],
-    headers_enabled=True,  # 在响应头中返回 X-RateLimit-* 信息
-)
 
 
 def redis_rate_limit(limit: int, window_seconds: int, *, scope: str) -> Callable[[Request], None]:

@@ -58,6 +58,7 @@ def message_payload(message: Message) -> dict:
         "role": message.role,
         "content": message.content,
         "sources": message.sources or [],
+        "run_id": message.run_id,
         "created_at": message.created_at.isoformat() if message.created_at else None,
     }
 

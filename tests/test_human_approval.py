@@ -118,3 +118,124 @@ def test_run_events_without_approval_runs_to_completion(monkeypatch):
     assert executed == ["start", "answer"]
     assert captured["run"].status == "succeeded"
     assert any(e.get("event") == "complete" for e in events)
+
+
+# ── 恢复（resume）────────────────────────────────────────────
+
+
+def _runner_with_paused_run(workflow, *, executed=None, next_index=0, context=None):
+    """构造一个已暂停的 Run，以及能跑 _advance_workflow 的 runner。"""
+    run = SimpleNamespace(id=7, status="paused", resume_state={
+        "mode": "draft",
+        "workflow": workflow,
+        "context": context or {"input": "hi", "sources": [], "draft": "", "tool_outputs": []},
+        "upload_ids": [],
+        "next_index": next_index,
+        "executed": executed or ["start", "approval"],
+        "paused_node_id": "approval",
+    }, completed_at=None)
+    db = SimpleNamespace(commit=lambda: None, flush=lambda: None, refresh=lambda obj: None)
+    runner = WorkflowRunner(db=db)
+    return runner, run
+
+
+def test_resume_continues_after_approval_node(monkeypatch):
+    """放行后从审批节点的下一跳继续，不重新执行审批节点本身。"""
+    workflow = [
+        {"id": "start", "type": "Start", "next": "approval"},
+        {"id": "approval", "type": "HumanApproval", "config": {"prompt": "确认?"}, "next": "answer"},
+        {"id": "answer", "type": "Answer"},
+    ]
+    executed: list[str] = []
+
+    def fake_execute(self, agent, node, context):
+        executed.append(node["id"])
+        if node["type"] == "Answer":
+            return {"answer": "继续后的答案"}
+        return {}
+
+    monkeypatch.setattr(WorkflowRunner, "_execute_node", fake_execute)
+    monkeypatch.setattr(WorkflowRunner, "_persist_step",
+                        lambda self, run, node, um, output, *, status="succeeded": SimpleNamespace(
+                            id=id(node), node_id=node["id"], node_type=node["type"], status=status))
+    monkeypatch.setattr(WorkflowRunner, "_runtime_agent",
+                        lambda self, agent, mode, user_id, model_override=None: SimpleNamespace(
+                            workflow=workflow, settings={"memory": {"enabled": False}}, runtime_config=None))
+
+    runner, run = _runner_with_paused_run(workflow, next_index=2)
+    events = list(runner.resume_events(
+        run=run, agent=SimpleNamespace(id=1, workspace_id=1),
+        chat_session=SimpleNamespace(id=1, user_id=1), user_message="hi", approved=True,
+    ))
+
+    assert executed == ["answer"]
+    assert run.status == "succeeded"
+    complete = next(e for e in events if e["event"] == "complete")
+    assert complete["answer"] == "继续后的答案"
+
+
+def test_resume_rejected_skips_remaining_nodes():
+    """驳回时不执行任何后续节点，Run 置 rejected 并清空恢复快照。"""
+    workflow = [
+        {"id": "start", "type": "Start"},
+        {"id": "answer", "type": "Answer"},
+    ]
+    runner, run = _runner_with_paused_run(workflow)
+    events = list(runner.resume_events(
+        run=run, agent=SimpleNamespace(id=1, workspace_id=1),
+        chat_session=SimpleNamespace(id=1, user_id=1), user_message="hi", approved=False,
+    ))
+
+    assert run.status == "rejected"
+    assert run.resume_state == {}
+    assert [e["event"] for e in events] == ["rejected"]
+
+
+def test_resume_requires_paused_state():
+    """没有恢复快照 / 不在暂停中的 Run 不能恢复。"""
+    runner = WorkflowRunner(db=SimpleNamespace(commit=lambda: None))
+    try:
+        list(runner.resume_events(
+            run=SimpleNamespace(id=1, status="paused", resume_state={}),
+            agent=SimpleNamespace(id=1), chat_session=SimpleNamespace(id=1, user_id=1),
+            user_message="hi",
+        ))
+    except ValueError as exc:
+        assert "恢复" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+    try:
+        list(runner.resume_events(
+            run=SimpleNamespace(id=1, status="succeeded", resume_state={"context": {}}),
+            agent=SimpleNamespace(id=1), chat_session=SimpleNamespace(id=1, user_id=1),
+            user_message="hi",
+        ))
+    except ValueError as exc:
+        assert "暂停" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_pause_snapshot_keeps_evidence_and_skips_internal_keys():
+    """暂停快照保留已检索的证据与工具结果，丢弃下划线开头的运行时缓存。"""
+    from core.runtime.workflow import _pause_snapshot
+
+    workflow = [
+        {"id": "start", "type": "Start", "next": "approval"},
+        {"id": "approval", "type": "HumanApproval", "next": "answer"},
+        {"id": "answer", "type": "Answer"},
+    ]
+    context = {
+        "input": "退款怎么申请",
+        "sources": [{"title": "手册", "snippet": "7 天内可退"}],
+        "tool_outputs": [{"tool": "order_status", "content": "已发货"}],
+        "_skill_metadata": {"huge": "cache"},
+    }
+    snapshot = _pause_snapshot(workflow, context, workflow[1], "draft", {"start", "approval"})
+
+    assert snapshot["context"]["sources"] == [{"title": "手册", "snippet": "7 天内可退"}]
+    assert snapshot["context"]["tool_outputs"][0]["content"] == "已发货"
+    assert "_skill_metadata" not in snapshot["context"]
+    assert snapshot["next_index"] == 2
+    assert snapshot["executed"] == ["approval", "start"]

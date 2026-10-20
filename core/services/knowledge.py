@@ -24,7 +24,7 @@ from core.services.uploads import (
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_KNOWLEDGE_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".pdf", ".docx"}
+SUPPORTED_KNOWLEDGE_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".pdf", ".docx", ".xlsx", ".pptx"}
 SUPPORTED_TEXT_TYPES = {"text/plain", "text/markdown", "application/markdown", "text/csv"}
 SUPPORTED_FILE_TYPES = DOC_TYPES
 

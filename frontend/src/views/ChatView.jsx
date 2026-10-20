@@ -78,6 +78,8 @@ export function ChatView({
   setSearchEnabled,
   sources,
   submitFeedback,
+  resolveApproval,
+  loadRunSteps,
   ragRuntime,
   webSearchRuntime,
   thinkingEnabled,
@@ -143,6 +145,8 @@ export function ChatView({
         setSearchEnabled={setSearchEnabled}
         sources={sources}
         submitFeedback={submitFeedback}
+        resolveApproval={resolveApproval}
+        loadRunSteps={loadRunSteps}
         ragRuntime={ragRuntime}
         webSearchRuntime={webSearchRuntime}
         thinkingEnabled={thinkingEnabled}
@@ -185,6 +189,8 @@ function ChatHomeV2({
   setThinkingEnabled,
   sources,
   submitFeedback,
+  resolveApproval,
+  loadRunSteps,
   uploadChatAttachment,
   uploadingAttachment,
   updateChatVariable,
@@ -234,6 +240,8 @@ function ChatHomeV2({
               messages={messages}
               feedbackByMessage={feedbackByMessage}
               submitFeedback={submitFeedback}
+              resolveApproval={resolveApproval}
+              loadRunSteps={loadRunSteps}
               avatar={activeAgent?.avatar || agentForm.avatar || 'AI'}
             />
           </Suspense>

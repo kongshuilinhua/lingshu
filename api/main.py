@@ -28,11 +28,8 @@ import time
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 
-from api.rate_limit import limiter
 from core.config import get_settings
 from core.db.session import engine, init_db
 from core.exceptions import AppException
@@ -80,9 +77,9 @@ def app_exception_handler(request, exc: AppException):
     )
 
 
-# Rate Limiting
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Rate Limiting：唯一生效的链路是 api/rate_limit.py 的 Redis 滑动窗口依赖，
+# 由各路由显式声明为 dependency。这里不再注册 slowapi 的进程内计数器——
+# 它从未挂中间件、也没有任何 @limiter.limit，留着只会让人误以为存在全局限流。
 
 
 # ── 可观测性：请求级 trace id + HTTP 指标 ──────────────────

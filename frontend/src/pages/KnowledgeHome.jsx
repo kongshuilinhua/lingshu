@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { ResegmentModal } from '../components/ResegmentModal.jsx';
+import { RetrievalTestPanel } from '../components/RetrievalTestPanel.jsx';
 import { KnowledgeBaseDialog } from '../components/KnowledgeBaseDialog.jsx';
 import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
 import { KnowledgeDocumentList, KnowledgeUploadBox } from '../components/KnowledgeDocumentList.jsx';
@@ -42,6 +43,7 @@ export function KnowledgeHome({
   token,
   loadDocuments,
   notify,
+  runRetrievalTest,
 }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState(() => defaultKnowledgeBaseForm());
@@ -132,6 +134,7 @@ export function KnowledgeHome({
           token={token}
           activeKbId={activeKbId}
           loadDocuments={loadDocuments}
+          runRetrievalTest={runRetrievalTest}
         />
       )}
 
@@ -347,9 +350,11 @@ function KnowledgeWorkspace({
   loadDocuments,
   notify,
   token,
+  runRetrievalTest,
 }) {
   const [docSearchQuery, setDocSearchQuery] = useState('');
   const [addDropdownOpen, setAddDropdownOpen] = useState(false);
+  const [retrievalTestOpen, setRetrievalTestOpen] = useState(false);
   const [customInputOpen, setCustomInputOpen] = useState(false);
   const currentKbId = activeKbId || kb?.id;
 
@@ -530,6 +535,14 @@ function KnowledgeWorkspace({
         </div>
         <div className="workspace-header-actions">
           <button
+            type="button"
+            className={retrievalTestOpen ? 'active' : ''}
+            aria-pressed={retrievalTestOpen}
+            onClick={() => setRetrievalTestOpen((open) => !open)}
+          >
+            <Search size={16} />召回测试
+          </button>
+          <button
             className="primary"
             type="button"
             onClick={(e) => {
@@ -659,7 +672,9 @@ function KnowledgeWorkspace({
 
         {/* Right column: active doc details & chunk stream */}
         <section className="workspace-column right-column plain-panel">
-          {activeDoc ? (
+          {retrievalTestOpen ? (
+            <RetrievalTestPanel kbId={currentKbId} token={token} runRetrievalTest={runRetrievalTest} onClose={() => setRetrievalTestOpen(false)} />
+          ) : activeDoc ? (
             <div className="doc-detail-view">
               <div className="doc-detail-header-card">
                 <div className="doc-meta-title-row">

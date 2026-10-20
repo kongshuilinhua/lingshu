@@ -311,6 +311,15 @@ class AgentMcpBindingsRequest(BaseModel):
     items: list[AgentMcpBindingItem] = Field(max_length=20)
 
 
+class AgentSubAgentBindingItem(BaseModel):
+    target_agent_id: int = Field(gt=0)
+    enabled: bool = True
+
+
+class AgentSubAgentBindingsRequest(BaseModel):
+    items: list[AgentSubAgentBindingItem] = Field(max_length=20)
+
+
 class McpResourceReadRequest(BaseModel):
     uri: str = Field(min_length=1, max_length=1000)
 

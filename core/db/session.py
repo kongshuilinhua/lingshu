@@ -558,6 +558,29 @@ def _run_compat_migrations() -> None:
                 "is_debug": "BOOLEAN DEFAULT false",
             },
         )
+    if "runs" in table_names:
+        _ensure_columns(
+            "runs",
+            {
+                # HumanApproval 的恢复快照；旧库无此列时补上
+                "resume_state": "JSON",
+            },
+        )
+    if "run_steps" in table_names:
+        _ensure_columns(
+            "run_steps",
+            {
+                "latency_ms": "INTEGER",
+            },
+        )
+    if "messages" in table_names:
+        _ensure_columns(
+            "messages",
+            {
+                # 助手回答对应的运行，供「运行详情」回看；旧消息为空
+                "run_id": "INTEGER",
+            },
+        )
     if "session_memory" in table_names:
         _ensure_columns(
             "session_memory",

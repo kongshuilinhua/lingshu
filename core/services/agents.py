@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from core.db.models import (
     Agent,
+    AgentAgentBinding,
     AgentKnowledgeBase,
     AgentMcpBinding,
     AgentSkillBinding,
@@ -132,6 +133,7 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
         "tools": [tool_payload(tool) for tool in tools],
         "mcp_bindings": agent_bindings_payload(db, agent.id),
         "skill_bindings": skill_bindings(db, agent.id),
+        "sub_agent_bindings": agent_sub_agent_bindings(db, agent.id),
         "workflow": workflow.nodes if workflow else DEFAULT_WORKFLOW,
         "model_config": model_payload(model_config) if model_config else None,
         "user_model_config": user_model_snapshot(user_model_config),
@@ -610,3 +612,51 @@ def _replace_agent_tools(db: Session, agent_id: int, tool_ids: list[int]) -> Non
 def workspace_kb_exists(db: Session, workspace_id: int, kb_id: int) -> bool:
     """校验某个知识库是否存在于工作空间中。"""
     return db.query(KnowledgeBase).filter(KnowledgeBase.workspace_id == workspace_id, KnowledgeBase.id == kb_id).first() is not None
+
+
+def agent_sub_agent_bindings(db: Session, agent_id: int) -> list[dict]:
+    """读取 supervisor → 子 agent 绑定。
+
+    运行时由 WorkflowRunner._runtime_tools 把每条绑定包装成 type="agent" 的工具，
+    模型在 ReAct 循环里按需调用；这里只负责持久化那份绑定关系。
+    """
+    rows = db.query(AgentAgentBinding).filter(AgentAgentBinding.agent_id == agent_id).all()
+    return [
+        {"target_agent_id": row.target_agent_id, "enabled": bool(row.enabled)}
+        for row in rows
+    ]
+
+
+def replace_agent_sub_agent_bindings(
+    db: Session, agent: Agent, items: list[dict], *, workspace_id: int
+) -> None:
+    """
+    全量覆盖某个智能体的子智能体绑定。
+
+    🛡️ 约束：
+        - 只能绑定同一工作区内、已发布、且不是自己的智能体——未发布的 agent 没有
+          快照可执行，自绑定会在运行时形成直接递归。
+        - 最多 20 个子智能体，且不允许重复。
+    """
+    if len(items) > 20:
+        raise ValueError("最多绑定 20 个子智能体。")
+    target_ids = [int(item.get("target_agent_id") or 0) for item in items]
+    if len(set(target_ids)) != len(target_ids):
+        raise ValueError("子智能体绑定不能重复。")
+    if agent.id in target_ids:
+        raise ValueError("不能把智能体绑定为它自己的子智能体。")
+
+    validated: list[tuple[int, bool]] = []
+    for item in items:
+        target_id = int(item.get("target_agent_id") or 0)
+        target = db.get(Agent, target_id)
+        if not target or target.workspace_id != workspace_id:
+            raise ValueError("目标智能体不存在或不属于当前工作区。")
+        if not target.published_version_id:
+            raise ValueError(f"智能体「{target.name}」尚未发布，不能作为子智能体。")
+        validated.append((target.id, bool(item.get("enabled", True))))
+
+    db.query(AgentAgentBinding).filter(AgentAgentBinding.agent_id == agent.id).delete(synchronize_session=False)
+    for target_id, enabled in validated:
+        db.add(AgentAgentBinding(agent_id=agent.id, target_agent_id=target_id, enabled=enabled))
+    db.commit()

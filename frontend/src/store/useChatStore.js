@@ -170,6 +170,62 @@ export const useChatStore = create((set, get) => ({
       _activeController = null;
     }
   },
+
+  /**
+   * 审批暂停在 HumanApproval 节点的运行。
+   *
+   * approved=true  → 从暂停点继续执行后续节点（复用暂停时的检索证据与工具结果，不重跑）
+   * approved=false → 不执行后续节点，运行置 rejected
+   */
+  resolveApproval: async ({ runId, approved, token }) => {
+    if (!runId) return;
+    get().stopStream();
+    const controller = new AbortController();
+    _activeController = controller;
+    set({ busy: true, error: '' });
+    // 清掉审批态，避免按钮被重复点击
+    get().updateLastMessage((last) => ({ ...last, paused: null, pending: approved }));
+    try {
+      const response = await fetch(`${API_BASE}/api/runs/${runId}/${approved ? 'approve' : 'reject'}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        const err = new ApiError(errorMessage(data.detail || data.message || `HTTP ${response.status}`), response.status, data);
+        if (isAuthError(err)) notifyAuthExpired(token);
+        throw err;
+      }
+      if (!response.body) throw new Error('当前浏览器不支持流式响应。');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (controller.signal.aborted) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) _handleSseEvent(part, get, set);
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError' || controller.signal.aborted) {
+        get().updateLastMessage((last) => ({ ...last, pending: false }));
+        return;
+      }
+      const message = isAuthError(err) ? '登录已失效，请重新登录。' : errorMessage(err);
+      set({ error: message });
+      get().updateLastMessage((last) => ({ ...last, pending: false, error: true, content: message }));
+      if (isAuthError(err)) throw err;
+    } finally {
+      if (_activeController === controller) {
+        _activeController = null;
+        set({ busy: false });
+      }
+    }
+  },
 }));
 
 function _handleSseEvent(raw, get, set) {
@@ -224,6 +280,28 @@ function _handleSseEvent(raw, get, set) {
           ...data,
         },
       ].slice(-30),
+    }));
+  }
+  if (event === 'paused') {
+    // HumanApproval 暂停：本轮没有最终回答，运行在等待人工审批。
+    // 把 run_id 挂到消息上，前端据此展示「通过 / 驳回」按钮。
+    get().updateLastMessage((last) => ({
+      ...last,
+      pending: false,
+      paused: {
+        run_id: data.run_id ?? last.run_id ?? null,
+        node_id: data.node_id || null,
+        prompt: data.prompt || '请确认是否继续执行',
+      },
+    }));
+  }
+  if (event === 'rejected') {
+    get().updateLastMessage((last) => ({
+      ...last,
+      pending: false,
+      paused: null,
+      content: last.content || '已驳回本次运行。',
+      rejected: true,
     }));
   }
   if (event === 'done') {

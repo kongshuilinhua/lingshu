@@ -24,6 +24,17 @@ MVP_BUILTIN_TOOL_NAMES = {
     "web_reader",
     "wikipedia",
     "arxiv_search",
+    # 本地确定性工具：无外部依赖、结果可复现，注册进来即可用。
+    "password_generator",
+    "uuid_generator",
+    "diff_checker",
+    "character_counter",
+    # 免 Key 公网接口：结果来自真实服务，失败时显式报错而不是编造内容。
+    "qr_generator",
+    "currency_converter",
+    "weather_lookup",
+    "url_shortener",
+    "ip_lookup",
 }
 
 # 🎯 默认内置智能体节点编排流转流程（典型 ReAct/RAG 工作流骨架）

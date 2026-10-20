@@ -26,6 +26,7 @@ import { KnowledgeDocumentList, KnowledgeUploadBox } from '../components/Knowled
 import { ChatComposer } from '../components/chat/ChatComposer.jsx';
 import { McpBindingPanel } from '../components/McpBindingPanel.jsx';
 import { SkillBindingPanel } from '../components/SkillBindingPanel.jsx';
+import { SubAgentBindingPanel } from '../components/SubAgentBindingPanel.jsx';
 import { AgentSearchSetting } from '../components/AgentSearchSetting.jsx';
 import { RetrievalModeSetting } from '../components/RetrievalModeSetting.jsx';
 import {
@@ -193,6 +194,8 @@ export function BuilderView(props) {
     submitFeedback,
     deleteMemoryProfile,
     tools,
+    resolveApproval,
+    loadRunSteps,
     token,
     toolDebugEvents,
     uploadChatAttachment,
@@ -480,6 +483,7 @@ export function BuilderView(props) {
           <div className="coze-group-title">知识</div>
           <div className={`coze-accordion-item ${expandedSections.kb ? 'expanded' : ''}`}>
             <div className="coze-accordion-header" onClick={() => toggleSection('kb')}>
+          <SubAgentBindingPanel agentId={activeAgentId} token={token} canEdit={canEditActive} />
               <div className="coze-header-left">
                 <ChevronRight size={14} className="coze-caret-icon" />
                 <span>文本 <span className="coze-header-count">({agentForm.knowledge_base_ids.length})</span></span>
@@ -886,7 +890,7 @@ export function BuilderView(props) {
               </div>
             ) : (
               <Suspense fallback={<MessageListFallback />}>
-                <MessageList messages={messages} feedbackByMessage={feedbackByMessage} submitFeedback={submitFeedback} avatar={activeAgent?.avatar || agentForm.avatar || 'AI'} />
+                <MessageList messages={messages} feedbackByMessage={feedbackByMessage} submitFeedback={submitFeedback} resolveApproval={resolveApproval} loadRunSteps={loadRunSteps} avatar={activeAgent?.avatar || agentForm.avatar || 'AI'} />
               </Suspense>
             )}
           </div>
