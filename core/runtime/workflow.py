@@ -855,6 +855,32 @@ class WorkflowRunner:
         if node_type == "HumanApproval":
             config = node.get("config") or {}
             return {"paused": True, "approval_prompt": config.get("prompt", "请确认是否继续执行")}
+        # ==========================================
+        # 扩展节点：HTTP / 代码 / 变量赋值 / 参数提取 / 问题分类
+        # 逻辑放在 core/runtime/flow_nodes.py，这里只做分发
+        # ==========================================
+        if node_type in {"HTTP", "Code", "VariableAssign", "ParameterExtract", "Classifier"}:
+            from core.runtime import flow_nodes
+
+            if node_type == "HTTP":
+                return flow_nodes.run_http_node(node, context)
+            if node_type == "Code":
+                return flow_nodes.run_code_node(node, context)
+            if node_type == "VariableAssign":
+                return flow_nodes.run_variable_assign(node, context)
+            if node_type == "ParameterExtract":
+                return flow_nodes.run_parameter_extract(node, context, provider=self.provider, agent=agent)
+            if node_type == "Classifier":
+                return flow_nodes.run_classifier(node, context, provider=self.provider, agent=agent)
+        if node_type == "Loop":
+            from core.runtime import flow_nodes
+
+            # 循环体走非流式节点分发：循环内部的中间结果不推给前端，
+            # 由循环之后的 LLM 节点统一输出最终回答。
+            def _execute_body(body_node, body_context):
+                return self._execute_node(agent, body_node, body_context)
+
+            return flow_nodes.run_loop_node(node, context, execute=_execute_body)
         return {}
 
     def _stream_llm_node(self, agent, node: dict, context: dict):
@@ -929,6 +955,13 @@ class WorkflowRunner:
         if context.get("rag_refusal"):
             return {}
         bound_tools = self._runtime_tools(agent, node)
+        # 节点级工具白名单：工作流作者在 Tool 节点上显式写了 tools 就只给这些工具，
+        # 空列表（默认工作流的写法）表示不限制、沿用 agent 绑定的全部工具。
+        # 旧实现完全不读 node.config["tools"]，节点上填什么都是空操作。
+        node_tool_names = (node.get("config") or {}).get("tools") or []
+        if node_tool_names:
+            node_tool_names = {str(name) for name in node_tool_names}
+            bound_tools = [tool for tool in bound_tools if tool.name in node_tool_names]
         if not context.get('search_enabled', bool((agent.settings.get('tool_policy') or {}).get('web_search_enabled'))):
             bound_tools = [tool for tool in bound_tools if tool.type != 'builtin_search']
         tool_policy = (agent.settings.get("tool_policy") or {})
@@ -955,13 +988,6 @@ class WorkflowRunner:
         max_tool_calls = 20
         max_tool_wall_time = 120  # seconds
         tool_loop_start = time.monotonic()
-        # 节点级工具白名单：工作流作者在 Tool 节点上显式写了 tools 就只给这些工具，
-        # 空列表（默认工作流的写法）表示不限制、沿用 agent 绑定的全部工具。
-        # 旧实现完全不读 node.config["tools"]，节点上填什么都是空操作。
-        node_tool_names = (node.get("config") or {}).get("tools") or []
-        if node_tool_names:
-            node_tool_names = {str(name) for name in node_tool_names}
-            bound_tools = [tool for tool in bound_tools if tool.name in node_tool_names]
 
         def finish(draft: str, *, streamed: bool, **stats) -> dict:
             return {

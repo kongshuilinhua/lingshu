@@ -27,6 +27,8 @@ import { ChatComposer } from '../components/chat/ChatComposer.jsx';
 import { McpBindingPanel } from '../components/McpBindingPanel.jsx';
 import { SkillBindingPanel } from '../components/SkillBindingPanel.jsx';
 import { SubAgentBindingPanel } from '../components/SubAgentBindingPanel.jsx';
+import { WorkflowEditor } from '../components/WorkflowEditor.jsx';
+const WorkflowCanvas = lazy(() => import('../components/WorkflowCanvas.jsx').then((module) => ({ default: module.WorkflowCanvas })));
 import { AgentSearchSetting } from '../components/AgentSearchSetting.jsx';
 import { RetrievalModeSetting } from '../components/RetrievalModeSetting.jsx';
 import {
@@ -192,10 +194,10 @@ export function BuilderView(props) {
     sources,
     startNewChat,
     submitFeedback,
-    deleteMemoryProfile,
-    tools,
     resolveApproval,
     loadRunSteps,
+    deleteMemoryProfile,
+    tools,
     token,
     toolDebugEvents,
     uploadChatAttachment,
@@ -219,6 +221,7 @@ export function BuilderView(props) {
   // Coze Redesign Collapsible panel states
   const [expandedSections, setExpandedSections] = useState({
     tools: true,
+    workflow: false,
     kb: true,
     memorySession: true,
     memoryUser: false,
@@ -227,6 +230,8 @@ export function BuilderView(props) {
 
   // Modal open states
   const [toolsModalOpen, setToolsModalOpen] = useState(false);
+  const [workflowNodeCount, setWorkflowNodeCount] = useState(null);
+  const [workflowView, setWorkflowView] = useState('canvas');
   const [kbModalOpen, setKbModalOpen] = useState(false);
   
   // Search filter states
@@ -478,12 +483,56 @@ export function BuilderView(props) {
             onChange={(policy) => setAgentForm({ ...agentForm, tool_policy: policy })} />
           <SkillBindingPanel agentId={activeAgentId} token={token} canEdit={canEditActive}
             onOpenMarket={() => confirmNavigation(() => { setMarketScope('mine'); setMarketTab('skills'); setView('home'); setActiveNav('market'); })} />
+          <SubAgentBindingPanel agentId={activeAgentId} token={token} canEdit={canEditActive} />
+
+          {/* ==================== 流程编排 ==================== */}
+          <div className="coze-group-title">流程</div>
+          <div className={`coze-accordion-item ${expandedSections.workflow ? 'expanded' : ''}`}>
+            <div className="coze-accordion-header" onClick={() => toggleSection('workflow')}>
+              <div className="coze-header-left">
+                <ChevronRight size={14} className="coze-caret-icon" />
+                <span>工作流 <span className="coze-header-count">({workflowNodeCount ?? 5} 个节点)</span></span>
+              </div>
+            </div>
+            <div className="coze-accordion-body">
+              <div className="workflow-view-switch" role="tablist" aria-label="工作流编辑视图">
+                <button
+                  type="button" role="tab" aria-selected={workflowView === 'canvas'}
+                  className={workflowView === 'canvas' ? 'active' : ''}
+                  onClick={() => setWorkflowView('canvas')}
+                >画布</button>
+                <button
+                  type="button" role="tab" aria-selected={workflowView === 'list'}
+                  className={workflowView === 'list' ? 'active' : ''}
+                  onClick={() => setWorkflowView('list')}
+                >列表</button>
+              </div>
+              {workflowView === 'canvas' ? (
+                <Suspense fallback={<p className="workflow-editor-empty">正在加载画布…</p>}>
+                <WorkflowCanvas
+                  agentId={activeAgentId}
+                  token={token}
+                  canEdit={canEditActive}
+                  tools={(tools || []).filter((tool) => (agentForm.tool_ids || []).includes(tool.id))}
+                  onCountChange={setWorkflowNodeCount}
+                />
+                </Suspense>
+              ) : (
+                <WorkflowEditor
+                  agentId={activeAgentId}
+                  token={token}
+                  canEdit={canEditActive}
+                  tools={(tools || []).filter((tool) => (agentForm.tool_ids || []).includes(tool.id))}
+                  onCountChange={setWorkflowNodeCount}
+                />
+              )}
+            </div>
+          </div>
 
           {/* ==================== 知识/文本 ==================== */}
           <div className="coze-group-title">知识</div>
           <div className={`coze-accordion-item ${expandedSections.kb ? 'expanded' : ''}`}>
             <div className="coze-accordion-header" onClick={() => toggleSection('kb')}>
-          <SubAgentBindingPanel agentId={activeAgentId} token={token} canEdit={canEditActive} />
               <div className="coze-header-left">
                 <ChevronRight size={14} className="coze-caret-icon" />
                 <span>文本 <span className="coze-header-count">({agentForm.knowledge_base_ids.length})</span></span>

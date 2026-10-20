@@ -6031,3 +6031,446 @@ body.dark .coze-accordion-item {
   font-size: 12px;
   line-height: 1.6;
 }
+
+/* ── 工作流编排（表单式） ── */
+.workflow-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.workflow-editor-intro {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.workflow-editor-empty {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+}
+.workflow-node-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.workflow-node {
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+.workflow-node.open {
+  border-color: #d6d3ff;
+}
+.workflow-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.workflow-node-head:hover {
+  background: #fafaff;
+}
+.workflow-caret {
+  transition: transform 0.15s ease;
+  color: #98a2b3;
+  flex-shrink: 0;
+}
+.workflow-caret.open {
+  transform: rotate(90deg);
+}
+.workflow-node-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f2f4f7;
+  color: #667085;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.workflow-node-head strong {
+  color: #101828;
+}
+.workflow-node-hint {
+  color: #98a2b3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflow-node-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.workflow-node-actions button {
+  display: inline-flex;
+  padding: 3px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+}
+.workflow-node-actions button:hover:not(:disabled) {
+  background: #f2f4f7;
+  color: #344054;
+}
+.workflow-node-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.workflow-node-body {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid #f2f4f7;
+  background: #fcfcfd;
+}
+.workflow-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #475467;
+}
+.workflow-field input[type='number'],
+.workflow-field input[type='text'],
+.workflow-field > input,
+.workflow-field select {
+  padding: 5px 8px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #344054;
+  background: #fff;
+}
+.workflow-tool-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.workflow-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.workflow-branches {
+  display: grid;
+  gap: 6px;
+}
+.workflow-branch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.workflow-branch input,
+.workflow-branch select {
+  padding: 4px 6px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+.workflow-branch-field {
+  flex: 1 1 180px;
+}
+.workflow-branch-value {
+  width: 80px;
+}
+.workflow-branch button,
+.workflow-add-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  background: #fff;
+  color: #667085;
+  font-size: 11px;
+  cursor: pointer;
+}
+.workflow-add-branch {
+  justify-self: start;
+}
+.workflow-default-branch {
+  margin-top: 8px;
+}
+.workflow-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.workflow-add {
+  position: relative;
+}
+.workflow-add > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  background: #fff;
+  color: #344054;
+  font-size: 12px;
+  cursor: pointer;
+}
+.workflow-add-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 4px);
+  z-index: 20;
+  width: 240px;
+  padding: 4px;
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
+  display: grid;
+  gap: 2px;
+}
+.workflow-add-menu button {
+  display: grid;
+  gap: 1px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.workflow-add-menu button:hover {
+  background: #f4f3ff;
+}
+.workflow-add-menu strong {
+  font-size: 12px;
+  color: #344054;
+}
+.workflow-add-menu small {
+  color: #98a2b3;
+  font-size: 11px;
+}
+.workflow-editor-error {
+  margin: 0;
+  color: #d92d20;
+  font-size: 12px;
+}
+.workflow-editor-warn {
+  margin: 0;
+  color: #b54708;
+  font-size: 12px;
+}
+.workflow-editor-success {
+  margin: 0;
+  color: #067647;
+  font-size: 12px;
+}
+
+/* ── 工作流画布 ── */
+.workflow-view-switch {
+  display: inline-flex;
+  margin-bottom: 8px;
+  padding: 2px;
+  border-radius: 7px;
+  background: #f2f4f7;
+}
+.workflow-view-switch button {
+  padding: 3px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #667085;
+  font-size: 12px;
+  cursor: pointer;
+}
+.workflow-view-switch button.active {
+  background: #fff;
+  color: #344054;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
+}
+.wf-canvas-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wf-canvas-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.wf-canvas-toolbar > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  background: #fff;
+  color: #344054;
+  font-size: 12px;
+  cursor: pointer;
+}
+.wf-canvas-toolbar > button.primary {
+  margin-left: auto;
+  border-color: #5b4bff;
+  background: #5b4bff;
+  color: #fff;
+}
+.wf-canvas-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #98a2b3;
+  font-size: 11px;
+}
+.wf-canvas {
+  height: 420px;
+  border: 1px solid #eaecf0;
+  border-radius: 10px;
+  background: #fcfcfd;
+  overflow: hidden;
+}
+.wf-node {
+  min-width: 150px;
+  padding: 8px 10px;
+  border: 1px solid #e4e7ec;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  font-size: 12px;
+}
+.wf-node.selected {
+  border-color: #7a5af8;
+  box-shadow: 0 0 0 2px rgba(122, 90, 248, 0.18);
+}
+.wf-node-title {
+  font-weight: 600;
+  color: #101828;
+}
+.wf-node-id {
+  margin-top: 1px;
+  color: #98a2b3;
+  font-family: monospace;
+  font-size: 10px;
+}
+.wf-node-detail {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 11px;
+}
+.wf-handle {
+  width: 8px !important;
+  height: 8px !important;
+  border: 1.5px solid #7a5af8 !important;
+  background: #fff !important;
+}
+.wf-inspector {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #eaecf0;
+  border-radius: 9px;
+  background: #fff;
+}
+.wf-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.wf-inspector-head strong {
+  color: #101828;
+}
+.wf-inspector-head .wf-node-id {
+  margin-left: 6px;
+}
+.wf-inspector-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+.wf-inspector-actions button {
+  display: inline-flex;
+  padding: 4px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+}
+.wf-inspector-actions button:hover {
+  background: #f2f4f7;
+  color: #344054;
+}
+.workflow-canvas-inline {
+  margin: 0;
+}
+
+/* 新节点配置行 */
+.workflow-row {
+  display: flex;
+  gap: 8px;
+}
+.workflow-row > label {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+  font-size: 12px;
+  color: #475467;
+}
+.workflow-field > label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #475467;
+}
+.workflow-field textarea {
+  padding: 6px 8px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #344054;
+  background: #fff;
+  resize: vertical;
+}
+.workflow-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
+  font-size: 11.5px !important;
+  line-height: 1.5;
+  background: #fcfcfd !important;
+}
+.workflow-branch-value-grow {
+  flex: 1 1 140px;
+}
+.workflow-note {
+  color: #98a2b3;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.workflow-branch-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f2f4f7;
+  color: #667085;
+  font-size: 11px;
+  flex-shrink: 0;
+}
