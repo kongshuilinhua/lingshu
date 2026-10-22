@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useRef, useState, useEffect } from 'react';
+import React, { Suspense, lazy, useCallback, useRef, useState, useEffect } from 'react';
 import {
   ChevronLeft,
   Plus,
@@ -17,7 +17,10 @@ import {
   SquarePen,
   Layers,
   ChevronRight,
-  Trash2
+  Trash2,
+  Maximize2,
+  Minimize2,
+  Workflow
 } from 'lucide-react';
 import { AgentAvatar } from '../components/AgentAvatar.jsx';
 import { PromptTemplateDialog } from '../components/PromptTemplateDialog.jsx';
@@ -56,6 +59,7 @@ import {
   handleAttachmentPaste,
   handleAttachmentDrop,
   SAMPLE_MESSAGES,
+  api,
 } from '../utils.js';
 
 const MessageList = lazy(() => import('../components/MessageList.jsx').then((module) => ({ default: module.MessageList })));
@@ -213,6 +217,7 @@ export function BuilderView(props) {
     ragEnabled,
     thinkingEnabled,
     webSearchRuntime,
+    workflows,
   } = props;
 
   const selectedModel = findModelForForm(models, userModels, agentForm);
@@ -232,6 +237,22 @@ export function BuilderView(props) {
   const [toolsModalOpen, setToolsModalOpen] = useState(false);
   const [workflowNodeCount, setWorkflowNodeCount] = useState(null);
   const [workflowView, setWorkflowView] = useState('canvas');
+  // 全屏只切换容器样式、不重新挂载编辑器：画布里未保存的改动和选中节点都保留
+  const [workflowFullscreen, setWorkflowFullscreen] = useState(false);
+
+  // 引用了独立工作流时，画布读写那份工作流本身；否则读写智能体内置流程（编辑器默认接口）
+  const referencedWorkflowId = agentForm.workflow_id || null;
+  const loadReferencedWorkflow = useCallback(
+    () => api(`/api/workflows/${referencedWorkflowId}`, { token }),
+    [referencedWorkflowId, token],
+  );
+  const saveReferencedWorkflow = useCallback(
+    (_id, nodes) => api(`/api/workflows/${referencedWorkflowId}`, { token, method: 'PATCH', body: { nodes } }),
+    [referencedWorkflowId, token],
+  );
+  const workflowSource = referencedWorkflowId
+    ? { loadWorkflow: loadReferencedWorkflow, saveWorkflow: saveReferencedWorkflow }
+    : {};
   const [kbModalOpen, setKbModalOpen] = useState(false);
   
   // Search filter states
@@ -241,6 +262,26 @@ export function BuilderView(props) {
   const toggleSection = (key) => {
     setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
   };
+
+  const openWorkflowFullscreen = () => {
+    setExpandedSections((prev) => ({ ...prev, workflow: true }));
+    setWorkflowFullscreen(true);
+  };
+
+  useEffect(() => {
+    if (!workflowFullscreen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKeyDown = (event) => {
+      // 未保存确认框等弹层自己处理 Esc 时会 preventDefault，这里不抢
+      if (event.key === 'Escape' && !event.defaultPrevented) setWorkflowFullscreen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [workflowFullscreen]);
 
   const [promptTemplateDialogOpen, setPromptTemplateDialogOpen] = useState(false);
   const [promptTemplateForm, setPromptTemplateForm] = useState(() => defaultPromptTemplateForm());
@@ -359,9 +400,12 @@ export function BuilderView(props) {
           <button type="button" onClick={() => createAgent(true)}><Plus size={14} />新建</button>
         </div>
         <div className="top-actions">
-          <span className="save-state">{activeSummary?.status === 'pending_review' ? '等待管理员审核' : '草稿可保存后提交'}</span>
+          <button className="builder-workflow-entry" type="button" disabled={!activeAgentId} onClick={openWorkflowFullscreen}>
+            <Workflow size={15} />工作流编排
+          </button>
+          <span className="save-state">{activeSummary?.status === 'published' ? '已发布' : '草稿可保存后发布'}</span>
           <button className="ghost-icon" type="button" title="保存草稿" disabled={!canEditActive} onClick={saveAgent}><Check size={16} /></button>
-          <button className="publish" type="button" disabled={!canEditActive} onClick={publishAgent}><Rocket size={16} />{canManage ? '发布' : '提交审核'}</button>
+          <button className="publish" type="button" disabled={!canEditActive} onClick={publishAgent}><Rocket size={16} />发布</button>
         </div>
       </header>
 
@@ -493,39 +537,96 @@ export function BuilderView(props) {
                 <ChevronRight size={14} className="coze-caret-icon" />
                 <span>工作流 <span className="coze-header-count">({workflowNodeCount ?? 5} 个节点)</span></span>
               </div>
+              <button
+                type="button"
+                className="coze-add-button"
+                disabled={!activeAgentId}
+                onClick={(e) => { e.stopPropagation(); openWorkflowFullscreen(); }}
+              >
+                <Maximize2 size={12} />全屏编辑
+              </button>
             </div>
             <div className="coze-accordion-body">
-              <div className="workflow-view-switch" role="tablist" aria-label="工作流编辑视图">
-                <button
-                  type="button" role="tab" aria-selected={workflowView === 'canvas'}
-                  className={workflowView === 'canvas' ? 'active' : ''}
-                  onClick={() => setWorkflowView('canvas')}
-                >画布</button>
-                <button
-                  type="button" role="tab" aria-selected={workflowView === 'list'}
-                  className={workflowView === 'list' ? 'active' : ''}
-                  onClick={() => setWorkflowView('list')}
-                >列表</button>
+              <div className={`workflow-shell ${workflowFullscreen ? 'fullscreen' : ''}`}>
+                <div className="workflow-reference">
+                  <label>
+                    <span>使用哪个工作流</span>
+                    <select
+                      value={agentForm.workflow_id ?? ''}
+                      disabled={!canEditActive}
+                      onChange={(event) => {
+                        const value = event.target.value ? Number(event.target.value) : null;
+                        setAgentForm((prev) => ({ ...prev, workflow_id: value }));
+                      }}
+                    >
+                      <option value="">内置流程（默认五节点）</option>
+                      {(workflows || []).map((item) => (
+                        <option key={item.id} value={item.id}>{item.name}（{item.node_count} 个节点）</option>
+                      ))}
+                    </select>
+                  </label>
+                  {agentForm.workflow_id && (
+                    <small>已引用独立工作流：下面编辑的就是该工作流本身，引用它的其他智能体会一起生效。</small>
+                  )}
+                </div>
+                <div className="workflow-shell-head">
+                  {workflowFullscreen && (
+                    <div className="workflow-shell-title">
+                      <Workflow size={16} />
+                      <strong>工作流编排</strong>
+                      <span>{activeSummary?.name || agentForm.name}</span>
+                    </div>
+                  )}
+                  <div className="workflow-view-switch" role="tablist" aria-label="工作流编辑视图">
+                    <button
+                      type="button" role="tab" aria-selected={workflowView === 'canvas'}
+                      className={workflowView === 'canvas' ? 'active' : ''}
+                      onClick={() => setWorkflowView('canvas')}
+                    >画布</button>
+                    <button
+                      type="button" role="tab" aria-selected={workflowView === 'list'}
+                      className={workflowView === 'list' ? 'active' : ''}
+                      onClick={() => setWorkflowView('list')}
+                    >列表</button>
+                  </div>
+                  <button
+                    type="button"
+                    className="workflow-shell-toggle"
+                    title={workflowFullscreen ? '退出全屏（Esc）' : '全屏编辑'}
+                    onClick={() => (workflowFullscreen ? setWorkflowFullscreen(false) : openWorkflowFullscreen())}
+                  >
+                    {workflowFullscreen ? <><Minimize2 size={14} />退出全屏</> : <><Maximize2 size={14} />全屏</>}
+                  </button>
+                </div>
+                <div className="workflow-shell-body">
+                  {workflowView === 'canvas' ? (
+                    <Suspense fallback={<p className="workflow-editor-empty">正在加载画布…</p>}>
+                    <WorkflowCanvas
+                      key={referencedWorkflowId ? `wf-${referencedWorkflowId}` : `agent-${activeAgentId}`}
+                      {...workflowSource}
+                      agentId={activeAgentId}
+                      token={token}
+                      canEdit={canEditActive}
+                      fullscreen={workflowFullscreen}
+                      tools={(tools || []).filter((tool) => (agentForm.tool_ids || []).includes(tool.id))}
+                      agents={agents || []}
+                      onCountChange={setWorkflowNodeCount}
+                    />
+                    </Suspense>
+                  ) : (
+                    <WorkflowEditor
+                      key={referencedWorkflowId ? `wf-${referencedWorkflowId}` : `agent-${activeAgentId}`}
+                      {...workflowSource}
+                      agentId={activeAgentId}
+                      token={token}
+                      canEdit={canEditActive}
+                      tools={(tools || []).filter((tool) => (agentForm.tool_ids || []).includes(tool.id))}
+                      agents={agents || []}
+                      onCountChange={setWorkflowNodeCount}
+                    />
+                  )}
+                </div>
               </div>
-              {workflowView === 'canvas' ? (
-                <Suspense fallback={<p className="workflow-editor-empty">正在加载画布…</p>}>
-                <WorkflowCanvas
-                  agentId={activeAgentId}
-                  token={token}
-                  canEdit={canEditActive}
-                  tools={(tools || []).filter((tool) => (agentForm.tool_ids || []).includes(tool.id))}
-                  onCountChange={setWorkflowNodeCount}
-                />
-                </Suspense>
-              ) : (
-                <WorkflowEditor
-                  agentId={activeAgentId}
-                  token={token}
-                  canEdit={canEditActive}
-                  tools={(tools || []).filter((tool) => (agentForm.tool_ids || []).includes(tool.id))}
-                  onCountChange={setWorkflowNodeCount}
-                />
-              )}
             </div>
           </div>
 

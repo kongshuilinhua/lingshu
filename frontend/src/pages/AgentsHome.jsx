@@ -9,7 +9,7 @@ export function AgentsHome({ agents, activeAgentId, canManage, createAgent, dele
       <header className="page-heading">
         <div>
           <h1>智能体</h1>
-          <p>创建、选择和编辑你的智能体。普通用户提交发布后需要管理员审核。</p>
+          <p>创建、选择和编辑你的智能体。</p>
         </div>
         <button className="primary" type="button" onClick={() => createAgent(true)}><Plus size={16} />创建智能体</button>
       </header>

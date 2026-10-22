@@ -218,6 +218,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None = None,
         search_enabled: bool | None = None,
         attachments: list[dict] | None = None,
+        workflow_override: list[dict] | None = None,
         _agent_call_stack: list[int] | None = None,
         current_message_id: int | None = None,
         model_override: dict | None = None,
@@ -230,6 +231,9 @@ class WorkflowRunner:
             SQLAlchemy 事务边界（db.commit），确保即使中间某个节点崩溃，前面的运行步骤依旧能持久化，为系统可观测性留下链路 Trace。
         """
         runtime = self._runtime_agent(agent, mode, chat_session.user_id, model_override)
+        if workflow_override:
+            # 试运行：用调用方给的节点替换掉智能体自带的流程，其余配置不变
+            runtime.workflow = workflow_override
         self.runtime = runtime
         upload_ids = [str(item.get("id")) for item in attachments or [] if item.get("id")]
         uploads = get_workspace_uploads(self.db, workspace_id=agent.workspace_id, upload_ids=upload_ids)
@@ -881,6 +885,16 @@ class WorkflowRunner:
                 return self._execute_node(agent, body_node, body_context)
 
             return flow_nodes.run_loop_node(node, context, execute=_execute_body)
+        if node_type == "Agent":
+            from core.runtime import flow_nodes
+
+            return flow_nodes.run_agent_node(
+                node,
+                context,
+                db=self.db,
+                user_id=context.get("user_id") or 0,
+                call_stack=list(context.get("agent_call_stack") or []),
+            )
         return {}
 
     def _stream_llm_node(self, agent, node: dict, context: dict):

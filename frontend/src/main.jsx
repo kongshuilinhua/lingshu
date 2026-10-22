@@ -28,18 +28,18 @@ import {
   Search,
   Send,
   ServerCog,
-  Shield,
   Sparkles,
   SquarePen,
   ThumbsDown,
   ThumbsUp,
   Trash2,
   UploadCloud,
+  Workflow,
   X,
 } from 'lucide-react';
 import './styles.css';
 // Phase 4: api/ client modules
-import { fetchAgents, fetchMarketAgents, fetchReviews } from './api/agents.js';
+import { fetchAgents, fetchMarketAgents } from './api/agents.js';
 import { fetchKnowledgeBases, fetchTools, fetchModels, fetchUserModels, fetchPromptTemplates, fetchMembers } from './api/resources.js';
 import { useAuthStore } from './store/useAuthStore.js';
 import { useAgentStore } from './store/useAgentStore.js';
@@ -51,8 +51,8 @@ const lazyNamed = (loader, exportName) => lazy(() => loader().then((module) => (
 const ChatView = lazyNamed(() => import('./views/ChatView.jsx'), 'ChatView');
 const BuilderView = lazyNamed(() => import('./views/BuilderView.jsx'), 'BuilderView');
 const AgentsHome = lazyNamed(() => import('./pages/AgentsHome.jsx'), 'AgentsHome');
+const WorkflowsHome = lazyNamed(() => import('./pages/WorkflowsHome.jsx'), 'WorkflowsHome');
 const MarketHome = lazyNamed(() => import('./pages/MarketHome.jsx'), 'MarketHome');
-const ReviewHome = lazyNamed(() => import('./pages/ReviewHome.jsx'), 'ReviewHome');
 const MembersHome = lazyNamed(() => import('./pages/MembersHome.jsx'), 'MembersHome');
 const KnowledgeHome = lazyNamed(() => import('./pages/KnowledgeHome.jsx'), 'KnowledgeHome');
 const UserModelsHome = lazyNamed(() => import('./pages/UserModelsHome.jsx'), 'UserModelsHome');
@@ -159,7 +159,7 @@ function App() {
   const [chatModelSelection, setChatModelSelection] = useState('');
   const [runtimeStatus, setRuntimeStatus] = useState(() => defaultRuntimeStatus());
   const [marketAgents, setMarketAgents] = useState([]);
-  const [reviewItems, setReviewItems] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
   const [members, setMembers] = useState([]);
   // Phase 4: Zustand chat store replaces 19 useState calls
   const {
@@ -367,7 +367,7 @@ function App() {
     await storeBootstrap();  // Phase 4: Zustand loads token/me/workspace
     const { token, me, workspace } = useAuthStore.getState();
     if (!token || token !== requestedToken || !workspace) return;
-    const [health, agentList, kbList, toolList, modelList, userModelList, marketList, reviewList, promptTemplateList, memberList] = await Promise.all([
+    const [health, agentList, kbList, toolList, modelList, userModelList, marketList, workflowList, promptTemplateList, memberList] = await Promise.all([
       api('/api/health').catch(() => defaultRuntimeStatus()),
       fetchAgents(token).catch(() => []),
       fetchKnowledgeBases(token).catch(() => []),
@@ -375,7 +375,7 @@ function App() {
       fetchModels(false, token).catch(() => []),
       fetchUserModels(token).catch(() => []),
       fetchMarketAgents(token).catch(() => []),
-      isAdminRole(workspace.role) ? fetchReviews(token).catch(() => []) : Promise.resolve([]),
+      api('/api/workflows', { token }).then((data) => data.items || []).catch(() => []),
       fetchPromptTemplates(false, token).catch(() => []),
       isAdminRole(workspace.role) ? fetchMembers(token).catch(() => []) : Promise.resolve([]),
     ]);
@@ -393,7 +393,7 @@ function App() {
       setAdminModels(adminModelList);
     }
     setMarketAgents(marketList);
-    setReviewItems(reviewList);
+    setWorkflows(workflowList);
     setMembers(memberList);
     const publishedAgents = agentList.filter((item) => item.status === 'published' && item.published_version_id);
     const fallbackAgent = publishedAgents[0] || agentList[0];
@@ -826,7 +826,7 @@ function App() {
     if (!saved) return; // 保存失败已提示，不继续发布
     try {
       const data = await api(`/api/agents/${activeAgentId}/publish`, { token, method: 'POST' });
-      notify(data.review_required ? '已提交管理员审核，通过后会出现在市场。' : '已发布到市场。');
+      notify('已发布到市场。');
       await bootstrap();
     } catch (err) {
       notify(`发布失败：${errorMessage(err)}`);
@@ -840,18 +840,6 @@ function App() {
     setView('builder');
     setActiveNav('agents');
     notify('已复制到你的智能体草稿。');
-  }
-
-  async function approveReview(agentId) {
-    await api(`/api/admin/agent-reviews/${agentId}/approve`, { token, method: 'POST' });
-    await bootstrap();
-    notify('审核通过，智能体已上架市场。');
-  }
-
-  async function rejectReview(agentId) {
-    await api(`/api/admin/agent-reviews/${agentId}/reject`, { token, method: 'POST' });
-    await bootstrap();
-    notify('已驳回该智能体发布申请。');
   }
 
   async function createKnowledgeBase(payload = defaultKnowledgeBaseForm()) {
@@ -1105,7 +1093,7 @@ function App() {
       if (firstPublished) {
         setActiveAgentId(firstPublished.id);
       }
-      setError('对话只能使用已经过审核并上架的智能体。');
+      setError('对话只能使用已发布的智能体。');
       return;
     }
     const currentModel = viewRef.current === 'builder' ? selectedDraftModel : currentChatModel;
@@ -1331,6 +1319,8 @@ function App() {
     loadSession: (id, options) => confirmNavigation(() => loadSession(id, options)),
     logout: () => confirmNavigation(logout),
     marketAgents,
+    workflows,
+    reloadWorkflows: bootstrap,
     marketTab,
     marketScope,
     me,
@@ -1384,9 +1374,6 @@ function App() {
     resolveApproval,
     loadRunSteps,
     deleteMemoryProfile,
-    approveReview,
-    rejectReview,
-    reviewItems,
     tools,
     toolDebugEvents,
     testToolConfig,
@@ -1529,6 +1516,8 @@ function HomeView(props) {
     loadSession,
     logout,
     marketAgents,
+    workflows,
+    reloadWorkflows,
     marketTab,
     marketScope,
     me,
@@ -1558,9 +1547,6 @@ function HomeView(props) {
     submitFeedback,
     resolveApproval,
     loadRunSteps,
-    approveReview,
-    rejectReview,
-    reviewItems,
     tools,
     testToolConfig,
     uploadChatAttachment,
@@ -1676,8 +1662,8 @@ function HomeView(props) {
           <NavButton icon={<Home size={17} />} label="首页" active={activeNav === 'chat'} onClick={() => setActiveNav('chat')} />
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
+          <NavButton icon={<Workflow size={17} />} label="工作流" active={activeNav === 'workflows'} onClick={() => setActiveNav('workflows')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
-          {canManage && <NavButton icon={<Shield size={17} />} label="审核" active={activeNav === 'reviews'} onClick={() => setActiveNav('reviews')} />}
           {canManage && <NavButton icon={<KeyRound size={17} />} label="成员" active={activeNav === 'members'} onClick={() => setActiveNav('members')} />}
           <NavButton icon={<Database size={17} />} label="知识库" active={activeNav === 'knowledge'} onClick={() => setActiveNav('knowledge')} />
         </nav>
@@ -1869,6 +1855,10 @@ function HomeView(props) {
           <MembersHome members={members} />
         )}
 
+        {activeNav === 'workflows' && (
+          <WorkflowsHome token={token} agents={agents} workflows={workflows} reloadWorkflows={reloadWorkflows} canManage={canManage} />
+        )}
+
         {activeNav === 'knowledge' && (
           <KnowledgeHome
             canManage={canManage}
@@ -1955,14 +1945,6 @@ function HomeView(props) {
             testToolConfig={testToolConfig}
             tools={tools}
             updateToolConfig={updateToolConfig}
-          />
-        )}
-
-        {activeNav === 'reviews' && canManage && (
-          <ReviewHome
-            items={reviewItems}
-            approveReview={approveReview}
-            rejectReview={rejectReview}
           />
         )}
 

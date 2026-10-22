@@ -18,6 +18,7 @@ export const NODE_TYPES = [
   { type: 'Condition', label: '条件分支', hint: '按上下文取值决定下一跳' },
   { type: 'HumanApproval', label: '人工审批', hint: '暂停运行，等待人工放行或驳回' },
   { type: 'Loop', label: '循环', hint: '把一组节点重复执行（可遍历数组）' },
+  { type: 'Agent', label: '智能体', hint: '在这一步调用另一个已发布的智能体' },
   { type: 'Answer', label: '输出回答', hint: '把草稿作为最终回答输出' },
 ];
 
@@ -61,6 +62,7 @@ export function defaultConfig(type) {
   if (type === 'VariableAssign') return { assignments: [] };
   if (type === 'ParameterExtract') return { instruction: '', source: '{{input}}', schema: {} };
   if (type === 'Loop') return { body: [], items: '', loop_var: 'item', max_iterations: 3, stop_when: null };
+  if (type === 'Agent') return { agent_id: null, input: '{{input}}' };
   if (type === 'Classifier') return { classes: [], default: '' };
   return {};
 }
@@ -188,6 +190,7 @@ export function validateWorkflow(nodes) {
     if (node.type === 'Code' && !node.config?.code) problems.push('代码节点缺少代码');
     if (node.type === 'VariableAssign' && !(node.config?.assignments || []).length) problems.push('变量赋值至少需要一项');
     if (node.type === 'ParameterExtract' && !Object.keys(node.config?.schema || {}).length) problems.push('参数提取至少需要一个字段');
+    if (node.type === 'Agent' && !node.config?.agent_id) problems.push('智能体节点需要选择目标智能体');
   }
   return problems;
 }

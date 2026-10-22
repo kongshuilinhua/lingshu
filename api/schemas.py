@@ -121,6 +121,7 @@ class AgentCreateRequest(BaseModel):
     memory: AgentMemoryConfig = Field(default_factory=AgentMemoryConfig)
     rag: AgentRagConfig = Field(default_factory=AgentRagConfig)
     tool_policy: AgentToolPolicy = Field(default_factory=AgentToolPolicy)
+    workflow_id: int | None = None
 
 
 class AgentUpdateRequest(BaseModel):
@@ -141,6 +142,7 @@ class AgentUpdateRequest(BaseModel):
     memory: AgentMemoryConfig | None = None
     rag: AgentRagConfig | None = None
     tool_policy: AgentToolPolicy | None = None
+    workflow_id: int | None = None
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -183,8 +185,24 @@ class SessionUpdateRequest(BaseModel):
 
 
 class WorkflowUpdateRequest(BaseModel):
-    """图工作流编排定义更新契约。"""
-    nodes: list[dict]
+    """工作流更新契约：名称、描述与节点图，均可按需部分更新。"""
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = None
+    nodes: list[dict] | None = None
+
+
+class WorkflowCreateRequest(BaseModel):
+    """新建独立工作流。"""
+    name: str = Field(min_length=1, max_length=160)
+    description: str = ""
+    nodes: list[dict] | None = None
+
+
+class WorkflowTestRequest(BaseModel):
+    """试运行：用哪个智能体的配置来跑，输入是什么。"""
+    agent_id: int
+    message: str = Field(min_length=1)
+    variables: dict | None = None
 
 
 class ChatModelSelection(BaseModel):

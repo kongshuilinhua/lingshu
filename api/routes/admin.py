@@ -1,12 +1,11 @@
-"""灵枢 Agent 平台 —— Admin 路由（审核 + 市场 + 成员管理）。"""
+"""灵枢 Agent 平台 —— Admin 路由（市场 + 成员管理）。"""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from api.access import require_workspace_agent
-from api.deps import get_current_membership, get_current_user, require_manager
+from api.deps import get_current_membership, get_current_user
 from api.schemas import UploadCreateRequest
-from api.serializers import review_payload
 from core.db.models import (
     Agent,
     AgentVersion,
@@ -15,41 +14,13 @@ from core.db.models import (
 )
 from core.db.session import get_db
 from core.services.agents import (
-    approve_agent,
     get_agent_detail,
     market_agent_summary,
-    reject_agent,
 )
 from core.services.uploads import create_upload, upload_payload
 from core.services.agents import copy_agent_from_market
 
 router = APIRouter(tags=["admin"])
-
-
-# ── Agent Reviews ──
-
-@router.get("/api/admin/agent-reviews")
-def list_agent_reviews(membership: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    agents = db.query(Agent).filter(Agent.workspace_id == membership.workspace_id, Agent.status == "pending_review").order_by(Agent.updated_at.desc()).all()
-    return {"items": [review_payload(db, agent) for agent in agents]}
-
-
-@router.post("/api/admin/agent-reviews/{agent_id}/approve")
-def approve_agent_review(agent_id: int, membership: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
-    if agent.status != "pending_review":
-        raise HTTPException(status_code=400, detail="Agent is not pending review")
-    version = approve_agent(db, agent, membership.user_id)
-    return {"agent": get_agent_detail(db, agent), "version": {"id": version.id, "version": version.version}}
-
-
-@router.post("/api/admin/agent-reviews/{agent_id}/reject")
-def reject_agent_review(agent_id: int, membership: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
-    agent = require_workspace_agent(db, membership.workspace_id, agent_id)
-    if agent.status != "pending_review":
-        raise HTTPException(status_code=400, detail="Agent is not pending review")
-    reject_agent(db, agent)
-    return {"agent": get_agent_detail(db, agent)}
 
 
 # ── Market ──

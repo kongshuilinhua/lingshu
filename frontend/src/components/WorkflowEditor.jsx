@@ -19,7 +19,7 @@ import { NodeConfig } from './WorkflowNodeConfig.jsx';
  */
 
 export function WorkflowEditor({
-  agentId, token, canEdit, tools = [], onCountChange,
+  agentId, token, canEdit, tools = [], agents = [], onCountChange,
   // 可注入的读写实现：默认直接走接口；测试与后续画布视图可替换
   loadWorkflow, saveWorkflow,
 }) {
@@ -161,7 +161,7 @@ export function WorkflowEditor({
       const saved = response.nodes || payload;
       setNodes(saved);
       savedNodes.current = saved;
-      guard.markSaved();
+      guard.markSaved(JSON.stringify(saved));
       setMessage('工作流已保存。');
       return true;
     } catch (err) {
@@ -214,6 +214,7 @@ export function WorkflowEditor({
                   nodes={nodes}
                   nodeIds={nodeIds}
                   tools={tools}
+                  agents={agents}
                   canEdit={canEdit}
                   saving={saving}
                   onUpdate={update}

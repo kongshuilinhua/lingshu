@@ -41,6 +41,7 @@ from core.services.rag_cache import redis_store
 from api.routes.auth import router as auth_router
 from api.routes.workspace import router as workspace_router
 from api.routes.agents import router as agents_router
+from api.routes.workflows import router as workflows_router
 from api.routes.knowledge import router as knowledge_router
 from api.routes.tools import router as tools_router
 from api.routes.models import router as models_router
@@ -343,6 +344,7 @@ def _sanitize_public_error(message: str) -> str:
 app.include_router(auth_router)
 app.include_router(workspace_router)
 app.include_router(agents_router)
+app.include_router(workflows_router)
 app.include_router(knowledge_router)
 app.include_router(tools_router)
 app.include_router(models_router)

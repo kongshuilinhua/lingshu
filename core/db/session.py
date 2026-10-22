@@ -131,10 +131,16 @@ def _run_compat_migrations() -> None:
         if "user_model_config_id" not in agent_columns:
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE agents ADD COLUMN user_model_config_id INTEGER"))
+        if "workflow_id" not in agent_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE agents ADD COLUMN workflow_id INTEGER"))
         agent_indexes = {index["name"] for index in inspector.get_indexes("agents")}
         if "ix_agents_user_model_config_id" not in agent_indexes:
             with engine.begin() as connection:
                 connection.execute(text("CREATE INDEX ix_agents_user_model_config_id ON agents (user_model_config_id)"))
+        if "ix_agents_workflow_id" not in agent_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_agents_workflow_id ON agents (workflow_id)"))
         
         avatar_col = next((col for col in inspector.get_columns("agents") if col["name"] == "avatar"), None)
         if avatar_col and getattr(avatar_col["type"], "length", None) == 40:

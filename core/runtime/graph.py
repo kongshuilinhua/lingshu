@@ -154,7 +154,7 @@ def validate_graph(nodes: list[dict]) -> list[str]:
     errors: list[str] = []
     allowed = {
         "Start", "LLM", "Knowledge", "Tool", "Answer", "Condition", "HumanApproval",
-        "HTTP", "Code", "VariableAssign", "ParameterExtract", "Classifier", "Loop",
+        "HTTP", "Code", "VariableAssign", "ParameterExtract", "Classifier", "Loop", "Agent",
     }
     ids = [n.get("id") for n in nodes if isinstance(n, dict)]
     seen_types = {n.get("type") for n in nodes if isinstance(n, dict)}

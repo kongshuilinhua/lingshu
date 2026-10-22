@@ -9,12 +9,39 @@ import { COMMON_FIELDS, NODE_TYPES, PREDICATES, TYPE_LABELS, predicateOf } from 
  * 两种视图必须产出完全相同的 JSON，否则同一份工作流换个视图就会变样。
  * 因此这里改用函数式导入而非内联定义。
  */
-export function NodeConfig({ node, index, nodes, nodeIds, tools, canEdit, saving, onUpdate, onUpdateConfig, onAddBranch, onUpdateBranch, onRemoveBranch }) {
+export function NodeConfig({ node, index, nodes, nodeIds, tools, agents = [], canEdit, saving, onUpdate, onUpdateConfig, onAddBranch, onUpdateBranch, onRemoveBranch }) {
   const disabled = !canEdit || saving;
   const config = node.config || {};
 
   return (
     <>
+      {node.type === 'Agent' && (
+        <div className="workflow-field">
+          <label>
+            <span>目标智能体（只能用已发布的）</span>
+            <select
+              value={config.agent_id ?? ''} disabled={disabled}
+              onChange={(event) => onUpdateConfig(index, { agent_id: event.target.value ? Number(event.target.value) : null })}
+            >
+              <option value="">请选择</option>
+              {agents
+                .filter((agent) => agent.status === 'published')
+                .map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>交给它的输入（支持 {'{{变量}}'} 模板）</span>
+            <input
+              value={config.input ?? '{{input}}'} disabled={disabled} placeholder="{{input}}"
+              onChange={(event) => onUpdateConfig(index, { input: event.target.value })}
+            />
+          </label>
+          <small className="workflow-note">
+            这一步会完整跑一次该智能体（含它自己的知识库和工具），结果写入 {'{{agent_result}}'}。串多个智能体会叠加耗时与 token。
+          </small>
+        </div>
+      )}
+
       {node.type === 'Knowledge' && (
         <label className="workflow-field">
           <span>召回片段数</span>

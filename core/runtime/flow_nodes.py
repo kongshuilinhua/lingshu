@@ -560,3 +560,52 @@ def _eval_stop(spec: dict, context: dict, output: dict) -> bool:
     from core.runtime.graph import eval_condition
 
     return eval_condition(spec, context, output)
+
+
+# ── 智能体节点 ────────────────────────────────────────────────────
+
+def run_agent_node(node: dict, context: dict, *, db, user_id: int, call_stack: list[int]) -> dict:
+    """
+    智能体节点：在流程的固定位置调用一个已发布的智能体，把它的回答写进上下文。
+
+    🎯 与「智能体即工具」（`type: agent`）的分工：
+        - 工具形态由模型在 ReAct 循环里自行决定是否调用，可能不调用；
+        - 节点形态由图的连线决定，到这一步就一定执行。
+        前者适合「助手按需委派」，后者适合「流水线固定分工」。
+
+    📦 输入与输出：
+        - `config.agent_id`：目标智能体；
+        - `config.input`：交给它的输入，默认 `{{input}}`，可写任意模板；
+        - 输出写入 `agent_result`（最近一次）、`agent_results`（按节点 id 累积）和 `draft`。
+    """
+    config = node.get("config") or {}
+    target_id = config.get("agent_id")
+    if not target_id:
+        raise ValueError(f"智能体节点 '{node.get('id')}' 没有选择目标智能体")
+
+    from core.db.models import Agent
+
+    target = db.get(Agent, int(target_id))
+    if not target:
+        raise ValueError(f"智能体节点 '{node.get('id')}' 的目标智能体不存在")
+    if not target.published_version_id:
+        raise ValueError(f"目标智能体「{target.name}」还没有发布，无法在工作流中调用")
+    if target.id in call_stack:
+        raise ValueError(f"检测到智能体递归调用：{target.name}")
+
+    prompt = render_template(config.get("input") or "{{input}}", context)
+    message = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False)
+
+    from core.services.agents import run_published_agent
+
+    answer = run_published_agent(
+        db,
+        target,
+        message,
+        user_id=user_id,
+        call_stack=[*call_stack, target.id],
+    )
+    results = dict(context.get("agent_results") or {})
+    results[node.get("id")] = {"agent_id": target.id, "name": target.name, "answer": answer}
+    # 同时写 draft：智能体节点后面直接接「输出回答」就能出结果，不必再垫一个 LLM 节点
+    return {"agent_result": answer, "agent_results": results, "draft": answer}

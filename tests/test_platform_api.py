@@ -1867,53 +1867,31 @@ def test_agent_coze_settings_can_be_saved_and_published(client, auth_headers):
     assert snapshot["memory"]["enabled"] is True
 
 
-def test_user_publish_requires_admin_review_then_market_copy(client, auth_headers):
+def test_user_publish_goes_live_then_market_copy(client, auth_headers):
     user, user_headers = _register_regular_user(client, email="maker@example.com", name="Maker")
 
     created = client.post(
         "/api/agents",
         headers=user_headers,
-        json={"name": "待审核智能体", "description": "普通用户提交的智能体", "system_prompt": "你是市场智能体。"},
+        json={"name": "直接发布智能体", "description": "普通用户发布的智能体", "system_prompt": "你是市场智能体。"},
     )
     agent_id = created.json()["agent"]["id"]
 
-    submitted = client.post(f"/api/agents/{agent_id}/publish", headers=user_headers)
-    assert submitted.status_code == 200
-    assert submitted.json()["status"] == "pending_review"
-    assert submitted.json()["review_required"] is True
-
-    market_before = client.get("/api/market/agents", headers=user_headers)
-    assert all(item["id"] != agent_id for item in market_before.json()["items"])
-
-    blocked_chat = client.post(
-        f"/api/agents/{agent_id}/chat/stream",
-        headers=user_headers,
-        json={"message": "审核前不能正式对话", "mode": "published"},
-    )
-    assert blocked_chat.status_code == 200
-    assert "当前智能体还没有发布版本" in blocked_chat.text
-
-    forbidden = client.post(f"/api/admin/agent-reviews/{agent_id}/approve", headers=user_headers)
-    assert forbidden.status_code == 403
-
-    reviews = client.get("/api/admin/agent-reviews", headers=auth_headers)
-    assert reviews.status_code == 200
-    assert any(item["id"] == agent_id for item in reviews.json()["items"])
-
-    approved = client.post(f"/api/admin/agent-reviews/{agent_id}/approve", headers=auth_headers)
-    assert approved.status_code == 200
-    assert approved.json()["agent"]["status"] == "published"
+    published = client.post(f"/api/agents/{agent_id}/publish", headers=user_headers)
+    assert published.status_code == 200
+    assert published.json()["status"] == "published"
+    assert published.json()["review_required"] is False
 
     market_after = client.get("/api/market/agents", headers=user_headers)
     assert any(item["id"] == agent_id for item in market_after.json()["items"])
 
-    approved_chat = client.post(
+    live_chat = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=user_headers,
-        json={"message": "审核后可以正式对话", "mode": "published"},
+        json={"message": "发布后可以直接对话", "mode": "published"},
     )
-    assert approved_chat.status_code == 200
-    assert "event: done" in approved_chat.text
+    assert live_chat.status_code == 200
+    assert "event: done" in live_chat.text
 
     copy = client.post(f"/api/market/agents/{agent_id}/copy", headers=user_headers)
     assert copy.status_code == 200

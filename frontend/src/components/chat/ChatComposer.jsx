@@ -11,7 +11,7 @@ import { uploadTypeFromContentType } from '../../utils.js';
 
 const CHAT_COPY = {
   noAgentTitle: '暂无可对话的智能体',
-  noAgentDesc: '主对话页只开放已审核并上架的智能体。请先发布，普通用户发布后需要管理员审核。',
+  noAgentDesc: '主对话页只开放已发布的智能体。请先在编辑页发布。',
   welcomeTitle: '今天想让哪个智能体帮你？',
   welcomeDesc: '选择智能体后可以直接聊天，也可以进入配置页调整能力。',
   promptIntro: '介绍一下你的能力',

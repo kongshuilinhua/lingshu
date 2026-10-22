@@ -9,8 +9,6 @@
 from sqlalchemy.orm import Session
 
 from core.db.models import (
-    Agent,
-    AgentVersion,
     Message,
     Session as ChatSessionModel,
     User,
@@ -18,7 +16,6 @@ from core.db.models import (
     WorkspaceInvite,
 )
 from core.security.permissions import normalize_role
-from core.services.agents import agent_summary
 
 
 def user_payload(user: User) -> dict:
@@ -63,10 +60,3 @@ def message_payload(message: Message) -> dict:
     }
 
 
-def review_payload(db: Session, agent: Agent) -> dict:
-    version = db.query(AgentVersion).filter(AgentVersion.agent_id == agent.id).order_by(AgentVersion.version.desc()).first()
-    return {
-        **agent_summary(agent),
-        "submitted_version": version.version if version else None,
-        "submitted_at": version.created_at.isoformat() if version and version.created_at else None,
-    }

@@ -175,9 +175,8 @@ def delete_agent_endpoint(agent_id: int, membership: WorkspaceMember = Depends(g
 def publish_agent_endpoint(agent_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
     require_agent_write_access(agent, membership)
-    require_review = not can_manage(membership.role)
-    version = publish_agent(db, agent, membership.user_id, require_review=require_review)
-    return {"status": agent.status, "review_required": require_review, "version": {"id": version.id, "version": version.version, "snapshot": version.snapshot}}
+    version = publish_agent(db, agent, membership.user_id)
+    return {"status": agent.status, "review_required": False, "version": {"id": version.id, "version": version.version, "snapshot": version.snapshot}}
 
 
 @router.get("/{agent_id}/versions")

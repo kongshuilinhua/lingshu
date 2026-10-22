@@ -102,6 +102,7 @@ def agent_summary(agent: Agent) -> dict:
         "is_template": agent.is_template,
         "created_by": agent.created_by,
         "published_version_id": agent.published_version_id,
+        "workflow_id": agent.workflow_id,
         "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
     }
 
@@ -122,6 +123,13 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
     tool_ids = [row.tool_id for row in db.query(AgentTool).filter(AgentTool.agent_id == agent.id).all()]
     tools = db.query(Tool).filter(Tool.id.in_(tool_ids)).all() if tool_ids else []
     workflow = db.query(WorkflowDefinition).filter(WorkflowDefinition.agent_id == agent.id).first()
+    nodes = workflow.nodes if workflow else DEFAULT_WORKFLOW
+    # 引用了独立工作流时以它为准：智能体的内置流程只是默认值
+    if agent.workflow_id:
+        from core.db.models import Workflow
+        shared = db.get(Workflow, agent.workflow_id)
+        if shared and shared.workspace_id == agent.workspace_id and shared.nodes:
+            nodes = shared.nodes
     settings = ensure_agent_settings(db, agent.id)
     model_config = db.get(ModelConfig, agent.model_id) if agent.model_id else None
     user_model_config = db.get(UserModelConfig, agent.user_model_config_id) if agent.user_model_config_id else None
@@ -134,7 +142,7 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
         "mcp_bindings": agent_bindings_payload(db, agent.id),
         "skill_bindings": skill_bindings(db, agent.id),
         "sub_agent_bindings": agent_sub_agent_bindings(db, agent.id),
-        "workflow": workflow.nodes if workflow else DEFAULT_WORKFLOW,
+        "workflow": nodes,
         "model_config": model_payload(model_config) if model_config else None,
         "user_model_config": user_model_snapshot(user_model_config),
         "suggested_questions": settings.suggested_questions or [],
@@ -161,6 +169,7 @@ def create_agent(db: Session, *, workspace_id: int, user_id: int, payload: dict)
         system_prompt=payload.get("system_prompt") or "",
         model=payload.get("model") or "qwen-plus",
         temperature=payload.get("temperature", 0.4),
+        workflow_id=payload.get("workflow_id"),
         created_by=user_id,
     )
     db.add(agent)
@@ -189,7 +198,7 @@ def update_agent(db: Session, agent: Agent, payload: dict) -> Agent:
     """
     更新智能体核心属性及其映射资产的统一事务函数。
     """
-    for key in ["model_id", "user_model_config_id"]:
+    for key in ["model_id", "user_model_config_id", "workflow_id"]:
         if key in payload:
             setattr(agent, key, payload[key])
     for key in ["name", "avatar", "description", "opening_message", "system_prompt", "model", "temperature"]:
@@ -222,14 +231,12 @@ def update_agent(db: Session, agent: Agent, payload: dict) -> Agent:
     return agent
 
 
-def publish_agent(db: Session, agent: Agent, user_id: int, *, require_review: bool = False) -> AgentVersion:
+def publish_agent(db: Session, agent: Agent, user_id: int) -> AgentVersion:
     """
     智能体版本快照发布。
 
-    🎯 意图与工程大局观：
-        为当前草稿态 Agent 生成独立的持久化不可变 Snapshot（版本自增 1）。
-        支持平台审批管理流：若开启审核机制，状态置为 `pending_review`，不更改当前线上版本；
-        否则自动生效，将 `published_version_id` 修改为本最新生成的快照 ID。
+    为当前草稿态 Agent 生成独立的持久化不可变 Snapshot（版本自增 1），
+    并立即生效：状态置 `published`，`published_version_id` 指向新快照。
     """
     latest = db.query(AgentVersion).filter(AgentVersion.agent_id == agent.id).order_by(AgentVersion.version.desc()).first()
     version_number = (latest.version + 1) if latest else 1
@@ -237,11 +244,8 @@ def publish_agent(db: Session, agent: Agent, user_id: int, *, require_review: bo
     version = AgentVersion(agent_id=agent.id, version=version_number, snapshot=snapshot, created_by=user_id)
     db.add(version)
     db.flush()
-    if require_review:
-        agent.status = "pending_review"
-    else:
-        agent.status = "published"
-        agent.published_version_id = version.id
+    agent.status = "published"
+    agent.published_version_id = version.id
     db.commit()
     db.refresh(version)
     return version
@@ -281,26 +285,6 @@ def ensure_template_agents_published(db: Session, workspace_id: int) -> None:
 def latest_agent_version(db: Session, agent: Agent) -> AgentVersion | None:
     """获取最新快照纪录。"""
     return db.query(AgentVersion).filter(AgentVersion.agent_id == agent.id).order_by(AgentVersion.version.desc()).first()
-
-
-def approve_agent(db: Session, agent: Agent, reviewer_id: int) -> AgentVersion:
-    """管理员审批同意 Agent 模版发布上线，强制激活最新草稿版本快照为线上当前版本。"""
-    version = latest_agent_version(db, agent)
-    if not version:
-        version = publish_agent(db, agent, reviewer_id, require_review=False)
-    agent.status = "published"
-    agent.published_version_id = version.id
-    db.commit()
-    db.refresh(version)
-    return version
-
-
-def reject_agent(db: Session, agent: Agent) -> Agent:
-    """管理员驳回模板智能体上线申请。"""
-    agent.status = "rejected"
-    db.commit()
-    db.refresh(agent)
-    return agent
 
 
 def delete_agent(db: Session, agent: Agent) -> None:
@@ -612,6 +596,42 @@ def _replace_agent_tools(db: Session, agent_id: int, tool_ids: list[int]) -> Non
 def workspace_kb_exists(db: Session, workspace_id: int, kb_id: int) -> bool:
     """校验某个知识库是否存在于工作空间中。"""
     return db.query(KnowledgeBase).filter(KnowledgeBase.workspace_id == workspace_id, KnowledgeBase.id == kb_id).first() is not None
+
+
+def run_published_agent(
+    db: Session,
+    target: Agent,
+    user_message: str,
+    *,
+    user_id: int,
+    call_stack: list[int] | None = None,
+) -> str:
+    """
+    用发布快照同步跑完一个智能体的一回合，返回最终回答。
+
+    工具形态（`type: agent`）与工作流的智能体节点共用这一条路径，
+    区别只在于「谁决定调用它」：模型决定 vs 图的连线决定。
+    """
+    from core.db.models import Session as ChatSession
+    from core.runtime.workflow import WorkflowRunner
+
+    sub_session = ChatSession(
+        workspace_id=target.workspace_id,
+        agent_id=target.id,
+        user_id=user_id,
+        title="agent-call",
+        is_debug=True,
+    )
+    db.add(sub_session)
+    db.flush()
+    _run, answer, _sources, _steps = WorkflowRunner(db).run(
+        agent=target,
+        chat_session=sub_session,
+        user_message=user_message,
+        mode="published",
+        _agent_call_stack=list(call_stack or []),
+    )
+    return answer
 
 
 def agent_sub_agent_bindings(db: Session, agent_id: int) -> list[dict]:

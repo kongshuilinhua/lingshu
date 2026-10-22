@@ -37,6 +37,7 @@ const TYPE_COLORS = {
   Condition: '#ee46bc',
   HumanApproval: '#667085',
   Answer: '#0e9384',
+  Agent: '#b54708',
 };
 
 function nodeStyle(type) {
@@ -78,11 +79,12 @@ function detailOf(node) {
     return count ? `限定 ${count} 个工具` : '全部已绑定工具';
   }
   if (node.type === 'HumanApproval') return node.config?.prompt || '';
+  if (node.type === 'Agent') return node.config?.agent_id ? `智能体 #${node.config.agent_id}` : '未选择智能体';
   return '';
 }
 
 function CanvasInner({
-  agentId, token, canEdit, tools = [], onCountChange, loadWorkflow, saveWorkflow,
+  agentId, token, canEdit, tools = [], agents = [], onCountChange, loadWorkflow, saveWorkflow, fullscreen = false,
 }) {
   const [nodes, setNodes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -119,6 +121,13 @@ function CanvasInner({
   }, [nodes.length, onCountChange]);
 
   const problems = useMemo(() => validateWorkflow(nodes), [nodes]);
+
+  // 进出全屏时容器尺寸突变，React Flow 不会自动重新取景
+  useEffect(() => {
+    if (loading) return undefined;
+    const timer = setTimeout(() => fitView({ padding: 0.2, duration: 200 }), 60);
+    return () => clearTimeout(timer);
+  }, [fullscreen, loading, fitView]);
 
   const flowNodes = useMemo(() => nodes.map((node) => ({
     id: node.id,
@@ -295,7 +304,7 @@ function CanvasInner({
       const saved = layoutNodes(response?.nodes || payload);
       setNodes(saved);
       savedNodes.current = saved;
-      guard.markSaved();
+      guard.markSaved(JSON.stringify(saved)); // 与 value 同格式；服务端（MySQL JSON）返回的键序会变，必须以返回值为基线
       setMessage('工作流已保存。');
       return true;
     } catch (err) {
@@ -318,7 +327,7 @@ function CanvasInner({
   if (loading) return <p className="workflow-editor-empty">正在读取工作流…</p>;
 
   return (
-    <div className="wf-canvas-wrap">
+    <div className={`wf-canvas-wrap ${fullscreen ? 'fullscreen' : ''}`}>
       <div className="wf-canvas-toolbar">
         <div className="workflow-add">
           <button type="button" onClick={() => setAddMenuOpen((open) => !open)} disabled={!canEdit || saving}>
@@ -350,6 +359,7 @@ function CanvasInner({
         )}
       </div>
 
+      <div className="wf-canvas-stage">
       <div className="wf-canvas">
         <ReactFlow
           nodes={flowNodes}
@@ -374,11 +384,6 @@ function CanvasInner({
         </ReactFlow>
       </div>
 
-      {connectError && <p className="workflow-editor-error workflow-canvas-inline">{connectError}</p>}
-      {error && <p className="workflow-editor-error">{error}</p>}
-      {!error && problems.length > 0 && <p className="workflow-editor-warn">{problems[0]}</p>}
-      {message && <p className="workflow-editor-success">{message}</p>}
-
       {selectedNode && (
         <div className="wf-inspector">
           <header className="wf-inspector-head">
@@ -401,6 +406,7 @@ function CanvasInner({
             nodes={nodes}
             nodeIds={nodes.map((node) => node.id)}
             tools={tools}
+            agents={agents}
             canEdit={canEdit}
             saving={saving}
             onUpdate={updateNode}
@@ -420,6 +426,12 @@ function CanvasInner({
           />
         </div>
       )}
+      </div>
+
+      {connectError && <p className="workflow-editor-error workflow-canvas-inline">{connectError}</p>}
+      {error && <p className="workflow-editor-error">{error}</p>}
+      {!error && problems.length > 0 && <p className="workflow-editor-warn">{problems[0]}</p>}
+      {message && <p className="workflow-editor-success">{message}</p>}
     </div>
   );
 }

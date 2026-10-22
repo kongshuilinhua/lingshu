@@ -169,6 +169,10 @@ class Agent(Base):
     temperature: Mapped[float] = mapped_column(Float, default=0.4)
     status: Mapped[str] = mapped_column(String(20), default="draft")  # 'draft' / 'published'
     published_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 引用一个独立工作流；为空则沿用智能体内置的 `WorkflowDefinition`
+    workflow_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     is_template: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -604,9 +608,30 @@ class McpOAuthAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class Workflow(Base):
+    """
+    独立工作流资源。
+
+    编排的主体是工作流本身，不再依附某个智能体；智能体的内置流程仍走
+    `WorkflowDefinition`（老字段，行为不变），新建的编排则由这张表承接。
+    """
+    __tablename__ = "workflows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    nodes: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class WorkflowDefinition(Base):
     """
     工作流节点定义实体。
+
+    兼容保留：保存智能体「内置流程」。独立工作流见 `Workflow`。
     """
     __tablename__ = "workflow_definitions"
 
