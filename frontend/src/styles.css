@@ -6230,8 +6230,10 @@ body.dark .coze-accordion-item {
 .workflow-add-menu {
   position: absolute;
   left: 0;
-  bottom: calc(100% + 4px);
+  top: calc(100% + 4px);
   z-index: 20;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
   width: 240px;
   padding: 4px;
   border: 1px solid #eaecf0;
@@ -6306,6 +6308,8 @@ body.dark .coze-accordion-item {
   gap: 8px;
 }
 .wf-canvas-toolbar {
+  position: relative;
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -6678,13 +6682,38 @@ body.dark .coze-accordion-item {
 }
 .workflow-stage-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   margin-bottom: 10px;
 }
-.workflow-stage-head small {
-  color: #667085;
+.workflow-name-input,
+.workflow-desc-input {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  padding: 3px 6px;
+}
+.workflow-name-input {
+  font-size: 15px;
+  font-weight: 600;
+  color: #101828;
+  width: 240px;
+}
+.workflow-desc-input {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
+  color: #667085;
+}
+.workflow-name-input:hover:not(:disabled),
+.workflow-desc-input:hover:not(:disabled) {
+  border-color: #e4e7ec;
+}
+.workflow-name-input:focus,
+.workflow-desc-input:focus {
+  border-color: #84adff;
+  background: #fff;
+  outline: none;
 }
 .workflow-test {
   margin-top: 12px;
@@ -6735,7 +6764,7 @@ body.dark .coze-accordion-item {
   color: #b42318;
 }
 .workflow-test-answer {
-  white-space: pre-wrap;
   line-height: 1.6;
-  margin: 0;
 }
+.workflow-test-answer > :first-child { margin-top: 0; }
+.workflow-test-answer > :last-child { margin-bottom: 0; }

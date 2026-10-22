@@ -241,7 +241,10 @@ export function BuilderView(props) {
   const [workflowFullscreen, setWorkflowFullscreen] = useState(false);
 
   // 引用了独立工作流时，画布读写那份工作流本身；否则读写智能体内置流程（编辑器默认接口）
-  const referencedWorkflowId = agentForm.workflow_id || null;
+  // 引用的工作流若已被删除（列表里找不到），按内置流程处理，避免继续请求一个不存在的工作流
+  const referencedWorkflowId = agentForm.workflow_id && (workflows || []).some((item) => item.id === agentForm.workflow_id)
+    ? agentForm.workflow_id
+    : null;
   const loadReferencedWorkflow = useCallback(
     () => api(`/api/workflows/${referencedWorkflowId}`, { token }),
     [referencedWorkflowId, token],
@@ -552,7 +555,7 @@ export function BuilderView(props) {
                   <label>
                     <span>使用哪个工作流</span>
                     <select
-                      value={agentForm.workflow_id ?? ''}
+                      value={referencedWorkflowId ?? ''}
                       disabled={!canEditActive}
                       onChange={(event) => {
                         const value = event.target.value ? Number(event.target.value) : null;
@@ -565,7 +568,7 @@ export function BuilderView(props) {
                       ))}
                     </select>
                   </label>
-                  {agentForm.workflow_id && (
+                  {referencedWorkflowId && (
                     <small>已引用独立工作流：下面编辑的就是该工作流本身，引用它的其他智能体会一起生效。</small>
                   )}
                 </div>

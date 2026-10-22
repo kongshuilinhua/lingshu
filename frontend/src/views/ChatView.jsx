@@ -98,7 +98,7 @@ export function ChatView({
             onChange={(e) => setActiveAgentId(Number(e.target.value))}
           >
             <option value="" disabled>
-              {chatAgents.length ? '选择已上架智能体' : '暂无已上架智能体'}
+              {chatAgents.length ? '选择已发布智能体' : '暂无已发布智能体'}
             </option>
             {chatAgents.map((agent) => (
               <option key={agent.id} value={agent.id}>

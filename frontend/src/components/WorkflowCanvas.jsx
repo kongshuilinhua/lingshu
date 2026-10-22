@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background, Controls, Handle, MarkerType, Position, ReactFlow,
-  ReactFlowProvider, useReactFlow,
+  ReactFlowProvider, useNodesInitialized, useReactFlow, useStore,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { ArrowLeftRight, LayoutGrid, Plus, Trash2, X } from 'lucide-react';
@@ -68,7 +68,7 @@ function CanvasNode({ data, selected }) {
 
 const nodeTypes = { workflowNode: CanvasNode };
 
-function detailOf(node) {
+function detailOf(node, agents = []) {
   if (node.type === 'Knowledge') return `召回 ${node.config?.top_k ?? 4} 条`;
   if (node.type === 'Condition') {
     const count = (node.config?.branches || []).length;
@@ -79,7 +79,11 @@ function detailOf(node) {
     return count ? `限定 ${count} 个工具` : '全部已绑定工具';
   }
   if (node.type === 'HumanApproval') return node.config?.prompt || '';
-  if (node.type === 'Agent') return node.config?.agent_id ? `智能体 #${node.config.agent_id}` : '未选择智能体';
+  if (node.type === 'Agent') {
+    const target = agents.find((agent) => agent.id === node.config?.agent_id);
+    if (!node.config?.agent_id) return '未选择智能体';
+    return target ? target.name : `智能体 #${node.config.agent_id}（已不可用）`;
+  }
   return '';
 }
 
@@ -96,7 +100,8 @@ function CanvasInner({
   const [connectError, setConnectError] = useState('');
   const generation = useRef(0);
   const savedNodes = useRef([]);
-  const { fitView } = useReactFlow();
+  const { fitView, screenToFlowPosition } = useReactFlow();
+  const stageRef = useRef(null);
 
   useEffect(() => {
     const current = ++generation.current;
@@ -122,20 +127,27 @@ function CanvasInner({
 
   const problems = useMemo(() => validateWorkflow(nodes), [nodes]);
 
-  // 进出全屏时容器尺寸突变，React Flow 不会自动重新取景
+  // 画布常在不可见时挂载（折叠区 display:none、全屏切换），此时尺寸为 0，取景会落空。
+  // 订阅 React Flow 自己量到的尺寸：它更新之后再取景，fitView 才读得到新尺寸（自建 ResizeObserver 会抢跑）。
+  const nodesInitialized = useNodesInitialized();
+  const canvasSize = useStore((state) => `${Math.round(state.width)}x${Math.round(state.height)}`);
   useEffect(() => {
-    if (loading) return undefined;
-    const timer = setTimeout(() => fitView({ padding: 0.2, duration: 200 }), 60);
-    return () => clearTimeout(timer);
-  }, [fullscreen, loading, fitView]);
+    if (loading || !nodesInitialized || canvasSize.startsWith('0x') || canvasSize.endsWith('x0')) return undefined;
+    const frame = requestAnimationFrame(() => fitView({ padding: 0.2, duration: 200 }));
+    return () => cancelAnimationFrame(frame);
+  }, [canvasSize, nodesInitialized, loading, fitView]);
 
+  // React Flow 量出的节点尺寸单独存放：不进工作流数据（不触发未保存、不落库），
+  // 但必须回传给画布——缺了它节点会一直是「未初始化」：被隐藏，fitView 也会忽略它们。
+  const [measured, setMeasured] = useState({});
   const flowNodes = useMemo(() => nodes.map((node) => ({
     id: node.id,
     type: 'workflowNode',
     position: node.position,
-    data: { label: TYPE_LABELS[node.type] || node.type, nodeType: node.type, id: node.id, detail: detailOf(node) },
+    measured: measured[node.id],
+    data: { label: TYPE_LABELS[node.type] || node.type, nodeType: node.type, id: node.id, detail: detailOf(node, agents) },
     selected: node.id === selectedId,
-  })), [nodes, selectedId]);
+  })), [nodes, selectedId, measured, agents]);
 
   const flowEdges = useMemo(() => deriveEdges(nodes).map((edge) => ({
     id: edge.id,
@@ -172,14 +184,32 @@ function CanvasInner({
     markDirty();
   }
 
+  // 新节点放在用户此刻看到的画布中央；被占了就往下找空位，连续添加也不会叠在一起
+  function freeSpotNearCenter(existing) {
+    const box = stageRef.current?.getBoundingClientRect();
+    const center = box?.width
+      ? screenToFlowPosition({ x: box.left + box.width / 2, y: box.top + box.height / 2 })
+      : { x: 130, y: 60 };
+    const base = { x: center.x - 90, y: center.y - 30 };
+    const taken = (spot) => existing.some((node) => (
+      Math.abs((node.position?.x ?? 0) - spot.x) < 200 && Math.abs((node.position?.y ?? 0) - spot.y) < 90
+    ));
+    for (let step = 0; step < 40; step += 1) {
+      const spot = { x: base.x + Math.floor(step / 8) * 220, y: base.y + (step % 8) * 100 };
+      if (!taken(spot)) return spot;
+    }
+    return base;
+  }
+
   function addNode(type) {
+    const id = newId(type, nodes);
     setNodes((current) => {
       const node = {
-        id: newId(type, current),
+        id,
         type,
         name: TYPE_LABELS[type],
         config: defaultConfig(type),
-        position: { x: 40, y: (current.length + 1) * ROW_GAP },
+        position: freeSpotNearCenter(current),
       };
       // 与执行器保持一致：开始永远在最前、输出回答永远在最后
       if (type === 'Start') return [node, ...current];
@@ -192,6 +222,7 @@ function CanvasInner({
       return [...current.slice(0, answerIndex), node, ...current.slice(answerIndex)];
     });
     setAddMenuOpen(false);
+    setSelectedId(id);
     markDirty();
   }
 
@@ -202,6 +233,14 @@ function CanvasInner({
   }
 
   const onNodesChange = useCallback((changes) => {
+    const sized = changes.filter((change) => change.type === 'dimensions' && change.dimensions);
+    if (sized.length) {
+      setMeasured((current) => {
+        const next = { ...current };
+        for (const change of sized) next[change.id] = change.dimensions;
+        return next;
+      });
+    }
     setNodes((current) => {
       let next = current;
       let changed = false;
@@ -344,8 +383,8 @@ function CanvasInner({
             </div>
           )}
         </div>
-        <button type="button" onClick={() => fitView({ padding: 0.2, duration: 200 })}>
-          <LayoutGrid size={14} />适应画布
+        <button type="button" title="缩放并居中，让所有节点都出现在画布里" onClick={() => fitView({ padding: 0.2, duration: 200 })}>
+          <LayoutGrid size={14} />显示全部
         </button>
         <span className="wf-canvas-hint">
           <ArrowLeftRight size={13} />拖节点调整位置，拖圆点连线
@@ -360,7 +399,7 @@ function CanvasInner({
       </div>
 
       <div className="wf-canvas-stage">
-      <div className="wf-canvas">
+      <div className="wf-canvas" ref={stageRef}>
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}

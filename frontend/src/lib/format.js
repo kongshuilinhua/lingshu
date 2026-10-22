@@ -17,7 +17,7 @@ function isAdminRole(role) {
 }
 
 function statusLabel(status) {
-  const labels = { draft: '草稿', pending_review: '待审核', published: '已上架', rejected: '已驳回' };
+  const labels = { draft: '草稿', published: '已发布' };
   return labels[status] || status || '草稿';
 }
 

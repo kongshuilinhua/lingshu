@@ -1,6 +1,9 @@
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Plus, Trash2, Workflow as WorkflowIcon } from 'lucide-react';
 import { api, errorMessage } from '../utils.js';
+import { useUnsavedNavigation } from '../components/UnsavedChanges.jsx';
 
 const WorkflowCanvas = lazy(() => import('../components/WorkflowCanvas.jsx').then((module) => ({ default: module.WorkflowCanvas })));
 
@@ -13,6 +16,8 @@ const WorkflowCanvas = lazy(() => import('../components/WorkflowCanvas.jsx').the
 export function WorkflowsHome({ token, agents = [], workflows: initialWorkflows, reloadWorkflows, canEdit = true }) {
   const [workflows, setWorkflows] = useState(initialWorkflows || []);
   const [activeId, setActiveId] = useState(null);
+  // 画布有未保存改动时，切换/新建/删除都先确认，避免改动静默丢失
+  const confirmNavigation = useUnsavedNavigation();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -37,6 +42,17 @@ export function WorkflowsHome({ token, agents = [], workflows: initialWorkflows,
       await reload();
       reloadWorkflows?.();
       setActiveId(data.workflow.id);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function renameWorkflow(id, patch) {
+    try {
+      const data = await api(`/api/workflows/${id}`, { token, method: 'PATCH', body: patch });
+      setWorkflows((current) => current.map((item) => (item.id === id ? data.workflow : item)));
+      reloadWorkflows?.();
+      setError('');
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -75,7 +91,7 @@ export function WorkflowsHome({ token, agents = [], workflows: initialWorkflows,
           <h1>工作流</h1>
           <p>编排流程在这里独立维护，智能体通过引用使用它。</p>
         </div>
-        <button className="primary" type="button" disabled={!canEdit} onClick={createWorkflow}>
+        <button className="primary" type="button" disabled={!canEdit} onClick={() => confirmNavigation(createWorkflow)}>
           <Plus size={16} />新建工作流
         </button>
       </header>
@@ -88,14 +104,14 @@ export function WorkflowsHome({ token, agents = [], workflows: initialWorkflows,
           {!loading && workflows.length === 0 && <p className="workflow-editor-empty">还没有工作流，先新建一个。</p>}
           {workflows.map((item) => (
             <div key={item.id} className={`workflow-list-row ${item.id === activeId ? 'active' : ''}`}>
-              <button type="button" className="workflow-list-main" onClick={() => setActiveId(item.id)}>
+              <button type="button" className="workflow-list-main" onClick={() => item.id !== activeId && confirmNavigation(() => setActiveId(item.id))}>
                 <WorkflowIcon size={15} />
                 <span>
                   <strong>{item.name}</strong>
                   <small>{item.node_count} 个节点</small>
                 </span>
               </button>
-              <button type="button" aria-label="删除工作流" disabled={!canEdit} onClick={() => removeWorkflow(item)}>
+              <button type="button" aria-label="删除工作流" disabled={!canEdit} onClick={() => confirmNavigation(() => removeWorkflow(item))}>
                 <Trash2 size={13} />
               </button>
             </div>
@@ -105,10 +121,7 @@ export function WorkflowsHome({ token, agents = [], workflows: initialWorkflows,
         <section className="workflow-stage">
           {active ? (
             <>
-              <header className="workflow-stage-head">
-                <strong>{active.name}</strong>
-                <small>{active.description || '在画布里连线编排流程'}</small>
-              </header>
+              <WorkflowMeta key={active.id} workflow={active} canEdit={canEdit} onSave={renameWorkflow} />
               <Suspense fallback={<p className="workflow-editor-empty">正在加载画布…</p>}>
                 <WorkflowCanvas
                   key={active.id}
@@ -200,9 +213,40 @@ function WorkflowTestPanel({ workflowId, token, agents = [] }) {
               </span>
             ))}
           </div>
-          <p className="workflow-test-answer">{result.answer || '（没有输出）'}</p>
+          <div className="workflow-test-answer markdown-content">
+            {result.answer ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.answer}</ReactMarkdown> : '（没有输出）'}
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+/** 名称与描述：失焦或回车即保存，不另设保存按钮 */
+function WorkflowMeta({ workflow, canEdit, onSave }) {
+  const [name, setName] = useState(workflow.name);
+  const [description, setDescription] = useState(workflow.description || '');
+
+  function commit() {
+    const trimmed = name.trim();
+    if (!trimmed) { setName(workflow.name); return; }
+    if (trimmed === workflow.name && description === (workflow.description || '')) return;
+    onSave(workflow.id, { name: trimmed, description });
+  }
+
+  return (
+    <header className="workflow-stage-head">
+      <input
+        className="workflow-name-input" aria-label="工作流名称" value={name} disabled={!canEdit} maxLength={160}
+        onChange={(event) => setName(event.target.value)} onBlur={commit}
+        onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+      />
+      <input
+        className="workflow-desc-input" aria-label="工作流描述" value={description} disabled={!canEdit}
+        placeholder="一句话说明这条流程做什么（可选）"
+        onChange={(event) => setDescription(event.target.value)} onBlur={commit}
+        onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+      />
+    </header>
   );
 }

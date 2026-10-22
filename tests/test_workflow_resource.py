@@ -78,6 +78,11 @@ def test_agent_references_workflow_then_test_runs(client, auth_headers):
     assert payload["status"] == "succeeded"
     assert [step["node_type"] for step in payload["steps"]] == ["Start", "Knowledge", "Tool", "LLM", "Answer"]
 
+    # 删除被引用的工作流：智能体退回内置流程，不留悬空引用
+    assert client.delete(f"/api/workflows/{workflow_id}", headers=auth_headers).status_code == 200
+    after = client.get(f"/api/agents/{agent['id']}", headers=auth_headers).json()["agent"]
+    assert after["workflow_id"] is None
+
 
 def test_workflow_test_requires_existing_agent(client, auth_headers):
     created = _create_workflow(client, auth_headers, name="无人可跑")

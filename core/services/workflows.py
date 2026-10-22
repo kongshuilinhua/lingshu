@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from core.db.models import Workflow
+from core.db.models import Agent, Workflow
 from core.services.bootstrap import DEFAULT_WORKFLOW
 
 
@@ -72,5 +72,10 @@ def update_workflow(db: Session, workflow: Workflow, payload: dict) -> Workflow:
 
 
 def delete_workflow(db: Session, workflow: Workflow) -> None:
+    # 引用方退回内置流程。不能只靠外键 ON DELETE SET NULL：老库的 workflow_id
+    # 是兼容迁移 ALTER 加的列，没有外键约束，不清空就会留下悬空引用
+    db.query(Agent).filter(Agent.workflow_id == workflow.id).update(
+        {Agent.workflow_id: None}, synchronize_session=False
+    )
     db.delete(workflow)
     db.commit()
