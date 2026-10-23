@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     celery_broker_url: str | None = Field(default=None, alias="CELERY_BROKER_URL")
     celery_result_backend: str | None = Field(default=None, alias="CELERY_RESULT_BACKEND")
 
+    # ── 触发器调度 ────────────────────────────────────────────
+    # 进程内的 cron 扫描线程：定时触发器靠它唤起。多副本部署时每份都会扫，
+    # 但抢占是行级条件更新，只有一份能真正抢到，不会重复触发。
+    trigger_scheduler_enabled: bool = Field(default=True, alias="TRIGGER_SCHEDULER_ENABLED")
+
     # 熔断器分布式状态：开启后模型熔断的「失败计数 + 开断状态」存 Redis，多 worker 共享一致；
     # 关闭（默认）或 Redis 不可用时退回进程内三态熔断器。
     circuit_breaker_distributed: bool = Field(default=False, alias="CIRCUIT_BREAKER_DISTRIBUTED")

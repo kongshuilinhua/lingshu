@@ -129,6 +129,18 @@ def _run_compat_migrations() -> None:
         if "ix_workflows_agent_id" not in workflow_indexes:
             with engine.begin() as connection:
                 connection.execute(text("CREATE INDEX ix_workflows_agent_id ON workflows (agent_id)"))
+    if "sessions" in table_names:
+        # 触发器唤起的会话要能回溯到触发源；老库靠这里补列
+        _ensure_columns("sessions", {"trigger_id": "INTEGER"})
+        session_indexes = {index["name"] for index in inspector.get_indexes("sessions")}
+        if "ix_sessions_trigger_id" not in session_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_sessions_trigger_id ON sessions (trigger_id)"))
+    if "triggers" in table_names:
+        trigger_indexes = {index["name"] for index in inspector.get_indexes("triggers")}
+        if "ix_triggers_next_run_at" not in trigger_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_triggers_next_run_at ON triggers (next_run_at)"))
     if "agents" in table_names:
         agent_columns = {column["name"] for column in inspector.get_columns("agents")}
         if "model_id" not in agent_columns:

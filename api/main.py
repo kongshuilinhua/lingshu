@@ -42,6 +42,7 @@ from api.routes.auth import router as auth_router
 from api.routes.workspace import router as workspace_router
 from api.routes.agents import router as agents_router
 from api.routes.workflows import router as workflows_router
+from api.routes.triggers import router as triggers_router
 from api.routes.knowledge import router as knowledge_router
 from api.routes.tools import router as tools_router
 from api.routes.models import router as models_router
@@ -159,12 +160,22 @@ def startup() -> None:
     except Exception as exc:
         startup_error = str(exc)[:500]
         logger.exception("Database initialization failed; API started in degraded mode")
+    else:
+        # 定时触发器依赖可用的库表；init_db 失败时不启动，避免每轮都抛异常
+        try:
+            from core.services.trigger_scheduler import start_trigger_scheduler
+
+            start_trigger_scheduler()
+        except Exception:
+            logger.exception("Trigger scheduler failed to start")
 
 
 @app.on_event("shutdown")
 def shutdown_mcp_clients() -> None:
     from core.integrations.mcp_client import close_all_mcp_clients
+    from core.services.trigger_scheduler import stop_trigger_scheduler
 
+    stop_trigger_scheduler()
     close_all_mcp_clients()
 
 
@@ -345,6 +356,7 @@ app.include_router(auth_router)
 app.include_router(workspace_router)
 app.include_router(agents_router)
 app.include_router(workflows_router)
+app.include_router(triggers_router)
 app.include_router(knowledge_router)
 app.include_router(tools_router)
 app.include_router(models_router)

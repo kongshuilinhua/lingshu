@@ -646,6 +646,38 @@ class WorkflowDefinition(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
+class Trigger(Base):
+    """
+    触发器：让智能体/工作流在没有人说话的时候也能被唤起。
+
+    🎯 两种触发方式共用一张表：
+        - webhook：外部系统 POST 一个 token 地址，body 可带 `{{变量}}` 填进消息模板；
+        - schedule：用 cron 表达式定时唤起，由平台内的调度线程扫描 `next_run_at`。
+    触发一次 = 用目标智能体的发布版本跑一轮对话，产物落成普通会话与 Run，
+    所以「触发了什么、模型怎么答的」在现有的运行详情页里直接能看。
+    """
+    __tablename__ = "triggers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    # 'agent' 直接跑智能体；'workflow' 跑独立工作流（借它的宿主智能体）
+    target_type: Mapped[str] = mapped_column(String(20), default="agent")
+    target_id: Mapped[int] = mapped_column(Integer, index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="webhook")  # 'webhook' / 'schedule'
+    token: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    cron: Mapped[str] = mapped_column(String(80), default="")
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    message_template: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 调度扫描依据；webhook 型为空。取用前用条件更新原子抢占，多进程不会重复触发。
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class Session(Base):
     """
     智能体对话会话（Chat Session）模型。
@@ -658,6 +690,8 @@ class Session(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="新对话")
     is_debug: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="调试会话标记")
+    # 由哪个触发器唤起；为空即用户自己发起的会话
+    trigger_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 

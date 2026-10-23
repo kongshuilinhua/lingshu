@@ -23,6 +23,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   Plus,
+  Radio,
   RefreshCw,
   Rocket,
   Search,
@@ -52,6 +53,7 @@ const ChatView = lazyNamed(() => import('./views/ChatView.jsx'), 'ChatView');
 const BuilderView = lazyNamed(() => import('./views/BuilderView.jsx'), 'BuilderView');
 const AgentsHome = lazyNamed(() => import('./pages/AgentsHome.jsx'), 'AgentsHome');
 const WorkflowsHome = lazyNamed(() => import('./pages/WorkflowsHome.jsx'), 'WorkflowsHome');
+const TriggersHome = lazyNamed(() => import('./pages/TriggersHome.jsx'), 'TriggersHome');
 const MarketHome = lazyNamed(() => import('./pages/MarketHome.jsx'), 'MarketHome');
 const MembersHome = lazyNamed(() => import('./pages/MembersHome.jsx'), 'MembersHome');
 const KnowledgeHome = lazyNamed(() => import('./pages/KnowledgeHome.jsx'), 'KnowledgeHome');
@@ -1674,6 +1676,7 @@ function HomeView(props) {
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
           <NavButton icon={<Workflow size={17} />} label="工作流" active={activeNav === 'workflows'} onClick={() => setActiveNav('workflows')} />
+          <NavButton icon={<Radio size={17} />} label="触发器" active={activeNav === 'triggers'} onClick={() => setActiveNav('triggers')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
           {canManage && <NavButton icon={<KeyRound size={17} />} label="成员" active={activeNav === 'members'} onClick={() => setActiveNav('members')} />}
           <NavButton icon={<Database size={17} />} label="知识库" active={activeNav === 'knowledge'} onClick={() => setActiveNav('knowledge')} />
@@ -1875,6 +1878,10 @@ function HomeView(props) {
             reloadWorkflows={reloadWorkflows} canManage={canManage}
             onChatWorkflow={(id) => { setActiveWorkflowId(id); setActiveNav('chat'); }}
           />
+        )}
+
+        {activeNav === 'triggers' && (
+          <TriggersHome token={token} />
         )}
 
         {activeNav === 'knowledge' && (

@@ -6823,3 +6823,121 @@ body.dark .coze-accordion-item {
 .workflow-runtime-body .primary {
   align-self: flex-start;
 }
+
+/* ── 触发器页 ── */
+.trigger-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.trigger-card {
+  padding: 12px 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 10px;
+  background: #fff;
+}
+.trigger-card.disabled {
+  opacity: 0.6;
+}
+.trigger-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.trigger-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #475467;
+  background: #f2f4f7;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.trigger-card header small {
+  font-size: 12px;
+  color: #667085;
+}
+.trigger-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #475467;
+}
+.trigger-hook {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.trigger-hook code {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  background: #f9fafb;
+  border: 1px solid #eaecf0;
+  border-radius: 6px;
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trigger-hook small {
+  font-size: 12px;
+  color: #667085;
+}
+.trigger-template {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #667085;
+}
+.trigger-card footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.trigger-card footer small {
+  margin-right: auto;
+  font-size: 12px;
+  color: #98a2b3;
+}
+.trigger-card footer button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.trigger-form {
+  padding: 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 10px;
+  background: #fff;
+  margin-bottom: 12px;
+}
+.trigger-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.trigger-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.trigger-form label span {
+  font-size: 12px;
+  color: #475467;
+}
+.trigger-form-wide {
+  margin-top: 10px;
+}
+.trigger-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}

@@ -209,6 +209,29 @@ class WorkflowTestRequest(BaseModel):
     variables: dict | None = None
 
 
+class TriggerCreateRequest(BaseModel):
+    """新建触发器：webhook 或 schedule 二选一。"""
+    name: str = Field(min_length=1, max_length=160)
+    target_type: str = Field(default="agent", pattern="^(agent|workflow)$")
+    target_id: int = Field(gt=0)
+    kind: str = Field(default="webhook", pattern="^(webhook|schedule)$")
+    cron: str = ""
+    timezone: str = "Asia/Shanghai"
+    message_template: str = ""
+    enabled: bool = True
+
+
+class TriggerUpdateRequest(BaseModel):
+    """改触发器：只给要改的字段。"""
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    target_type: str | None = Field(default=None, pattern="^(agent|workflow)$")
+    target_id: int | None = Field(default=None, gt=0)
+    cron: str | None = None
+    timezone: str | None = None
+    message_template: str | None = None
+    enabled: bool | None = None
+
+
 class ChatModelSelection(BaseModel):
     source: str = Field(pattern="^(system|user)$")
     id: int = Field(gt=0)
