@@ -157,6 +157,8 @@ function App() {
   const [adminModels, setAdminModels] = useState([]);
   const [userModels, setUserModels] = useState([]);
   const [chatModelSelection, setChatModelSelection] = useState('');
+  // 首页可以直接选工作流对话；为 null 时走智能体
+  const [activeWorkflowId, setActiveWorkflowId] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState(() => defaultRuntimeStatus());
   const [marketAgents, setMarketAgents] = useState([]);
   const [workflows, setWorkflows] = useState([]);
@@ -1087,8 +1089,10 @@ function App() {
     event?.preventDefault();
     const text = (explicitText ?? draft ?? homePrompt).trim();
     const outgoingAttachments = chatAttachments;
-    if ((!text && !outgoingAttachments.length) || !activeAgentId || busy) return;
-    if (viewRef.current !== 'builder' && (!activeSummary || activeSummary.status !== 'published' || !activeSummary.published_version_id)) {
+    const workflowChat = Boolean(activeWorkflowId) && viewRef.current !== 'builder';
+    if ((!text && !outgoingAttachments.length) || busy) return;
+    if (!workflowChat && !activeAgentId) return;
+    if (!workflowChat && viewRef.current !== 'builder' && (!activeSummary || activeSummary.status !== 'published' || !activeSummary.published_version_id)) {
       const firstPublished = chatAgents[0];
       if (firstPublished) {
         setActiveAgentId(firstPublished.id);
@@ -1096,7 +1100,8 @@ function App() {
       setError('对话只能使用已发布的智能体。');
       return;
     }
-    const currentModel = viewRef.current === 'builder' ? selectedDraftModel : currentChatModel;
+    // 工作流对话用的是工作流的运行配置，模型提示只在编辑页/智能体对话时判断
+    const currentModel = viewRef.current === 'builder' ? selectedDraftModel : (workflowChat ? null : currentChatModel);
     const modelWarning = modelCapabilityWarning(currentModel, outgoingAttachments);
     if (modelWarning) {
       setError(modelWarning);
@@ -1130,6 +1135,7 @@ function App() {
         text,
         activeAgentId,
         token,
+        workflowId: activeWorkflowId,
         sessionId: activeSessionId || null,
         mode: viewRef.current === 'builder' ? chatModeRef.current : 'published',
         isDebug: viewRef.current === 'builder',
@@ -1289,6 +1295,8 @@ function App() {
     canEditActive,
     chatMode,
     chatAgents,
+    activeWorkflowId,
+    setActiveWorkflowId,
     chatAttachments,
     chatVariables,
     copyMarketAgent,
@@ -1353,7 +1361,7 @@ function App() {
     sendSuggestedQuestion,
     sessions,
     setError,
-    setActiveAgentId: (id) => id === activeAgentId ? undefined : confirmNavigation(() => setActiveAgentId(id)),
+    setActiveAgentId: (id) => (id === activeAgentId ? undefined : confirmNavigation(() => { setActiveWorkflowId(null); setActiveAgentId(id); })),
     setActiveNav: (nav) => nav === activeNav ? undefined : confirmNavigation(() => setActiveNav(nav)),
     setMarketTab,
     setMarketScope,
@@ -1487,6 +1495,8 @@ function HomeView(props) {
     canEditActive,
     chatMode,
     chatAgents,
+    activeWorkflowId,
+    setActiveWorkflowId,
     chatAttachments,
     chatVariables,
     copyBuiltinPromptTemplate,
@@ -1579,6 +1589,7 @@ function HomeView(props) {
     probeUserModels,
     testUserModelConfig,
     token,
+    models,
     userModels,
     webSearchRuntime,
     thinkingEnabled,
@@ -1817,6 +1828,9 @@ function HomeView(props) {
             activeAgentId={activeAgentId}
             activeSummary={activeSummary}
             chatAgents={chatAgents}
+            chatWorkflows={workflows}
+            activeWorkflowId={activeWorkflowId}
+            setActiveWorkflowId={setActiveWorkflowId}
             canEditActive={canEditActive}
             openBuilder={openBuilder}
             setActiveAgentId={setActiveAgentId}
@@ -1856,7 +1870,11 @@ function HomeView(props) {
         )}
 
         {activeNav === 'workflows' && (
-          <WorkflowsHome token={token} agents={agents} workflows={workflows} reloadWorkflows={reloadWorkflows} canManage={canManage} />
+          <WorkflowsHome
+            token={token} agents={agents} workflows={workflows} models={models} userModels={userModels}
+            reloadWorkflows={reloadWorkflows} canManage={canManage}
+            onChatWorkflow={(id) => { setActiveWorkflowId(id); setActiveNav('chat'); }}
+          />
         )}
 
         {activeNav === 'knowledge' && (

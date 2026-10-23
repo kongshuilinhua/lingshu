@@ -123,6 +123,12 @@ def _run_compat_migrations() -> None:
     if "avatar_url" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''"))
+    if "workflows" in table_names:
+        _ensure_columns("workflows", {"agent_id": "INTEGER"})
+        workflow_indexes = {index["name"] for index in inspector.get_indexes("workflows")}
+        if "ix_workflows_agent_id" not in workflow_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_workflows_agent_id ON workflows (agent_id)"))
     if "agents" in table_names:
         agent_columns = {column["name"] for column in inspector.get_columns("agents")}
         if "model_id" not in agent_columns:

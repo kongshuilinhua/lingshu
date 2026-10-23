@@ -398,7 +398,7 @@ export function BuilderView(props) {
         <div className="builder-switcher">
           <span>当前智能体</span>
           <select value={activeAgentId || ''} onChange={(e) => setActiveAgentId(Number(e.target.value))}>
-            {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+            {agents.filter((agent) => !agent.is_workflow_host).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
           </select>
           <button type="button" onClick={() => createAgent(true)}><Plus size={14} />新建</button>
         </div>

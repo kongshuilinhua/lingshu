@@ -10,6 +10,7 @@ from core.db.models import (
     Agent,
     AgentVersion,
     User,
+    Workflow,
     WorkspaceMember,
 )
 from core.db.session import get_db
@@ -27,9 +28,16 @@ router = APIRouter(tags=["admin"])
 
 @router.get("/api/market/agents")
 def list_market_agents(membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    host_ids = {
+        row.agent_id
+        for row in db.query(Workflow.agent_id).filter(Workflow.workspace_id == membership.workspace_id).all()
+        if row.agent_id
+    }
     agents = db.query(Agent).filter(
         Agent.workspace_id == membership.workspace_id, Agent.status == "published", Agent.published_version_id.isnot(None),
     ).order_by(Agent.updated_at.desc()).all()
+    # 工作流的宿主智能体只是运行载体，不进市场
+    agents = [agent for agent in agents if agent.id not in host_ids]
     items = []
     for agent in agents:
         version = db.get(AgentVersion, agent.published_version_id) if agent.published_version_id else None

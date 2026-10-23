@@ -103,6 +103,7 @@ def agent_summary(agent: Agent) -> dict:
         "created_by": agent.created_by,
         "published_version_id": agent.published_version_id,
         "workflow_id": agent.workflow_id,
+        "is_workflow_host": bool(getattr(agent, "is_workflow_host", False)),
         "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
     }
 

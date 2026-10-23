@@ -13,7 +13,7 @@ const WorkflowCanvas = lazy(() => import('../components/WorkflowCanvas.jsx').the
  * 与智能体内置流程的区别是「归属于谁」——这里的工作流属于工作区，
  * 可以被多个智能体通过 `workflow_id` 引用；内置流程仍是智能体的一个配置字段。
  */
-export function WorkflowsHome({ token, agents = [], workflows: initialWorkflows, reloadWorkflows, canEdit = true }) {
+export function WorkflowsHome({ token, agents = [], models = [], userModels = [], workflows: initialWorkflows, reloadWorkflows, canEdit = true, onChatWorkflow }) {
   const [workflows, setWorkflows] = useState(initialWorkflows || []);
   const [activeId, setActiveId] = useState(null);
   // 画布有未保存改动时，切换/新建/删除都先确认，避免改动静默丢失
@@ -122,6 +122,11 @@ export function WorkflowsHome({ token, agents = [], workflows: initialWorkflows,
           {active ? (
             <>
               <WorkflowMeta key={active.id} workflow={active} canEdit={canEdit} onSave={renameWorkflow} />
+              <WorkflowRuntime
+                key={`runtime-${active.id}`} workflow={active} token={token} canEdit={canEdit}
+                models={models} userModels={userModels} onSaved={renameWorkflow}
+                onChat={onChatWorkflow ? () => onChatWorkflow(active.id) : undefined}
+              />
               <Suspense fallback={<p className="workflow-editor-empty">正在加载画布…</p>}>
                 <WorkflowCanvas
                   key={active.id}
@@ -248,5 +253,105 @@ function WorkflowMeta({ workflow, canEdit, onSave }) {
         onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
       />
     </header>
+  );
+}
+
+/**
+ * 运行配置：模型与提示词。
+ *
+ * 工作流自己没有"智能体"这一层，但对话必须有模型和系统提示词，
+ * 所以这几项直接挂在工作中作为它的默认运行配置（后端写进宿主智能体）。
+ */
+function WorkflowRuntime({ workflow, token, canEdit, models = [], userModels = [], onSaved, onChat }) {
+  const [open, setOpen] = useState(false);
+  const [selection, setSelection] = useState(
+    workflow.user_model_config_id ? `user:${workflow.user_model_config_id}`
+      : (workflow.system_prompt != null && workflow.model ? '' : ''),
+  );
+  const [prompt, setPrompt] = useState(workflow.system_prompt || '');
+  const [temperature, setTemperature] = useState(workflow.temperature ?? 0.4);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setSelection(workflow.user_model_config_id ? `user:${workflow.user_model_config_id}` : '');
+    setPrompt(workflow.system_prompt || '');
+    setTemperature(workflow.temperature ?? 0.4);
+    setMessage('');
+    setError('');
+  }, [workflow.id]);
+
+  async function save() {
+    const [scope, id] = String(selection || '').split(':');
+    const patch = { system_prompt: prompt, temperature: Number(temperature) || 0.4 };
+    if (scope === 'user' && id) {
+      patch.user_model_config_id = Number(id);
+      patch.model_id = null;
+    } else if (scope === 'system' && id) {
+      patch.model_id = Number(id);
+      patch.user_model_config_id = null;
+    }
+    setSaving(true); setError(''); setMessage('');
+    try {
+      const data = await api(`/api/workflows/${workflow.id}`, { token, method: 'PATCH', body: patch });
+      setMessage('已保存，直接对话就会用这套配置。');
+      onSaved?.(data.workflow);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="workflow-runtime">
+      <header>
+        <button type="button" className="workflow-runtime-toggle" onClick={() => setOpen((value) => !value)}>
+          <strong>运行配置</strong>
+          <small>{workflow.user_model_config_id
+            ? (userModels.find((m) => m.id === workflow.user_model_config_id)?.display_name || `我的模型 #${workflow.user_model_config_id}`)
+            : '未设置模型'}</small>
+        </button>
+        {onChat && (
+          <button type="button" className="primary" onClick={onChat}>去对话</button>
+        )}
+      </header>
+      {open && (
+        <div className="workflow-runtime-body">
+          <label>
+            <span>对话模型</span>
+            <select value={selection} disabled={!canEdit} onChange={(event) => setSelection(event.target.value)}>
+              <option value="">选择模型</option>
+              {userModels.filter((model) => model.enabled).length > 0 && (
+                <optgroup label="我的模型">
+                  {userModels.filter((model) => model.enabled).map((model) => (
+                    <option key={`user-${model.id}`} value={`user:${model.id}`}>{model.display_name || model.chat_model}</option>
+                  ))}
+                </optgroup>
+              )}
+              <optgroup label="平台模型">
+                {models.map((model) => (
+                  <option key={`system-${model.id}`} value={`system:${model.id}`}>{model.display_name || model.model_name}</option>
+                ))}
+              </optgroup>
+            </select>
+          </label>
+          <label>
+            <span>系统提示词（可选）</span>
+            <textarea rows={4} value={prompt} disabled={!canEdit} placeholder="这条流程整体的角色与约束"
+              onChange={(event) => setPrompt(event.target.value)} />
+          </label>
+          <label className="workflow-runtime-temp">
+            <span>温度</span>
+            <input type="number" min={0} max={2} step={0.1} value={temperature} disabled={!canEdit}
+              onChange={(event) => setTemperature(event.target.value)} />
+          </label>
+          {canEdit && <button type="button" className="primary" disabled={saving} onClick={save}>{saving ? '保存中…' : '保存运行配置'}</button>}
+          {message && <p className="workflow-editor-success">{message}</p>}
+          {error && <p className="workflow-editor-error">{error}</p>}
+        </div>
+      )}
+    </div>
   );
 }

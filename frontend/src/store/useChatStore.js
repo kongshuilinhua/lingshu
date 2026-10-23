@@ -95,6 +95,7 @@ export const useChatStore = create((set, get) => ({
     modelOverride,
     variables = {},
     chatAttachments = [],
+    workflowId = null,
   }) => {
     const outgoingAttachments = [...chatAttachments];
     // store 是模块级全局单例，组件卸载不会终止读循环。没有中断能力时，切换智能体或
@@ -107,7 +108,9 @@ export const useChatStore = create((set, get) => ({
     get().addMessage({ role: 'assistant', content: '', pending: true });
 
     try {
-      const response = await fetch(`${API_BASE}/api/agents/${activeAgentId}/chat/stream`, {
+      // workflowId 有值时直接和工作流对话（会话记在它的宿主智能体名下）
+      const endpoint = workflowId ? `${API_BASE}/api/workflows/${workflowId}/chat/stream` : `${API_BASE}/api/agents/${activeAgentId}/chat/stream`;
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         signal: controller.signal,

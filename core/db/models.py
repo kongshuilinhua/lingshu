@@ -623,6 +623,11 @@ class Workflow(Base):
     name: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(Text, default="")
     nodes: Mapped[list] = mapped_column(JSON, default=list)
+    # 运行配置（模型/提示词）挂在一个隐藏宿主智能体上：会话与 Run 的 agent_id 是非空外键，
+    # 借它承接运行即可复用整套对话链路；该智能体不出现在智能体列表与市场里。
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 

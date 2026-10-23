@@ -34,8 +34,8 @@ function MessageListFallback() {
 }
 
 const CHAT_COPY = {
-  noAgentTitle: '暂无可对话的智能体',
-  noAgentDesc: '主对话页只开放已发布的智能体。请先在编辑页发布。',
+  noAgentTitle: '暂无可对话的智能体或工作流',
+  noAgentDesc: '先在编辑页发布一个智能体，或到「工作流」里建一条流程。',
   welcomeTitle: '今天想让哪个智能体帮你？',
   welcomeDesc: '选择智能体后可以直接聊天，也可以进入配置页调整能力。',
   promptIntro: '介绍一下你的能力',
@@ -55,6 +55,9 @@ export function ChatView({
   activeAgentId,
   activeSummary,
   chatAgents,
+  chatWorkflows = [],
+  activeWorkflowId = null,
+  setActiveWorkflowId,
   canEditActive,
   openBuilder,
   setActiveAgentId,
@@ -94,17 +97,34 @@ export function ChatView({
         <div className="agent-select">
           <AgentAvatar value={activeSummary?.avatar || activeAgent?.avatar || 'AI'} />
           <select
-            value={chatAgents.some((agent) => agent.id === activeAgentId) ? activeAgentId : ''}
-            onChange={(e) => setActiveAgentId(Number(e.target.value))}
+            value={activeWorkflowId ? `workflow:${activeWorkflowId}` : (chatAgents.some((agent) => agent.id === activeAgentId) ? `agent:${activeAgentId}` : '')}
+            onChange={(e) => {
+              const [kind, id] = String(e.target.value).split(':');
+              if (kind === 'workflow') {
+                setActiveWorkflowId?.(Number(id));
+              } else {
+                setActiveWorkflowId?.(null);
+                setActiveAgentId(Number(id));
+              }
+            }}
           >
             <option value="" disabled>
-              {chatAgents.length ? '选择已发布智能体' : '暂无已发布智能体'}
+              {chatAgents.length || chatWorkflows.length ? '选择智能体或工作流' : '暂无可对话对象'}
             </option>
-            {chatAgents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
+            {chatAgents.filter((agent) => !agent.is_workflow_host).map((agent) => (
+              <option key={`agent-${agent.id}`} value={`agent:${agent.id}`}>
                 {agent.name}
               </option>
             ))}
+            {chatWorkflows.length > 0 && (
+              <optgroup label="工作流">
+                {chatWorkflows.map((workflow) => (
+                  <option key={`workflow-${workflow.id}`} value={`workflow:${workflow.id}`}>
+                    {workflow.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
           <button
             className="agent-edit-button"
@@ -129,6 +149,9 @@ export function ChatView({
         agentForm={agentForm}
         busy={busy}
         chatAgents={chatAgents}
+        chatWorkflows={chatWorkflows}
+        activeWorkflowId={activeWorkflowId}
+        setActiveWorkflowId={setActiveWorkflowId}
         chatAttachments={chatAttachments}
         chatVariables={chatVariables}
         error={error}
@@ -169,6 +192,9 @@ function ChatHomeV2({
   agentForm,
   busy,
   chatAgents,
+  chatWorkflows = [],
+  activeWorkflowId = null,
+  setActiveWorkflowId,
   chatAttachments,
   chatVariables,
   error,
@@ -210,7 +236,8 @@ function ChatHomeV2({
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(currentModel);
   const conversationStarted = Boolean(activeSessionId) || messages.some((message) => message.role === 'user');
   const runtimeWarning = modelWarning || { text: '' }; // Fallback
-  const hasChatAgent = chatAgents.length > 0;
+  // 只有工作流、没有已发布智能体时也应能开始对话
+  const hasChatAgent = chatAgents.length > 0 || chatWorkflows.length > 0;
 
   return (
     <div className={`chat-home ${conversationStarted ? 'has-conversation' : 'is-empty'}`}>

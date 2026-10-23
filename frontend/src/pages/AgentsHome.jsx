@@ -14,7 +14,7 @@ export function AgentsHome({ agents, activeAgentId, canManage, createAgent, dele
         <button className="primary" type="button" onClick={() => createAgent(true)}><Plus size={16} />创建智能体</button>
       </header>
       <div className="agent-grid">
-        {agents.map((agent) => (
+        {agents.filter((agent) => !agent.is_workflow_host).map((agent) => (
           <article className={`agent-card ${agent.id === activeAgentId ? 'active' : ''}`} key={agent.id}>
             <AgentAvatar value={agent.avatar} />
             <h3>{agent.name}</h3>

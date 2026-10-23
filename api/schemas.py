@@ -185,10 +185,14 @@ class SessionUpdateRequest(BaseModel):
 
 
 class WorkflowUpdateRequest(BaseModel):
-    """工作流更新契约：名称、描述与节点图，均可按需部分更新。"""
+    """工作流更新契约：名称、描述、节点图与运行配置（模型/提示词），均可按需部分更新。"""
     name: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = None
     nodes: list[dict] | None = None
+    model_id: int | None = None
+    user_model_config_id: int | None = None
+    system_prompt: str | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
 
 
 class WorkflowCreateRequest(BaseModel):

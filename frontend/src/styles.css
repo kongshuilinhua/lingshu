@@ -6768,3 +6768,58 @@ body.dark .coze-accordion-item {
 }
 .workflow-test-answer > :first-child { margin-top: 0; }
 .workflow-test-answer > :last-child { margin-bottom: 0; }
+
+/* ── 工作流运行配置 ── */
+.workflow-runtime {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 10px;
+  background: #fff;
+}
+.workflow-runtime header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.workflow-runtime-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.workflow-runtime-toggle small {
+  color: #667085;
+  font-size: 12px;
+}
+.workflow-runtime-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.workflow-runtime-body label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.workflow-runtime-body label span {
+  font-size: 12px;
+  color: #475467;
+}
+.workflow-runtime-body select,
+.workflow-runtime-body textarea,
+.workflow-runtime-body input {
+  width: 100%;
+}
+.workflow-runtime-temp input {
+  width: 120px;
+}
+.workflow-runtime-body .primary {
+  align-self: flex-start;
+}

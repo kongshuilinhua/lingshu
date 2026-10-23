@@ -124,3 +124,27 @@ def test_agent_node_feeds_answer_directly(client, auth_headers):
     assert payload["status"] == "succeeded"
     assert [step["node_type"] for step in payload["steps"]] == ["Start", "Agent", "Answer"]
     assert payload["answer"]
+
+
+def test_workflow_chats_directly_with_its_own_runtime(client, auth_headers):
+    """工作流自带运行配置：设好模型后可以直接对话，不必挂在某个智能体上。"""
+    created = _create_workflow(client, auth_headers, name="直连对话")
+    workflow_id = created["workflow"]["id"]
+    # 新建即自动配好宿主智能体（承接会话与运行）
+    assert created["workflow"]["agent_id"]
+
+    listed = client.get("/api/workflows", headers=auth_headers).json()["items"]
+    assert listed[0]["agent_id"] == created["workflow"]["agent_id"]
+
+    # 宿主智能体会被标出来（前端据此从智能体列表与市场里隐藏）
+    agents = {item["id"]: item for item in client.get("/api/agents", headers=auth_headers).json()["items"]}
+    host = agents[created["workflow"]["agent_id"]]
+    assert host["is_workflow_host"] is True
+
+    response = client.post(
+        f"/api/workflows/{workflow_id}/chat/stream",
+        headers=auth_headers,
+        json={"message": "你好", "mode": "published"},
+    )
+    assert response.status_code == 200, response.text
+    assert "event: done" in response.text

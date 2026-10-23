@@ -16,7 +16,7 @@ from api.schemas import (
     MemoryProfileUpdateRequest,
     WorkflowUpdateRequest,
 )
-from core.db.models import Agent, AgentVersion, WorkflowDefinition, WorkspaceMember
+from core.db.models import Agent, AgentVersion, Workflow, WorkflowDefinition, WorkspaceMember
 from core.db.session import get_db
 from core.runtime.graph import validate_graph
 from core.runtime.workflow import default_workflow
@@ -99,7 +99,18 @@ def list_agents(membership: WorkspaceMember = Depends(get_current_membership), d
     if not can_manage(membership.role):
         query = query.filter(Agent.created_by == membership.user_id)
     agents = query.order_by(Agent.updated_at.desc()).all()
-    return {"items": [agent_summary(agent) for agent in agents]}
+    # 工作流的宿主智能体只是运行载体：标出来，前端在智能体列表里过滤，对话页仍可用它发起对话
+    host_ids = {
+        row.agent_id
+        for row in db.query(Workflow.agent_id).filter(Workflow.workspace_id == membership.workspace_id).all()
+        if row.agent_id
+    }
+    items = []
+    for agent in agents:
+        summary = agent_summary(agent)
+        summary["is_workflow_host"] = agent.id in host_ids
+        items.append(summary)
+    return {"items": items}
 
 
 @router.post("")
