@@ -27,12 +27,14 @@ import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import text
 
 from core.config import get_settings
 from core.db.session import engine, init_db
-from core.exceptions import AppException
+from core.exceptions import AppException, ErrorCode
 from core.integrations.llm import DASHSCOPE_COMPATIBLE_BASE, OPENAI_COMPATIBLE_DEFAULT_BASE, OpenAICompatibleProvider
 from core.integrations.vector_store import vector_store
 from core.security.api_keys import secret_storage_ready
@@ -70,12 +72,76 @@ app.add_middleware(
 )
 
 
+# ── 统一错误响应 ──────────────────────────────────────────
+# 三类错误（业务异常 / HTTPException / 参数校验失败）与未捕获异常，都返回同一形状：
+#     {"detail": <原始 detail>, "message": <给人看的一句话>, "error_code": ..., "request_id": ...}
+# 保留 `detail` 是因为前端 api() 与既有测试都在读它；新增字段让客户端能按 error_code
+# 精确降级、把 request_id 直接拿去查日志，不必再对 message 做正则匹配。
+
+
+def _error_body(detail, *, message: str, error_code: str) -> dict:
+    from core.observability.request_context import get_request_id
+
+    return {"detail": detail, "message": message, "error_code": error_code, "request_id": get_request_id()}
+
+
 @app.exception_handler(AppException)
 def app_exception_handler(request, exc: AppException):
-    """平台统一异常拦截器。"""
+    """业务异常：错误码来自 ErrorCode 枚举。"""
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error_code": exc.error_code.code, "message": exc.message},
+        content=_error_body(exc.message, message=exc.message, error_code=exc.error_code.code),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    """参数校验失败：整理成「字段：原因」的自然语言，同时保留原始 detail 供前端定位。"""
+    details = exc.errors()
+    parts = []
+    for item in details:
+        path = ".".join(str(part) for part in item.get("loc", []) if part not in ("body", "query", "path"))
+        parts.append(f"{path}：{item.get('msg', '')}" if path else str(item.get("msg", "")))
+    return JSONResponse(
+        status_code=422,
+        content=_error_body(
+            details,
+            message="；".join(part for part in parts if part) or "请求参数不正确。",
+            error_code=ErrorCode.VALIDATION_ERROR.code,
+        ),
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc: StarletteHTTPException):
+    """
+    HTTPException：保留原 detail（大量路由与测试都依赖它的形状），只补上 message / error_code。
+
+    detail 既可能是字符串，也可能是 {"message": ...} 这样的字典，两种都要能取出给人看的文案。
+    """
+    detail = exc.detail
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("detail") or getattr(exc, "status_code", ""))
+        error_code = str(detail.get("error_code") or f"HTTP_{exc.status_code}")
+    else:
+        message = str(detail or f"HTTP {exc.status_code}")
+        error_code = f"HTTP_{exc.status_code}"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_error_body(detail, message=message, error_code=error_code),
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc: Exception):
+    """
+    兜底：未捕获异常统一返回 500，带 request_id 方便与日志对齐，且不把堆栈细节抛给调用方。
+    """
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content=_error_body("Internal Server Error", message="内部服务异常，请稍后重试。", error_code=ErrorCode.INTERNAL_ERROR.code),
     )
 
 
