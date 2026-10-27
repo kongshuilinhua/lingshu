@@ -12,6 +12,8 @@ import {
   X,
 } from 'lucide-react';
 import { ResegmentModal } from '../components/ResegmentModal.jsx';
+import { ChunkList } from '../components/ChunkList.jsx';
+import { DocumentMetadataEditor } from '../components/DocumentMetadataEditor.jsx';
 import { RetrievalTestPanel } from '../components/RetrievalTestPanel.jsx';
 import { KnowledgeBaseDialog } from '../components/KnowledgeBaseDialog.jsx';
 import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
@@ -673,7 +675,10 @@ function KnowledgeWorkspace({
         {/* Right column: active doc details & chunk stream */}
         <section className="workspace-column right-column plain-panel">
           {retrievalTestOpen ? (
-            <RetrievalTestPanel kbId={currentKbId} token={token} runRetrievalTest={runRetrievalTest} onClose={() => setRetrievalTestOpen(false)} />
+            <RetrievalTestPanel
+              kbId={currentKbId} token={token} runRetrievalTest={runRetrievalTest} onClose={() => setRetrievalTestOpen(false)}
+              metadataKeys={[...new Set(documents.flatMap((doc) => Object.keys(doc.metadata || {})))]}
+            />
           ) : activeDoc ? (
             <div className="doc-detail-view">
               <div className="doc-detail-header-card">
@@ -699,38 +704,24 @@ function KnowledgeWorkspace({
                   <div className="meta-item">
                     <span>索引状态</span>
                     <strong className={`status-text ${activeDoc.status}`}>
-                      {activeDoc.status === 'indexed' ? '已完成' : '同步中'}
+                      {{ indexed: '已完成', failed: '失败' }[activeDoc.status] || '同步中'}
                     </strong>
                   </div>
                 </div>
+                {activeDoc.status === 'failed' && activeDoc.error_message && (
+                  <p className="doc-error-message">{activeDoc.error_message}</p>
+                )}
               </div>
 
-              <div className="chunk-list-section">
-                <h5>分块预览 ({chunks.length} 个)</h5>
-                <div className="chunk-card-stream">
-                  {chunksLoading ? (
-                    <div className="chunks-loading">
-                      <span className="spinner"></span>加载分块中...
-                    </div>
-                  ) : (
-                    chunks.map((chunk, index) => (
-                      <div key={chunk.id || index} className="chunk-card">
-                        <div className="chunk-card-header">
-                          <span className="chunk-index-badge">#{chunk.chunk_index ?? index}</span>
-                          <span className="chunk-dim">{chunk.embedding_dimension || 768}d</span>
-                          {chunk.hierarchy_path && (
-                            <span className="chunk-path-badge">🌳 {chunk.hierarchy_path}</span>
-                          )}
-                        </div>
-                        <div className="chunk-text-content">{chunk.text}</div>
-                      </div>
-                    ))
-                  )}
-                  {!chunksLoading && chunks.length === 0 && (
-                    <p className="muted empty-chunks">此文档暂无分块，请重新切片或检查索引状态。</p>
-                  )}
-                </div>
-              </div>
+              <DocumentMetadataEditor
+                kbId={kb.id} document={activeDoc} token={token} notify={notify}
+                onSaved={(doc) => { setActiveDoc(doc); loadDocuments?.(currentKbId); }}
+              />
+              <ChunkList
+                kbId={kb.id} documentId={activeDoc.id} chunks={chunks} loading={chunksLoading}
+                canEdit token={token} notify={notify}
+                onChange={(next) => { setChunks(next); loadDocuments?.(currentKbId); }}
+              />
             </div>
           ) : (
             <div className="workspace-empty-detail">

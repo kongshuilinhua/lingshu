@@ -368,6 +368,9 @@ class KnowledgeDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     segment_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ingestion_log: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 用户给文档打的元数据（如 {"产品": "A", "版本": "2025"}），检索时可按它圈定文档范围。
+    # 挂在文档上而非切片上：没人会逐条给切片打标签，主流平台也都按文档维度过滤。
+    doc_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 

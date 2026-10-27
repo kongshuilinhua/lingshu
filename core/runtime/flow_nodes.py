@@ -309,6 +309,36 @@ def run_variable_assign(node: dict, context: dict) -> dict:
     return {"variables": variables, "assigned": applied}
 
 
+# ── 变量聚合 ──────────────────────────────────────────────────────
+
+
+def run_variable_aggregate(node: dict, context: dict) -> dict:
+    """
+    变量聚合节点：把多条分支的结果合成一个变量。
+
+    🎯 用途：条件/问题分类分出几路，每路各自产出结果，汇合后下游只想认一个名字。
+        与 Dify / Coze 的同名节点语义一致——按顺序取第一个非空值，
+        因为同一轮里通常只有一条分支真正执行过，其余分支的变量为空。
+    """
+    config = node.get("config") or {}
+    sources = config.get("sources") or []
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("变量聚合节点至少需要一个来源")
+    name = str(config.get("output_var") or "").strip()
+    if not name:
+        raise ValueError("变量聚合节点缺少输出变量名")
+    picked = None
+    picked_from = None
+    for index, source in enumerate(sources):
+        value = render_template(source, context)
+        if value not in (None, "", [], {}):
+            picked, picked_from = value, index
+            break
+    variables = dict(context.get("variables") or {})
+    variables[name] = picked if picked is not None else ""
+    return {"variables": variables, "aggregated": {"name": name, "source_index": picked_from}}
+
+
 # ── 参数提取 ──────────────────────────────────────────────────────
 
 
@@ -413,9 +443,11 @@ def run_classifier(node: dict, context: dict, *, provider, agent) -> dict:
 MAX_LOOP_ITERATIONS = 20
 MAX_LOOP_STEPS = 120
 MAX_LOOP_SECONDS = 300
+# 与 Dify Iteration 的并行上限一致：再高就是在压模型供应商的并发配额
+MAX_LOOP_PARALLEL = 10
 
 
-def run_loop_node(node: dict, context: dict, *, execute) -> dict:
+def run_loop_node(node: dict, context: dict, *, execute, execute_factory=None) -> dict:
     """
     循环节点：把一组节点（body）重复执行，直到次数用完或满足停止条件。
 
@@ -435,6 +467,13 @@ def run_loop_node(node: dict, context: dict, *, execute) -> dict:
         - 配了 `items`（数组）就逐项遍历，当前项写入 `variables[loop_var]`；
         - 没配则按 max_iterations 固定次数执行。
         两者都会把 `loop.index` / `loop.iteration` 放进上下文，供提示词与条件引用。
+
+    🧺 结果收集（对标 Dify Iteration / Coze 批处理）：
+        - 每轮结束取 `output_key`（默认 draft，即循环体里 LLM 的输出）收进数组，
+          写到 `variables[result_var]`（默认 results），下游节点用 {{variables.results}} 取用；
+        - `on_error`：stop（默认，任一轮失败整个节点失败）/ skip（剔除失败项）/ null（失败项置空）；
+        - `parallel`（2..10）：遍历数组且各项互不依赖时并行跑；并行模式下 stop_when 不生效
+          （各项独立，"提前停"没有意义），结果仍按原数组顺序排列。
 
     ⚠️ 流式边界：循环体内的 LLM 节点走非流式执行，正文在循环结束后由下游 LLM 节点统一流式输出。
     """
@@ -460,17 +499,18 @@ def run_loop_node(node: dict, context: dict, *, execute) -> dict:
     max_iterations = max(1, min(max_iterations, cap))
     loop_var = str(config.get("loop_var") or "item").strip() or "item"
     stop_when = config.get("stop_when") if isinstance(config.get("stop_when"), dict) else None
+    output_key = str(config.get("output_key") or "draft").strip() or "draft"
+    result_var = str(config.get("result_var") or "results").strip() or "results"
+    on_error = config.get("on_error") if config.get("on_error") in {"stop", "skip", "null"} else "stop"
+    parallel = max(1, min(int(config.get("parallel") or 1), MAX_LOOP_PARALLEL))
 
-    records: list[dict] = []
-    steps_used = 0
     started = time.monotonic()
-    stopped = False
+    budget = {"steps": 0}
 
-    for index in range(max_iterations):
-        if time.monotonic() - started > MAX_LOOP_SECONDS:
-            raise ValueError(f"循环执行超过 {MAX_LOOP_SECONDS} 秒，已终止")
+    def run_body(index: int, ctx: dict, run) -> dict:
+        """在 ctx 上跑一轮循环体，返回最后一个节点的输出。"""
         item = items[index] if items else None
-        context["loop"] = {
+        ctx["loop"] = {
             "index": index,
             "iteration": index + 1,
             "max_iterations": max_iterations,
@@ -478,10 +518,9 @@ def run_loop_node(node: dict, context: dict, *, execute) -> dict:
             "total_items": len(items) if items else None,
         }
         if items:
-            variables = dict(context.get("variables") or {})
+            variables = dict(ctx.get("variables") or {})
             variables[loop_var] = item
-            context["variables"] = variables
-
+            ctx["variables"] = variables
         executed: set[str] = set()
         cursor = 0
         last_output: dict = {}
@@ -490,34 +529,93 @@ def run_loop_node(node: dict, context: dict, *, execute) -> dict:
             if body_node.get("id") in executed:
                 break
             executed.add(body_node.get("id"))
-            if steps_used >= MAX_LOOP_STEPS:
+            if time.monotonic() - started > MAX_LOOP_SECONDS:
+                raise ValueError(f"循环执行超过 {MAX_LOOP_SECONDS} 秒，已终止")
+            if budget["steps"] >= MAX_LOOP_STEPS:
                 raise ValueError(f"循环体累计执行超过 {MAX_LOOP_STEPS} 个节点，已终止")
-            steps_used += 1
+            budget["steps"] += 1
             if body_node.get("type") == "LLM":
                 # 主执行器里 LLM 节点见到已有 draft 会直接复用（用于拒答短路）。
                 # 在循环里这会让第二轮开始不再调用模型，必须每轮清掉上一轮的草稿。
-                context.pop("draft", None)
-            output = execute(body_node, context) or {}
+                ctx.pop("draft", None)
+            output = run(body_node, ctx) or {}
             # 循环体不产生 SSE 事件，避免把中间过程当成最终回答推给前端
             output.pop("events", None)
             output.pop("events_streamed", None)
-            context.update(output)
+            ctx.update(output)
             last_output = output
-            nxt = _resolve_in_body(body_node, output, context)
+            nxt = _resolve_in_body(body_node, output, ctx)
             cursor = _advance_in_body(cursor, nxt, body)
+        return last_output
 
-        records.append({"iteration": index + 1, "output_keys": sorted(last_output.keys())})
-        if stop_when and _eval_stop(stop_when, context, last_output):
-            stopped = True
-            break
+    def collect(ctx: dict):
+        return _lookup(ctx, output_key)
 
+    records: list[dict] = []
+    results: list = []
+    failures: list[dict] = []
+    stopped = False
+
+    def record_failure(index: int, exc: Exception) -> None:
+        if on_error == "stop":
+            raise ValueError(f"循环第 {index + 1} 轮失败：{exc}") from exc
+        failures.append({"iteration": index + 1, "error": str(exc)[:200]})
+        if on_error == "null":
+            results.append(None)
+
+    if parallel > 1 and items and execute_factory is not None:
+        # 并行迭代：每项在独立的上下文副本里跑，互不可见；每个线程用自己的执行器（各自的数据库会话）
+        from concurrent.futures import ThreadPoolExecutor
+
+        def worker(index: int):
+            run, close = execute_factory()
+            try:
+                ctx = {**context, "variables": dict(context.get("variables") or {})}
+                last = run_body(index, ctx, run)
+                return index, ctx, last, None
+            except Exception as exc:  # 交给失败策略统一处理
+                return index, None, None, exc
+            finally:
+                close()
+
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            outcomes = sorted(pool.map(worker, range(max_iterations)), key=lambda item: item[0])
+        for index, ctx, last, exc in outcomes:
+            if exc is not None:
+                record_failure(index, exc)
+                continue
+            results.append(collect(ctx))
+            records.append({"iteration": index + 1, "output_keys": sorted((last or {}).keys())})
+    else:
+        for index in range(max_iterations):
+            try:
+                last_output = run_body(index, context, execute)
+            except Exception as exc:
+                record_failure(index, exc)
+                continue
+            results.append(collect(context))
+            records.append({"iteration": index + 1, "output_keys": sorted(last_output.keys())})
+            if stop_when and _eval_stop(stop_when, context, last_output):
+                stopped = True
+                break
+
+    variables = dict(context.get("variables") or {})
+    variables[result_var] = results
+    context["variables"] = variables
     context["loop"] = {
         "finished": True,
         "iterations": len(records),
         "stopped": stopped,
         "max_iterations": max_iterations,
+        "failed": len(failures),
     }
-    return {"loop": {"iterations": len(records), "stopped": stopped, "records": records[:20]}}
+    return {
+        "variables": variables,
+        "loop": {
+            "iterations": len(records), "stopped": stopped, "records": records[:20],
+            "parallel": parallel, "failures": failures[:20], "results": results[:20],
+        },
+    }
 
 
 def _render_items(value, context: dict):

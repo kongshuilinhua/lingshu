@@ -13,11 +13,12 @@ export const NODE_TYPES = [
   { type: 'HTTP', label: 'HTTP 请求', hint: '调用外部 HTTPS 接口，结果写入上下文' },
   { type: 'Code', label: '代码执行', hint: '在 Docker 沙箱里跑 Python / JavaScript' },
   { type: 'VariableAssign', label: '变量赋值', hint: '把上游结果存成变量供后续引用' },
+  { type: 'VariableAggregate', label: '变量聚合', hint: '多条分支汇合：取第一个有值的结果存成一个变量' },
   { type: 'ParameterExtract', label: '参数提取', hint: '用模型把自然语言抽成结构化字段' },
   { type: 'Classifier', label: '问题分类', hint: '用模型判断问题属于哪一类并跳转' },
   { type: 'Condition', label: '条件分支', hint: '按上下文取值决定下一跳' },
   { type: 'HumanApproval', label: '人工审批', hint: '暂停运行，等待人工放行或驳回' },
-  { type: 'Loop', label: '循环', hint: '把一组节点重复执行（可遍历数组）' },
+  { type: 'Loop', label: '循环 / 迭代', hint: '重复执行一组节点；遍历数组时可并行，每轮结果收成数组' },
   { type: 'Agent', label: '智能体', hint: '在这一步调用另一个已发布的智能体' },
   { type: 'Answer', label: '输出回答', hint: '把草稿作为最终回答输出' },
 ];
@@ -60,6 +61,7 @@ export function defaultConfig(type) {
   }
   if (type === 'Code') return { language: 'python', code: '' };
   if (type === 'VariableAssign') return { assignments: [] };
+  if (type === 'VariableAggregate') return { sources: ['', ''], output_var: 'result' };
   if (type === 'ParameterExtract') return { instruction: '', source: '{{input}}', schema: {} };
   if (type === 'Loop') return { body: [], items: '', loop_var: 'item', max_iterations: 3, stop_when: null };
   if (type === 'Agent') return { agent_id: null, input: '{{input}}' };
@@ -189,6 +191,8 @@ export function validateWorkflow(nodes) {
     if (node.type === 'HTTP' && !node.config?.url) problems.push('HTTP 节点缺少 url');
     if (node.type === 'Code' && !node.config?.code) problems.push('代码节点缺少代码');
     if (node.type === 'VariableAssign' && !(node.config?.assignments || []).length) problems.push('变量赋值至少需要一项');
+    if (node.type === 'VariableAggregate' && !(node.config?.sources || []).some((item) => String(item || '').trim())) problems.push('变量聚合至少需要一个来源');
+    if (node.type === 'VariableAggregate' && !String(node.config?.output_var || '').trim()) problems.push('变量聚合需要输出变量名');
     if (node.type === 'ParameterExtract' && !Object.keys(node.config?.schema || {}).length) problems.push('参数提取至少需要一个字段');
     if (node.type === 'Agent' && !node.config?.agent_id) problems.push('智能体节点需要选择目标智能体');
   }

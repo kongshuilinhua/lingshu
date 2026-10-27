@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Search, X } from 'lucide-react';
 import { api, errorMessage } from '../utils.js';
+import { MetadataFilterEditor, cleanFilter, emptyFilter } from './MetadataFilterEditor.jsx';
 
 const CHANNEL_LABELS = { dense: '向量', bm25: '关键词', rrf: '融合', rerank: '重排' };
 
@@ -10,8 +11,9 @@ const CHANNEL_LABELS = { dense: '向量', bm25: '关键词', rrf: '融合', rera
  * 走的是对话时同一个 retrieve()（后端关闭缓存），结果与智能体实际拿到的一致，
  * 用来判断「答不上来」到底是没切到、没召回、还是被重排压下去了。
  */
-export function RetrievalTestPanel({ kbId, token, onClose, runRetrievalTest }) {
+export function RetrievalTestPanel({ kbId, token, onClose, runRetrievalTest, metadataKeys = [] }) {
   const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState(emptyFilter);
   const [topK, setTopK] = useState(6);
   const [rerank, setRerank] = useState(true);
   const [state, setState] = useState({ loading: false, error: '', result: null });
@@ -23,6 +25,8 @@ export function RetrievalTestPanel({ kbId, token, onClose, runRetrievalTest }) {
     setState({ loading: true, error: '', result: null });
     try {
       const payload = { query: text, top_k: topK, rerank_enabled: rerank };
+      const metadataFilter = cleanFilter(filter);
+      if (metadataFilter) payload.metadata_filter = metadataFilter;
       const result = runRetrievalTest
         ? await runRetrievalTest(kbId, payload)
         : await api(`/api/knowledge-bases/${kbId}/retrieval-test`, { token, method: 'POST', body: payload });
@@ -67,6 +71,7 @@ export function RetrievalTestPanel({ kbId, token, onClose, runRetrievalTest }) {
           {state.loading ? '检索中…' : '测试'}
         </button>
       </form>
+      <MetadataFilterEditor value={filter} onChange={setFilter} keys={metadataKeys} />
 
       {state.error && <p className="retrieval-test-error">{state.error}</p>}
 
@@ -75,7 +80,10 @@ export function RetrievalTestPanel({ kbId, token, onClose, runRetrievalTest }) {
           <p className="retrieval-test-summary">
             {status.reason === 'all_knowledge_bases_disabled'
               ? '该知识库已停用，对话时不会检索。'
+              : status.reason === 'metadata_filter_no_document'
+              ? '没有文档满足这组元数据条件。'
               : <>
+                {status.metadata_filter && `过滤后 ${status.metadata_filter.documents} 篇文档 · `}
                 向量召回 {status.dense?.matched ?? 0} · 关键词召回 {status.bm25?.matched ?? 0} · 融合 {status.rrf?.matched ?? 0}
                 {status.rerank?.applied && ' · 已重排'}
                 {status.rerank?.error && ` · 重排失败（已降级）`}
@@ -86,7 +94,7 @@ export function RetrievalTestPanel({ kbId, token, onClose, runRetrievalTest }) {
           {status.no_evidence && result.items.length > 0 && (
             <p className="retrieval-test-warn">分数偏低：开启「无证据拒答」时，模型会被要求只依据这些片段作答。</p>
           )}
-          {result.items.length === 0 && status.reason !== 'all_knowledge_bases_disabled' && (
+          {result.items.length === 0 && !['all_knowledge_bases_disabled', 'metadata_filter_no_document'].includes(status.reason) && (
             <p className="retrieval-test-empty">没有命中任何片段。对话时会触发「无证据拒答」。</p>
           )}
           <ol className="retrieval-test-results">

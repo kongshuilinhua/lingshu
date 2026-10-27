@@ -148,3 +148,84 @@ def test_workflow_chats_directly_with_its_own_runtime(client, auth_headers):
     )
     assert response.status_code == 200, response.text
     assert "event: done" in response.text
+
+
+def test_parallel_iteration_runs_end_to_end(client, auth_headers):
+    """并行迭代走真实执行器：每个线程各开数据库会话，结果按原顺序汇总给下游。"""
+    created = _create_workflow(client, auth_headers, name="并行迭代")
+    workflow_id = created["workflow"]["id"]
+    nodes = [
+        {"id": "start", "type": "Start", "name": "开始", "config": {}},
+        {"id": "split", "type": "VariableAssign", "name": "拆分", "config": {"assignments": [
+            {"name": "topics", "value": ["甲", "乙", "丙", "丁"]},
+        ]}},
+        {"id": "each", "type": "Loop", "name": "逐个处理", "config": {
+            "items": "{{variables.topics}}", "parallel": 3, "on_error": "skip",
+            "body": [{"id": "llm_in_loop", "type": "LLM", "name": "处理", "config": {}}],
+        }},
+        {"id": "llm", "type": "LLM", "name": "汇总", "config": {}},
+        {"id": "answer", "type": "Answer", "name": "输出", "config": {}},
+    ]
+    assert client.patch(f"/api/workflows/{workflow_id}", headers=auth_headers, json={"nodes": nodes}).status_code == 200
+    host = client.post("/api/agents", headers=auth_headers, json={"name": "试运行宿主"}).json()["agent"]
+    tested = client.post(f"/api/workflows/{workflow_id}/test", headers=auth_headers, json={"agent_id": host["id"], "message": "逐个处理"})
+    assert tested.status_code == 200, tested.text
+    assert tested.json()["status"] == "succeeded"
+    assert [step["node_type"] for step in tested.json()["steps"]] == ["Start", "VariableAssign", "Loop", "LLM", "Answer"]
+
+
+def test_variable_aggregate_merges_condition_branches(client, auth_headers):
+    """条件分两路各自赋值，聚合后下游只认一个变量；跑哪条分支都能拿到值。"""
+    created = _create_workflow(client, auth_headers, name="分支汇合")
+    workflow_id = created["workflow"]["id"]
+    nodes = [
+        {"id": "start", "type": "Start", "name": "开始", "config": {}, "next": "route"},
+        {"id": "route", "type": "Condition", "name": "分流", "config": {
+            "branches": [{"when": {"field": "input", "eq": "我要退货"}, "next": "a"}], "default": "b",
+        }},
+        {"id": "a", "type": "VariableAssign", "name": "退货线", "config": {"assignments": [{"name": "ra", "value": "走退货流程"}]}, "next": "merge"},
+        {"id": "b", "type": "VariableAssign", "name": "其他线", "config": {"assignments": [{"name": "rb", "value": "走通用流程"}]}, "next": "merge"},
+        {"id": "merge", "type": "VariableAggregate", "name": "汇合", "config": {
+            "sources": ["{{variables.ra}}", "{{variables.rb}}"], "output_var": "route_result",
+        }},
+        {"id": "llm", "type": "LLM", "name": "回答", "config": {}},
+        {"id": "answer", "type": "Answer", "name": "输出", "config": {}},
+    ]
+    saved = client.patch(f"/api/workflows/{workflow_id}", headers=auth_headers, json={"nodes": nodes})
+    assert saved.status_code == 200, saved.text
+    host = client.post("/api/agents", headers=auth_headers, json={"name": "试运行宿主"}).json()["agent"]
+    for message, branch in (("我要退货", "VariableAssign"), ("你好", "VariableAssign")):
+        tested = client.post(f"/api/workflows/{workflow_id}/test", headers=auth_headers, json={"agent_id": host["id"], "message": message})
+        assert tested.status_code == 200, tested.text
+        types = [step["node_type"] for step in tested.json()["steps"]]
+        assert types == ["Start", "Condition", branch, "VariableAggregate", "LLM", "Answer"]
+
+
+def test_llm_node_prompt_template_reaches_model(client, auth_headers, monkeypatch):
+    """LLM 节点自带提示词时，发给模型的用户消息是渲染后的提示词，而不是用户原话。"""
+    from core.integrations import llm as llm_module
+
+    seen = []
+    original = llm_module.OpenAICompatibleProvider.chat
+
+    def spy(self, messages, *args, **kwargs):
+        seen.append(messages[-1]["content"])
+        return original(self, messages, *args, **kwargs)
+
+    monkeypatch.setattr(llm_module.OpenAICompatibleProvider, "chat", spy)
+    created = _create_workflow(client, auth_headers, name="逐项提示词")
+    nodes = [
+        {"id": "start", "type": "Start", "name": "开始", "config": {}},
+        {"id": "set", "type": "VariableAssign", "name": "列表", "config": {"assignments": [{"name": "words", "value": ["甲", "乙"]}]}},
+        {"id": "each", "type": "Loop", "name": "逐项", "config": {
+            "items": "{{variables.words}}", "loop_var": "w",
+            "body": [{"id": "tr", "type": "LLM", "name": "处理", "config": {"prompt": "处理「{{variables.w}}」"}}],
+        }},
+        {"id": "llm", "type": "LLM", "name": "汇总", "config": {}},
+        {"id": "answer", "type": "Answer", "name": "输出", "config": {}},
+    ]
+    assert client.patch(f"/api/workflows/{created['workflow']['id']}", headers=auth_headers, json={"nodes": nodes}).status_code == 200
+    host = client.post("/api/agents", headers=auth_headers, json={"name": "宿主"}).json()["agent"]
+    tested = client.post(f"/api/workflows/{created['workflow']['id']}/test", headers=auth_headers, json={"agent_id": host["id"], "message": "开始"})
+    assert tested.status_code == 200, tested.text
+    assert "处理「甲」" in seen and "处理「乙」" in seen

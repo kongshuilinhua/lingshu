@@ -69,7 +69,12 @@ function CanvasNode({ data, selected }) {
 const nodeTypes = { workflowNode: CanvasNode };
 
 function detailOf(node, agents = []) {
-  if (node.type === 'Knowledge') return `召回 ${node.config?.top_k ?? 4} 条`;
+  if (node.type === 'Knowledge') {
+    const filters = (node.config?.metadata_filter?.conditions || []).length;
+    return `召回 ${node.config?.top_k ?? 4} 条${filters ? ` · ${filters} 个过滤条件` : ''}`;
+  }
+  if (node.type === 'VariableAggregate') return `→ ${node.config?.output_var || '未命名'}`;
+  if (node.type === 'Loop' && Number(node.config?.parallel) > 1) return `并行 ${node.config.parallel}`;
   if (node.type === 'Condition') {
     const count = (node.config?.branches || []).length;
     return count ? `${count} 个条件分支` : '未设置条件';

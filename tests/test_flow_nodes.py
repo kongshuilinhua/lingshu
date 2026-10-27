@@ -344,3 +344,89 @@ def test_validate_graph_accepts_loop_and_checks_body():
         {"id": "answer", "type": "Answer"},
     ]
     assert any("Start or Answer" in item for item in validate_graph(with_answer))
+
+
+# ── 迭代：结果收集 / 失败策略 / 并行 ─────────────────────────────
+
+
+def _iterate_node(**config):
+    return {"config": {
+        "body": [{"id": "b1", "type": "LLM"}],
+        "items": ["{{variables.list}}"],
+        **config,
+    }}
+
+
+def test_loop_collects_each_round_output_into_results():
+    def execute(node, context):
+        return {"draft": f"处理了 {context['variables']['item']}"}
+
+    context = {"variables": {"list": ["甲", "乙"]}}
+    output = flow_nodes.run_loop_node(_iterate_node(), context, execute=execute)
+    assert context["variables"]["results"] == ["处理了 甲", "处理了 乙"]
+    assert output["variables"]["results"] == ["处理了 甲", "处理了 乙"]
+
+
+def test_loop_failure_strategies():
+    def execute(node, context):
+        if context["variables"]["item"] == "坏":
+            raise RuntimeError("模型超时")
+        return {"draft": context["variables"]["item"]}
+
+    def run(on_error):
+        context = {"variables": {"list": ["好", "坏", "好2"]}}
+        return context, flow_nodes.run_loop_node(_iterate_node(on_error=on_error), context, execute=execute)
+
+    context, output = run("skip")
+    assert context["variables"]["results"] == ["好", "好2"]
+    assert output["loop"]["failures"][0]["iteration"] == 2
+
+    context, _ = run("null")
+    assert context["variables"]["results"] == ["好", None, "好2"]
+
+    import pytest
+    with pytest.raises(ValueError, match="第 2 轮失败"):
+        run("stop")
+
+
+def test_loop_parallel_keeps_order_and_isolates_items():
+    import threading
+    import time
+
+    active = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+    closed = []
+
+    def factory():
+        def run(node, context):
+            with lock:
+                active["now"] += 1
+                active["peak"] = max(active["peak"], active["now"])
+            time.sleep(0.05)
+            with lock:
+                active["now"] -= 1
+            return {"draft": context["variables"]["item"] * 2}
+        return run, lambda: closed.append(1)
+
+    context = {"variables": {"list": [1, 2, 3, 4, 5, 6]}}
+    flow_nodes.run_loop_node(
+        _iterate_node(parallel=3), context,
+        execute=lambda *_: (_ for _ in ()).throw(AssertionError("并行模式不该走串行执行器")),
+        execute_factory=factory,
+    )
+    assert context["variables"]["results"] == [2, 4, 6, 8, 10, 12]  # 按原数组顺序
+    assert active["peak"] == 3  # 真的并行，且不超过上限
+    assert len(closed) == 6  # 每项的执行器都被关闭（数据库会话不泄漏）
+    assert "item" not in context["variables"]  # 并行各项在副本里跑，不污染主上下文
+
+
+def test_variable_aggregate_picks_first_non_empty():
+    context = {"variables": {"a": "", "b": "来自分支 B"}}
+    node = {"config": {"sources": ["{{variables.a}}", "{{variables.b}}", "兜底"], "output_var": "reply"}}
+    output = flow_nodes.run_variable_aggregate(node, context)
+    assert output["variables"]["reply"] == "来自分支 B"
+    assert output["aggregated"]["source_index"] == 1
+
+    import pytest
+    with pytest.raises(ValueError):
+        flow_nodes.run_variable_aggregate({"config": {"sources": [], "output_var": "x"}}, {})

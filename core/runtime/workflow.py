@@ -712,6 +712,12 @@ class WorkflowRunner:
             if node_top_k:
                 # 只覆盖本轮检索的最终截断数，不改动 agent 级其余参数
                 run_config = {**run_config, "top_k": effective_top_k}
+            node_filter = (node.get("config") or {}).get("metadata_filter")
+            if node_filter and node_filter.get("conditions"):
+                # 条件值可写 {{变量}}：例如先用参数提取拿到「产品」，再只在该产品的文档里检索
+                from core.runtime.flow_nodes import render_template
+
+                run_config = {**run_config, "metadata_filter": render_template(node_filter, context)}
             # 若用户强制关闭了 RAG 功能，直接平滑退出并吐出空结果，避免任何多余的嵌入和检索开销
             if not context.get("rag_enabled", True):
                 status = {
@@ -752,7 +758,7 @@ class WorkflowRunner:
 
             rag_result = self._retrieve(
                 agent, kb_ids, context.get("rewritten_query") or context["input"], context,
-                config=run_config if node_top_k else None,
+                config=run_config if (node_top_k or "metadata_filter" in run_config) else None,
             )
             sources = rag_result.sources
             status = {**rag_result.status, "effective_source": effective_source}
@@ -836,7 +842,7 @@ class WorkflowRunner:
         if node_type == "LLM":
             if context.get("draft"):
                 return self._llm_output(agent, context, context["draft"])
-            messages = self._llm_messages(agent, context)
+            messages = self._llm_messages(agent, context, node)
             draft = self.provider.chat(
                 messages,
                 model=agent.model,
@@ -863,7 +869,7 @@ class WorkflowRunner:
         # 扩展节点：HTTP / 代码 / 变量赋值 / 参数提取 / 问题分类
         # 逻辑放在 core/runtime/flow_nodes.py，这里只做分发
         # ==========================================
-        if node_type in {"HTTP", "Code", "VariableAssign", "ParameterExtract", "Classifier"}:
+        if node_type in {"HTTP", "Code", "VariableAssign", "VariableAggregate", "ParameterExtract", "Classifier"}:
             from core.runtime import flow_nodes
 
             if node_type == "HTTP":
@@ -872,6 +878,8 @@ class WorkflowRunner:
                 return flow_nodes.run_code_node(node, context)
             if node_type == "VariableAssign":
                 return flow_nodes.run_variable_assign(node, context)
+            if node_type == "VariableAggregate":
+                return flow_nodes.run_variable_aggregate(node, context)
             if node_type == "ParameterExtract":
                 return flow_nodes.run_parameter_extract(node, context, provider=self.provider, agent=agent)
             if node_type == "Classifier":
@@ -884,7 +892,16 @@ class WorkflowRunner:
             def _execute_body(body_node, body_context):
                 return self._execute_node(agent, body_node, body_context)
 
-            return flow_nodes.run_loop_node(node, context, execute=_execute_body)
+            def _parallel_executor():
+                # 并行迭代的每个线程各开一个数据库会话：Session 不是线程安全的
+                from core.db.session import SessionLocal
+
+                db = SessionLocal()
+                runner = WorkflowRunner(db)
+                runner.runtime = getattr(self, "runtime", None)
+                return (lambda body_node, body_context: runner._execute_node(agent, body_node, body_context)), db.close
+
+            return flow_nodes.run_loop_node(node, context, execute=_execute_body, execute_factory=_parallel_executor)
         if node_type == "Agent":
             from core.runtime import flow_nodes
 
@@ -923,7 +940,7 @@ class WorkflowRunner:
             for index in range(0, len(draft), 24):
                 yield {"event": "token", "content": draft[index : index + 24]}
             return self._llm_output(agent, context, draft)
-        messages = self._llm_messages(agent, context)
+        messages = self._llm_messages(agent, context, node)
         native_thinking = bool(context.get("thinking_enabled")) and (context.get("thinking_status") or {}).get("type") == "native"
         chunks = []
         for frame in self.provider.chat_stream(
@@ -1221,7 +1238,7 @@ class WorkflowRunner:
             yield {"event": "token", "content": text}
         return "".join(chunks)
 
-    def _llm_messages(self, agent, context: dict) -> list[dict]:
+    def _llm_messages(self, agent, context: dict, node: dict | None = None) -> list[dict]:
         """
         极其精密的全局系统 System Prompt / User Message 的“编织与熔接引擎”。
 
@@ -1315,10 +1332,19 @@ class WorkflowRunner:
         if len(system_content) > max_system_chars:
             system_content = system_content[:max_system_chars] + "\n\n[上下文已截断以避免超出模型上下文窗口限制]"
             
+        # LLM 节点可写自己的提示词（支持 {{变量}}）：替换掉这一步发给模型的用户消息。
+        # 没有它，循环里每一轮都只会重复回答用户原话，迭代就没法「逐项处理」。
+        node_prompt = str(((node or {}).get("config") or {}).get("prompt") or "").strip()
+        if node_prompt:
+            from core.runtime.flow_nodes import render_template
+
+            user_turn = str(render_template(node_prompt, context))
+        else:
+            user_turn = context["input"]
         return [
             {"role": "system", "content": system_content},
             *context.get('conversation_history', []),
-            {"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))},
+            {"role": "user", "content": self._user_content(user_turn, context.get("uploads", []))},
         ]
 
     def _llm_output(self, agent, context: dict, draft: str) -> dict:

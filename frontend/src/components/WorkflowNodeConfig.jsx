@@ -1,5 +1,6 @@
 import React from 'react';
 import { Plus, Trash2 } from 'lucide-react';
+import { MetadataFilterEditor } from './MetadataFilterEditor.jsx';
 import { COMMON_FIELDS, NODE_TYPES, PREDICATES, TYPE_LABELS, predicateOf } from './workflowModel.js';
 
 /**
@@ -42,14 +43,34 @@ export function NodeConfig({ node, index, nodes, nodeIds, tools, agents = [], ca
         </div>
       )}
 
-      {node.type === 'Knowledge' && (
+      {node.type === 'LLM' && (
         <label className="workflow-field">
-          <span>召回片段数</span>
-          <input
-            type="number" min={1} max={20} value={config.top_k ?? 4} disabled={disabled}
-            onChange={(event) => onUpdateConfig(index, { top_k: Number(event.target.value) || 1 })}
+          <span>这一步的提示词（可选，支持 {'{{变量}}'}；留空则直接回答用户原话）</span>
+          <textarea
+            rows={3} value={config.prompt || ''} disabled={disabled}
+            placeholder="例如：把「{{variables.item}}」翻译成英文"
+            onChange={(event) => onUpdateConfig(index, { prompt: event.target.value })}
           />
         </label>
+      )}
+
+      {node.type === 'Knowledge' && (
+        <>
+          <label className="workflow-field">
+            <span>召回片段数</span>
+            <input
+              type="number" min={1} max={20} value={config.top_k ?? 4} disabled={disabled}
+              onChange={(event) => onUpdateConfig(index, { top_k: Number(event.target.value) || 1 })}
+            />
+          </label>
+          <div className="workflow-field">
+            <span>元数据过滤（只在满足条件的文档里检索）</span>
+            <MetadataFilterEditor
+              value={config.metadata_filter} disabled={disabled} valueHint="取值，可写 {{variables.产品}}"
+              onChange={(next) => onUpdateConfig(index, { metadata_filter: next })}
+            />
+          </div>
+        </>
       )}
 
       {node.type === 'HumanApproval' && (
@@ -123,6 +144,39 @@ export function NodeConfig({ node, index, nodes, nodeIds, tools, agents = [], ca
                 onChange={(event) => onUpdateConfig(index, { max_iterations: Number(event.target.value) || 1 })} />
             </label>
           </div>
+          <div className="workflow-row">
+            <label>
+              <span>并行数（遍历数组时）</span>
+              <input type="number" min={1} max={10} value={config.parallel ?? 1} disabled={disabled}
+                aria-label="并行数"
+                onChange={(event) => onUpdateConfig(index, { parallel: Math.min(10, Math.max(1, Number(event.target.value) || 1)) })} />
+            </label>
+            <label>
+              <span>某一项失败时</span>
+              <select value={config.on_error || 'stop'} disabled={disabled} aria-label="失败策略"
+                onChange={(event) => onUpdateConfig(index, { on_error: event.target.value })}>
+                <option value="stop">整个节点失败</option>
+                <option value="skip">跳过该项</option>
+                <option value="null">该项结果置空</option>
+              </select>
+            </label>
+          </div>
+          <div className="workflow-row">
+            <label>
+              <span>每轮收集的字段</span>
+              <input value={config.output_key || 'draft'} disabled={disabled} placeholder="draft"
+                onChange={(event) => onUpdateConfig(index, { output_key: event.target.value })} />
+            </label>
+            <label>
+              <span>结果数组写入变量</span>
+              <input value={config.result_var || 'results'} disabled={disabled} placeholder="results"
+                onChange={(event) => onUpdateConfig(index, { result_var: event.target.value })} />
+            </label>
+          </div>
+          <small className="workflow-note">
+            每轮的 {`{{${config.output_key || 'draft'}}}`} 按原顺序收成数组，下游用 {`{{variables.${config.result_var || 'results'}}}`} 取。
+            并行数大于 1 时各项互不可见，「提前停止」条件不生效。
+          </small>
           <span>循环体（按顺序执行的节点）</span>
           <div className="workflow-branches">
             {(config.body || []).map((item, itemIndex) => (
@@ -265,6 +319,37 @@ export function NodeConfig({ node, index, nodes, nodeIds, tools, agents = [], ca
             <button type="button" className="workflow-add-branch" disabled={disabled}
               onClick={() => onUpdateConfig(index, { assignments: [...(config.assignments || []), { name: '', value: '' }] })}>
               <Plus size={13} />添加变量
+            </button>
+          </div>
+        </div>
+      )}
+
+      {node.type === 'VariableAggregate' && (
+        <div className="workflow-field">
+          <label>
+            <span>输出变量名（下游用 {`{{variables.${config.output_var || 'result'}}}`} 取）</span>
+            <input value={config.output_var || ''} disabled={disabled} placeholder="result"
+              onChange={(event) => onUpdateConfig(index, { output_var: event.target.value })} />
+          </label>
+          <span>来源（按顺序取第一个有值的；通常每条分支各填一个）</span>
+          <div className="workflow-branches">
+            {(config.sources || []).map((item, itemIndex) => (
+              <div className="workflow-branch" key={itemIndex}>
+                <span className="workflow-branch-index">{itemIndex + 1}</span>
+                <input className="workflow-branch-value-grow" value={item ?? ''} disabled={disabled}
+                  placeholder="{{variables.分支结果}}" aria-label={`聚合来源 ${itemIndex + 1}`}
+                  onChange={(event) => onUpdateConfig(index, {
+                    sources: (config.sources || []).map((row, position) => (position === itemIndex ? event.target.value : row)),
+                  })} />
+                <button type="button" aria-label="删除来源" disabled={disabled}
+                  onClick={() => onUpdateConfig(index, { sources: (config.sources || []).filter((_, position) => position !== itemIndex) })}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+            <button type="button" className="workflow-add-branch" disabled={disabled}
+              onClick={() => onUpdateConfig(index, { sources: [...(config.sources || []), ''] })}>
+              <Plus size={13} />添加来源
             </button>
           </div>
         </div>

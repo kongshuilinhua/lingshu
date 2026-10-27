@@ -87,6 +87,16 @@ def retrieve(
         return RagResult([], started_status)
     knowledge_base_ids = enabled_ids
 
+    # 元数据过滤：先把条件解析成允许的文档集合，再把这个集合下推到向量与 BM25 两路，
+    # 而不是检索完再筛——否则 top_k 被不相干的文档占满，筛完一条不剩
+    document_ids = None
+    if config.get("metadata_filter"):
+        document_ids = resolve_metadata_filter(db, knowledge_base_ids, config["metadata_filter"])
+        started_status["metadata_filter"] = {"condition": config["metadata_filter"], "documents": len(document_ids)}
+        if not document_ids:
+            started_status.update({"reason": "metadata_filter_no_document", "no_evidence": True})
+            return RagResult([], started_status)
+
     # 🎯 缓存防雪崩与击穿：使用结合了 Query、Config 和文档最后修改时间戳的版本化 `cache_key`
     cache_key = _cache_key(db, workspace_id=workspace_id, knowledge_base_ids=knowledge_base_ids, query=query, config=config)
     if config.get("cache_enabled", True):
@@ -105,6 +115,7 @@ def retrieve(
         knowledge_base_ids=knowledge_base_ids,
         query_vector=query_vector,
         limit=int(config.get("dense_top_k") or settings.rag_dense_top_k),
+        document_ids=document_ids,
     )
     
     # 2. 稀疏文本搜索通道 (Sparse BM25 Channel)
@@ -117,6 +128,7 @@ def retrieve(
         knowledge_base_ids=knowledge_base_ids,
         query=bm25_query,
         limit=int(config.get("bm25_top_k") or settings.rag_bm25_top_k),
+        document_ids=document_ids,
     )
     
     # 3. 多路互惠排名融合 (Reciprocal Rank Fusion)
@@ -197,16 +209,19 @@ def _base_status(query: str, knowledge_base_ids: list[int], config: dict) -> dic
     }
 
 
-def _dense_search(*, workspace_id: int, knowledge_base_ids: list[int], query_vector: list[float], limit: int) -> list[dict]:
+def _dense_search(*, workspace_id: int, knowledge_base_ids: list[int], query_vector: list[float], limit: int, document_ids: set[int] | None = None) -> list[dict]:
     """
     向量稠密检索。
     """
     hits = []
     for kb_id in knowledge_base_ids:
+        filters = {"workspace_id": workspace_id, "knowledge_base_id": kb_id}
+        if document_ids is not None:
+            filters["document_id"] = sorted(document_ids)
         for hit in vector_store_module.vector_store.search(
             query_vector,
             limit=limit,
-            filters={"workspace_id": workspace_id, "knowledge_base_id": kb_id},
+            filters=filters,
         ):
             metadata = hit.metadata or {}
             hits.append(
@@ -223,7 +238,59 @@ def _dense_search(*, workspace_id: int, knowledge_base_ids: list[int], query_vec
     return sorted(hits, key=lambda item: item["score"], reverse=True)[:limit]
 
 
-def _bm25_search(db: Session, *, workspace_id: int, knowledge_base_ids: list[int], query: str, limit: int) -> list[dict]:
+METADATA_OPERATORS = {"eq", "ne", "contains", "not_contains", "empty", "not_empty"}
+
+
+def _metadata_match(value, op: str, expected) -> bool:
+    text = "" if value is None else str(value)
+    target = "" if expected is None else str(expected)
+    if op == "eq":
+        return text == target
+    if op == "ne":
+        return text != target
+    if op == "contains":
+        return target in text
+    if op == "not_contains":
+        return target not in text
+    if op == "empty":
+        return text == ""
+    if op == "not_empty":
+        return text != ""
+    return False
+
+
+def resolve_metadata_filter(db: Session, knowledge_base_ids: list[int], condition: dict) -> set[int]:
+    """
+    按文档元数据圈定可检索的文档 id。
+
+    条件格式与 Dify / RAGFlow 一致：
+        {"logic": "and" | "or", "conditions": [{"key": "产品", "op": "eq", "value": "A"}]}
+    元数据量级是「每个知识库几百篇文档」，在 Python 里逐篇判断足够，也省得为 JSON 字段写方言相关的 SQL。
+    """
+    conditions = [item for item in (condition or {}).get("conditions") or [] if item.get("key") and item.get("op") in METADATA_OPERATORS]
+    rows = (
+        db.query(KnowledgeDocument.id, KnowledgeDocument.doc_metadata)
+        .filter(KnowledgeDocument.knowledge_base_id.in_(knowledge_base_ids))
+        .all()
+    )
+    if not conditions:
+        return {row.id for row in rows}
+    combine = any if (condition.get("logic") or "and").lower() == "or" else all
+    return {
+        row.id
+        for row in rows
+        if combine(_metadata_match((row.doc_metadata or {}).get(item["key"]), item["op"], item.get("value")) for item in conditions)
+    }
+
+
+def invalidate_bm25_cache(knowledge_base_id: int) -> None:
+    """切片改动后清掉本进程里包含该知识库的 BM25 索引（同秒内的修改版本号区分不出来）。"""
+    with _BM25_CACHE_LOCK:
+        for key in [key for key in _BM25_INDEX_CACHE if knowledge_base_id in key[0]]:
+            _BM25_INDEX_CACHE.pop(key, None)
+
+
+def _bm25_search(db: Session, *, workspace_id: int, knowledge_base_ids: list[int], query: str, limit: int, document_ids: set[int] | None = None) -> list[dict]:
     """
     内存倒排 BM25 检索核心（支持自适应自举编译索引）。
 
@@ -238,12 +305,14 @@ def _bm25_search(db: Session, *, workspace_id: int, knowledge_base_ids: list[int
             KnowledgeDocument.knowledge_base_id,
             func.count(KnowledgeDocument.id),
             func.max(KnowledgeDocument.updated_at),
+            # updated_at 只到秒：同一秒内增删切片时只靠它版本不变，必须把切片数也算进去
+            func.sum(KnowledgeDocument.chunk_count),
         )
         .filter(KnowledgeDocument.knowledge_base_id.in_(knowledge_base_ids))
         .group_by(KnowledgeDocument.knowledge_base_id)
         .all()
     )
-    parts = [f"{kb_id}:{count}:{max_updated.isoformat() if max_updated else '0'}" for kb_id, count, max_updated in sorted(stats, key=lambda x: x[0])]
+    parts = [f"{kb_id}:{count}:{max_updated.isoformat() if max_updated else '0'}:{chunks or 0}" for kb_id, count, max_updated, chunks in sorted(stats, key=lambda x: x[0])]
     version = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
     
     cache_key = (frozenset(knowledge_base_ids), version)
@@ -316,6 +385,9 @@ def _bm25_search(db: Session, *, workspace_id: int, knowledge_base_ids: list[int
     query_token_set = set(tokenized_query)
     
     for data, score in zip(rows_data, scores):
+        # 索引按知识库缓存、与过滤条件无关；这里只丢弃范围外的文档，不影响其余文档的 IDF
+        if document_ids is not None and (data["metadata"] or {}).get("document_id") not in document_ids:
+            continue
         row_tokens = data["tokens"]
         overlap = query_token_set.intersection(row_tokens)
         # 🛡️ 短路匹配：如果无词频分数且连字面交集也无，跳过，提升最终多通道过滤性能
@@ -646,12 +718,14 @@ def _cache_key(db: Session, *, workspace_id: int, knowledge_base_ids: list[int],
             KnowledgeDocument.knowledge_base_id,
             func.count(KnowledgeDocument.id),
             func.max(KnowledgeDocument.updated_at),
+            # updated_at 只到秒：同一秒内增删切片时只靠它版本不变，必须把切片数也算进去
+            func.sum(KnowledgeDocument.chunk_count),
         )
         .filter(KnowledgeDocument.knowledge_base_id.in_(knowledge_base_ids))
         .group_by(KnowledgeDocument.knowledge_base_id)
         .all()
     )
-    parts = [f"{kb_id}:{count}:{max_updated.isoformat() if max_updated else '0'}" for kb_id, count, max_updated in sorted(stats, key=lambda x: x[0])]
+    parts = [f"{kb_id}:{count}:{max_updated.isoformat() if max_updated else '0'}:{chunks or 0}" for kb_id, count, max_updated, chunks in sorted(stats, key=lambda x: x[0])]
     version = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
     payload = {
         "workspace_id": workspace_id,

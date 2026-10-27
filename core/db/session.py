@@ -129,6 +129,8 @@ def _run_compat_migrations() -> None:
         if "ix_workflows_agent_id" not in workflow_indexes:
             with engine.begin() as connection:
                 connection.execute(text("CREATE INDEX ix_workflows_agent_id ON workflows (agent_id)"))
+    if "knowledge_documents" in table_names:
+        _ensure_columns("knowledge_documents", {"doc_metadata": "JSON"})
     if "sessions" in table_names:
         # 触发器唤起的会话要能回溯到触发源；老库靠这里补列
         _ensure_columns("sessions", {"trigger_id": "INTEGER"})

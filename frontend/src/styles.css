@@ -6941,3 +6941,128 @@ body.dark .coze-accordion-item {
   gap: 8px;
   margin-top: 12px;
 }
+
+/* ── 切片逐条维护 ── */
+.chunk-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.chunk-list-head button,
+.chunk-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.chunk-card-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.chunk-card:hover .chunk-card-actions,
+.chunk-card-actions:focus-within {
+  opacity: 1;
+}
+.chunk-card-actions button {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  color: #667085;
+  cursor: pointer;
+}
+.chunk-editor textarea {
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.chunk-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* ── 元数据：文档标签与过滤条件 ── */
+.doc-metadata,
+.metadata-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.doc-metadata {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+  background: #fcfcfd;
+}
+.doc-metadata-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.doc-metadata-head small {
+  font-weight: 400;
+  color: #667085;
+  font-size: 12px;
+}
+.doc-metadata-row,
+.metadata-filter-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.doc-metadata-row input,
+.metadata-filter-row input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+}
+.metadata-filter-row select {
+  flex: 0 0 96px;
+  width: 96px;
+}
+.metadata-filter-row button,
+.doc-metadata-row button {
+  flex: 0 0 auto;
+}
+.doc-metadata-row button,
+.metadata-filter-row button {
+  border: 0;
+  background: none;
+  color: #98a2b3;
+  cursor: pointer;
+}
+.doc-metadata-actions {
+  display: flex;
+  justify-content: space-between;
+}
+.doc-metadata-actions button,
+.metadata-filter-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  align-self: flex-start;
+}
+.metadata-filter-logic {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #475467;
+}
+.retrieval-test .metadata-filter {
+  margin: 8px 0;
+}
+.doc-error-message {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #b42318;
+  word-break: break-all;
+}
