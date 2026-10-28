@@ -155,10 +155,44 @@ def get_agent_detail(db: Session, agent: Agent) -> dict:
     }
 
 
+def resolve_default_model(db: Session, payload: dict, *, user_id: int) -> dict:
+    """
+    补齐未指定模型时的默认选择：优先用户标为默认的 BYOK 模型。
+
+    🎯 为什么不留给路由层：智能体可以从多个入口创建（API、工作流宿主智能体、模板），
+    只在路由层解析会让绕过路由的入口拿到 model="qwen-plus" 这种没有凭证的名字，
+    用户点开对话框才 401。默认值放在创建心智的同一处，所有入口行为一致。
+    """
+    from core.db.models import UserModelConfig
+
+    if payload.get("model_id") or payload.get("user_model_config_id"):
+        return payload
+    default_user_model = (
+        db.query(UserModelConfig)
+        .filter(
+            UserModelConfig.user_id == user_id,
+            UserModelConfig.enabled.is_(True),
+            UserModelConfig.is_default.is_(True),
+        )
+        .order_by(UserModelConfig.id.asc())
+        .first()
+    )
+    if not default_user_model:
+        return payload
+    return {
+        **payload,
+        "user_model_config_id": default_user_model.id,
+        "model_id": None,
+        "model": default_user_model.chat_model,
+        "temperature": payload.get("temperature", default_user_model.default_temperature),
+    }
+
+
 def create_agent(db: Session, *, workspace_id: int, user_id: int, payload: dict) -> Agent:
     """
     创建智能体及其所有依赖关系记录的统一事务函数。
     """
+    payload = resolve_default_model(db, payload, user_id=user_id)
     agent = Agent(
         workspace_id=workspace_id,
         model_id=payload.get("model_id"),

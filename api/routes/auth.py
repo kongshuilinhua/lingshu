@@ -13,6 +13,7 @@ from api.access import invite_workspace
 from api.deps import get_current_membership, get_current_user
 from api.rate_limit import redis_rate_limit
 from api.schemas import (
+    ChangePasswordRequest,
     LoginRequest,
     RegisterRequest,
     UserProfileUpdateRequest,
@@ -101,6 +102,34 @@ def logout(
     """
     token = (authorization or "").split(" ", 1)[1].strip()
     return {"revoked": revoke_access_token(token)}
+
+
+@router.post("/password", dependencies=[Depends(redis_rate_limit(10, 60, scope="change-password"))])
+def change_password(
+    request: ChangePasswordRequest,
+    authorization: str | None = Header(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    修改密码：先验证旧密码，再写入新哈希。
+
+    🎯 为什么要旧密码：只凭登录态就能改密码，令牌一旦泄露账号就被彻底接管。
+    🛡️ 改完把当前令牌拉黑：密码变了而旧令牌还能用，等于这次修改没有意义。
+    """
+    user = db.get(User, current_user.id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not verify_password(request.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    if request.current_password == request.new_password:
+        raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
+    user.password_hash = hash_password(request.new_password)
+    db.commit()
+    # 旧令牌随改密一起作废；Redis 不可用时 revoked=False，此时只能靠 24 小时自然过期
+    token = (authorization or "").split(" ", 1)[-1].strip()
+    revoked = revoke_access_token(token) if token else False
+    return {"changed": True, "relogin_required": True, "revoked": revoked}
 
 
 @router.get("/me")

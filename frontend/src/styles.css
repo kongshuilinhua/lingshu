@@ -7066,3 +7066,26 @@ body.dark .coze-accordion-item {
   color: #b42318;
   word-break: break-all;
 }
+
+/* ── 个人资料：修改密码 ── */
+.profile-password {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #eaecf0;
+}
+.profile-password h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.profile-password button {
+  align-self: flex-start;
+}
+.profile-password-message {
+  margin: 0;
+  font-size: 12px;
+  color: #475467;
+}

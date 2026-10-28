@@ -183,8 +183,10 @@ function App() {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(''), 3000);
   }, []);
-  const [authMode, setAuthMode] = useState('register');
-  const [authForm, setAuthForm] = useState({ email: 'admin@example.com', name: 'Admin', password: 'password123' });
+  // 登录过的老用户默认停在「登录」：登出后回到注册页签，还得手动切一下才能登录
+  const [authMode, setAuthMode] = useState(() => (localStorage.getItem('lingshu_last_email') ? 'login' : 'register'));
+  // 不预填任何账号密码：原先写死的 admin@example.com / password123 会让登录页直接带着可用的演示凭据
+  const [authForm, setAuthForm] = useState({ email: '', name: '', password: '' });
   const [docForm, setDocForm] = useState({ filename: 'guide.txt', text: '这里是一段知识库资料。', kb_id: '' });
   const [uploadingKnowledgeFile, setUploadingKnowledgeFile] = useState(false);
   const [uploadingFileName, setUploadingFileName] = useState('');
@@ -411,6 +413,9 @@ function App() {
   function logout() {
     // 先中断进行中的 SSE 流，否则登出后旧流仍会继续往 messages 里写 token。
     useChatStore.getState().stopStream();
+    // 登出后回到登录页签并回填邮箱：原地走完注册的人再登出，不该还要手动切一次
+    setAuthMode('login');
+    if (authForm.email) localStorage.setItem('lingshu_last_email', authForm.email);
     // 通知服务端把当前令牌加入黑名单。令牌有效期 24 小时，仅清本地存储的话
     // 泄露的令牌在这段时间内依然可用。失败不阻塞本地登出。
     if (token) {
@@ -431,7 +436,6 @@ function App() {
     setUserModels([]);
     setRuntimeStatus(defaultRuntimeStatus());
     setMarketAgents([]);
-    setReviewItems([]);
     setMembers([]);
     setSessions([]);
     setActiveSessionId(null);
@@ -469,6 +473,8 @@ function App() {
         : { email: authForm.email, password: authForm.password };
       const data = await api(path, { method: 'POST', body: payload });
       localStorage.setItem(AUTH_TOKEN_KEY, data.access_token);
+      // 记住登录过的邮箱（只用于下次默认停在登录页并回填邮箱，不含任何凭据）
+      localStorage.setItem('lingshu_last_email', authForm.email);
       useAuthStore.getState().setToken(data.access_token);
     } catch (err) {
       setError(errorMessage(err));
@@ -1982,6 +1988,7 @@ function HomeView(props) {
           onClose={() => setProfileDialogOpen(false)}
           profileError={profileError}
           setProfileError={setProfileError}
+          token={token}
           updateProfile={updateProfile}
           workspace={workspace}
         />
@@ -2077,11 +2084,15 @@ function ProfileDialog({
   onClose,
   profileError,
   setProfileError,
+  token,
   updateProfile,
   workspace,
 }) {
   const [nameDraft, setNameDraft] = useState(me?.name || '');
   const [savingProfile, setSavingProfile] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
+  const [passwordMessage, setPasswordMessage] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
   const guard = useUnsavedForm({ value: nameDraft, label: '个人资料', busy: savingProfile, onSave: saveName });
   const closeProfile = () => guard.confirmLeave(onClose);
 
@@ -2111,6 +2122,36 @@ function ProfileDialog({
       return false;
     } finally {
       setSavingProfile(false);
+    }
+  }
+
+  async function changePassword() {
+    setPasswordMessage('');
+    if (passwordForm.next.length < 8) {
+      setPasswordMessage('新密码至少 8 位。');
+      return;
+    }
+    if (passwordForm.next !== passwordForm.confirm) {
+      setPasswordMessage('两次输入的新密码不一致。');
+      return;
+    }
+    setSavingPassword(true);
+    try {
+      const data = await api('/api/auth/password', {
+        token: token,
+        method: 'POST',
+        body: { current_password: passwordForm.current, new_password: passwordForm.next },
+      });
+      setPasswordForm({ current: '', next: '', confirm: '' });
+      // 改密后当前令牌已作废：直接回登录页，避免用户继续操作却每次都 401
+      setPasswordMessage(data.revoked === false
+        ? '密码已修改，但令牌撤销未生效（缓存服务不可用），请重新登录。'
+        : '密码已修改，请用新密码重新登录。');
+      setTimeout(() => logout(), 1200);
+    } catch (err) {
+      setPasswordMessage(errorMessage(err));
+    } finally {
+      setSavingPassword(false);
     }
   }
 
@@ -2161,6 +2202,32 @@ function ProfileDialog({
           <button type="button" onClick={saveName} disabled={savingProfile || !nameDraft.trim()}>保存姓名</button>
         </div>
         {profileError && <p className="error">{profileError}</p>}
+        <div className="profile-password">
+          <h4>修改密码</h4>
+          <input
+            type="password" autoComplete="current-password" placeholder="当前密码"
+            value={passwordForm.current}
+            onChange={(event) => setPasswordForm({ ...passwordForm, current: event.target.value })}
+          />
+          <input
+            type="password" autoComplete="new-password" placeholder="新密码，至少 8 位"
+            value={passwordForm.next}
+            onChange={(event) => setPasswordForm({ ...passwordForm, next: event.target.value })}
+          />
+          <input
+            type="password" autoComplete="new-password" placeholder="再输一次新密码"
+            value={passwordForm.confirm}
+            onChange={(event) => setPasswordForm({ ...passwordForm, confirm: event.target.value })}
+          />
+          <button
+            type="button"
+            disabled={savingPassword || !passwordForm.current || !passwordForm.next}
+            onClick={changePassword}
+          >
+            {savingPassword ? '修改中…' : '修改密码'}
+          </button>
+          {passwordMessage && <p className="profile-password-message">{passwordMessage}</p>}
+        </div>
         <div className="profile-grid">
           <span>邮箱</span>
           <strong>{me?.email || '-'}</strong>

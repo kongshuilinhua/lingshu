@@ -57,6 +57,8 @@ def ensure_workflow_agent(db: Session, workflow: Workflow, *, user_id: int) -> A
             "description": f"工作流「{workflow.name}」的运行配置",
             "system_prompt": "",
             "workflow_id": workflow.id,
+            # 不显式指定模型：由 create_agent 统一补默认模型，
+            # 否则首次「去对话」用的是没有凭证的默认名，必然 401
         },
     )
     workflow.agent_id = agent.id

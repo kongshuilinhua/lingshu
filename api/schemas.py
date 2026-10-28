@@ -88,6 +88,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """
+    修改密码载荷。
+
+    🛡️ 必须带旧密码：仅凭登录态就能改密码，等于令牌泄露即账号被夺走。
+        新密码沿用注册时的 8 位下限。
+    """
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
+
+
 class UserProfileUpdateRequest(BaseModel):
     """
     用户个人资料更新载荷。
