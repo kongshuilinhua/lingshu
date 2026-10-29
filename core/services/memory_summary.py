@@ -243,10 +243,6 @@ def build_memory_payload(
     return payload
 
 
-def _truncate_assistant_if_needed(payload: dict) -> None:
-    pass
-
-
 # ── LLM 摘要器 ────────────────────────────────────────────────────────
 
 

@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     invite_api_enabled: bool = Field(default=False, alias="INVITE_API_ENABLED")
     # 🛡️ CORS 白名单：限制前端来源，防止跨站请求伪造
     cors_origins: str = Field(default="http://127.0.0.1:5174,http://localhost:5174", alias="CORS_ORIGINS")
+    # 🛡️ 受信反代列表（逗号分隔的 IP/CIDR）。为空时只信私网与回环——
+    #    容器化部署下 nginx 正是私网地址。配错会让限流退化成全局配额，
+    #    或者让任何人伪造 X-Forwarded-For 换配额桶，两种都不能接受。
+    trusted_proxies: str = Field(default="", alias="LINGSHU_TRUSTED_PROXIES")
 
     # ── 数据库 ──────────────────────────────────────────────────
     database_url: str = Field(

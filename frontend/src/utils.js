@@ -466,6 +466,10 @@ function guessContentType(filename) {
     csv: 'text/csv',
     pdf: 'application/pdf',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    // 下面两项在 lib/upload.js 里已经有了，这里漏了：知识库上传实际走的是本文件，
+    // 缺映射会让 xlsx/pptx 按 octet-stream 上传，后端据此判断类型就会错判
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   };
   return types[suffix] || 'application/octet-stream';
 }
@@ -476,7 +480,7 @@ function validateKnowledgeFile(file) {
   }
   const suffix = String(file.name || '').toLowerCase().split('.').pop();
   if (!KNOWLEDGE_FILE_EXTENSIONS.includes(suffix)) {
-    throw new Error('知识库仅支持 TXT、MD、CSV、PDF、DOCX');
+    throw new Error('知识库仅支持 TXT、MD、CSV、PDF、DOCX、XLSX、PPTX');
   }
 }
 

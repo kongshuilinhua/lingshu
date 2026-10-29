@@ -5,7 +5,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
   SquarePen, ImagePlus, FileText, X,
-  AlertTriangle, Brain, Database, Send, ChevronDown,
+  AlertTriangle, Brain, Database, Send, ChevronDown, Globe,
 } from 'lucide-react';
 import { uploadTypeFromContentType } from '../../utils.js';
 
@@ -27,6 +27,7 @@ const CHAT_COPY = {
   thinking: '深度思考',
   search: '联网搜索',
   rag: '知识库',
+  search: '联网搜索',
   unavailable: '不可用',
   on: '开启',
   off: '关闭',
@@ -62,12 +63,16 @@ export function ChatComposer({
   onNewChat,
   onSubmit,
   onToggleRag,
+  onToggleSearch,
   onToggleThinking,
   placeholder,
   removeAttachment,
   ragAvailable,
   ragEnabled,
   ragStatus,
+  searchAvailable,
+  searchEnabled,
+  searchStatus,
   submitDisabled,
   thinkingCapability,
   thinkingEnabled,
@@ -193,6 +198,18 @@ export function ChatComposer({
           >
             <Database size={14} />
             <span>{CHAT_COPY.rag}</span>
+          </button>
+          <button
+            type="button"
+            className={searchEnabled ? 'search-toggle on' : 'search-toggle'}
+            disabled={!searchAvailable}
+            title={searchStatus}
+            aria-label={searchStatus}
+            aria-pressed={searchEnabled}
+            onClick={onToggleSearch}
+          >
+            <Globe size={14} />
+            <span>{CHAT_COPY.search}</span>
           </button>
         </div>
         <div className="composer-action-right">

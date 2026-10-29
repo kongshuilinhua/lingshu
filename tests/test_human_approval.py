@@ -232,10 +232,35 @@ def test_pause_snapshot_keeps_evidence_and_skips_internal_keys():
         "tool_outputs": [{"tool": "order_status", "content": "已发货"}],
         "_skill_metadata": {"huge": "cache"},
     }
-    snapshot = _pause_snapshot(workflow, context, workflow[1], "draft", {"start", "approval"})
+    snapshot = _pause_snapshot(workflow, context, workflow[1], "draft", {"start", "approval"}, 1)
 
     assert snapshot["context"]["sources"] == [{"title": "手册", "snippet": "7 天内可退"}]
     assert snapshot["context"]["tool_outputs"][0]["content"] == "已发货"
     assert "_skill_metadata" not in snapshot["context"]
     assert snapshot["next_index"] == 2
     assert snapshot["executed"] == ["approval", "start"]
+
+
+def test_pause_snapshot_uses_caller_index_not_value_lookup():
+    """
+    两个结构完全相同的节点：快照必须按调用方给的索引定位。
+
+    早先用 `workflow.index(node)` 是按值相等查找，同构节点会命中第一个，
+    恢复时就从错误的位置接着跑。
+    """
+    from core.runtime.workflow import _pause_snapshot
+
+    workflow = [
+        {"id": "start", "type": "Start", "next": "a"},
+        {"id": "a", "type": "HumanApproval", "next": "answer"},
+        # 除了 id 之外与上一个节点完全相同
+        {"id": "b", "type": "HumanApproval", "next": "answer"},
+        {"id": "answer", "type": "Answer"},
+    ]
+    ctx = {"input": "hi"}
+    executed = {"start", "a", "b"}
+
+    # 暂停在索引 2（节点 b）：下一跳应指向 answer（索引 3）
+    snapshot = _pause_snapshot(workflow, ctx, workflow[2], "draft", executed, 2)
+    assert snapshot["next_index"] == 3
+    assert snapshot["paused_node_id"] == "b"

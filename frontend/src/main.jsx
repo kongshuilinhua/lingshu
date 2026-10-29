@@ -179,9 +179,20 @@ function App() {
   } = useChatStore();
   const [documents, setDocuments] = useState([]);
   const [toastMsg, setToastMsg] = useState('');
+  // 连续两条提示时，前一个定时器会把后一条提前清掉；存下句柄，新的来了先撤旧的。
+  const toastTimerRef = useRef(null);
+  const passwordLogoutTimerRef = useRef(null);
   const notify = useCallback((msg) => {
     setToastMsg(msg);
-    setTimeout(() => setToastMsg(''), 3000);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      setToastMsg('');
+      toastTimerRef.current = null;
+    }, 3000);
+  }, []);
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    if (passwordLogoutTimerRef.current) clearTimeout(passwordLogoutTimerRef.current);
   }, []);
   // 登录过的老用户默认停在「登录」：登出后回到注册页签，还得手动切一下才能登录
   const [authMode, setAuthMode] = useState(() => (localStorage.getItem('lingshu_last_email') ? 'login' : 'register'));
@@ -196,7 +207,14 @@ function App() {
   const [marketScope, setMarketScope] = useState('discover');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
-  const [profileError, setProfileError] = useState('');
+  const [profileError, setProfileErrorState] = useState('');
+  // 写入即弹 toast：这个 state 原先只在「个人资料」弹窗里渲染，
+  // 而工具页/模型页/资源库/编排页全把保存失败写进它，用户点保存失败后
+  // 界面上什么都不会出现。改在入口统一提示，四处调用点一处都不用动。
+  const setProfileError = useCallback((message) => {
+    setProfileErrorState(message || '');
+    if (message) notify(String(message));
+  }, [notify]);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [memoryProfile, setMemoryProfile] = useState(() => defaultMemoryProfile());
   const [memoryProfileDraft, setMemoryProfileDraft] = useState(() => profileToDraft(defaultMemoryProfile()));
@@ -418,10 +436,15 @@ function App() {
     if (authForm.email) localStorage.setItem('lingshu_last_email', authForm.email);
     // 通知服务端把当前令牌加入黑名单。令牌有效期 24 小时，仅清本地存储的话
     // 泄露的令牌在这段时间内依然可用。失败不阻塞本地登出。
-    if (token) {
+    //
+    // 令牌必须现取不能闭包：`logout` 会被空依赖的 effect 捕获（401 处理），
+    // 那里拿到的是首帧的 `token`（null），于是这个分支永远不会执行，
+    // 服务端令牌一次也没被撤销过。
+    const currentToken = useAuthStore.getState().token;
+    if (currentToken) {
       fetch(`${API_BASE}/api/auth/logout`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${currentToken}` },
       }).catch(() => {});
     }
     storeLogout();  // Phase 4: Zustand handles token/me/workspace cleanup
@@ -482,6 +505,8 @@ function App() {
   }
 
   async function loadAgent(agentId, { preserveMemoryProfile = false } = {}) {
+    // 换智能体时旧流不能继续：它写的还是上一个智能体的上下文，会串进新会话
+    useChatStore.getState().stopStream();
     await storeLoadAgent(agentId, token);  // Phase 4: Zustand loads agent + agentForm
     const { activeAgent: agent, agentForm: form } = useAgentStore.getState();
     agentGuard.markSaved(form);
@@ -696,7 +721,8 @@ function App() {
   }
 
   async function testUserModelConfig(configId) {
-    return api(`/api/user-models/${configId}/test?detect_image=true`, { token, method: 'POST' });
+    // 不带 detect_image：后端不实现能力探测（只测连通性），传了也是被忽略的死参数
+    return api(`/api/user-models/${configId}/test`, { token, method: 'POST' });
   }
 
   async function refreshTools() {
@@ -1035,6 +1061,8 @@ function App() {
   }
 
   function startNewChat() {
+    // 旧流还在跑的话，它的 token 会直接写进这个刚清空的新会话
+    useChatStore.getState().stopStream();
     setChatModelSelection('');
     setActiveSessionId(null);
     setSessionTitleDraft('');
@@ -1071,6 +1099,13 @@ function App() {
     return api(`/api/runs/${runId}/steps`, { token });
   }
 
+  // 人工审批的通过/驳回：store 里需要 token 才能带 Authorization，
+  // 直接把 store 方法传给组件会让请求头变成 `Bearer undefined`，按钮必然 401。
+  // 与 loadRunSteps 同理，在这一层注入 token 后再下发。
+  function handleResolveApproval({ runId, approved }) {
+    return resolveApproval({ runId, approved, token });
+  }
+
   const chatModeRef = useRef(chatMode);
   useEffect(() => {
     chatModeRef.current = chatMode;
@@ -1086,6 +1121,8 @@ function App() {
 
   // Clean chat state when switching between draft debugging and published preview
   useEffect(() => {
+    // 不清流就会让上一模式的 token 继续往新模式的消息列表里追加
+    useChatStore.getState().stopStream();
     setMessages([]);
     setSources([]);
     setToolDebugEvents([]);
@@ -1388,6 +1425,7 @@ function App() {
     startNewChat: () => confirmNavigation(startNewChat),
     submitFeedback,
     resolveApproval,
+    handleResolveApproval,
     loadRunSteps,
     deleteMemoryProfile,
     tools,
@@ -1564,6 +1602,7 @@ function HomeView(props) {
     startNewChat,
     submitFeedback,
     resolveApproval,
+    handleResolveApproval,
     loadRunSteps,
     tools,
     testToolConfig,
@@ -1862,7 +1901,7 @@ function HomeView(props) {
             setSearchEnabled={setSearchEnabled}
             sources={sources}
             submitFeedback={submitFeedback}
-            resolveApproval={resolveApproval}
+            resolveApproval={handleResolveApproval}
             loadRunSteps={loadRunSteps}
             ragRuntime={ragRuntime}
             webSearchRuntime={webSearchRuntime}
@@ -1881,18 +1920,19 @@ function HomeView(props) {
         {activeNav === 'workflows' && (
           <WorkflowsHome
             token={token} agents={agents} workflows={workflows} models={models} userModels={userModels}
-            reloadWorkflows={reloadWorkflows} canManage={canManage}
+            reloadWorkflows={reloadWorkflows} canManage={canManage} currentUserId={me?.id ?? null}
             onChatWorkflow={(id) => { setActiveWorkflowId(id); setActiveNav('chat'); }}
           />
         )}
 
         {activeNav === 'triggers' && (
-          <TriggersHome token={token} />
+          <TriggersHome token={token} canManage={canManage} currentUserId={me?.id ?? null} />
         )}
 
         {activeNav === 'knowledge' && (
           <KnowledgeHome
             canManage={canManage}
+            currentUserId={me?.id ?? null}
             createKnowledgeBase={createKnowledgeBase}
             updateKnowledgeBase={updateKnowledgeBase}
             deleteDocument={deleteDocument}
@@ -2147,7 +2187,12 @@ function ProfileDialog({
       setPasswordMessage(data.revoked === false
         ? '密码已修改，但令牌撤销未生效（缓存服务不可用），请重新登录。'
         : '密码已修改，请用新密码重新登录。');
-      setTimeout(() => logout(), 1200);
+      // 存句柄以便弹窗在跳转前被关掉时不留下一个孤儿定时器
+      if (passwordLogoutTimerRef.current) clearTimeout(passwordLogoutTimerRef.current);
+      passwordLogoutTimerRef.current = setTimeout(() => {
+        passwordLogoutTimerRef.current = null;
+        logout();
+      }, 1200);
     } catch (err) {
       setPasswordMessage(errorMessage(err));
     } finally {

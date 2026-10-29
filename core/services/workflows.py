@@ -28,6 +28,9 @@ def workflow_payload(workflow: Workflow, *, agent: Agent | None = None, node_cou
         "user_model_config_id": agent.user_model_config_id if agent else None,
         "system_prompt": agent.system_prompt if agent else "",
         "temperature": agent.temperature if agent else None,
+        # 前端按它判断「这条流程我能不能改」——不看归属就只能靠角色，
+        # 会把按钮给到不该有的成员，点下去必 403
+        "created_by": workflow.created_by,
         "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
         "updated_at": workflow.updated_at.isoformat() if workflow.updated_at else None,
     }

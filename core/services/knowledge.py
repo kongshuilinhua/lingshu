@@ -68,6 +68,9 @@ def knowledge_base_summary(kb: KnowledgeBase, document_count: int = 0) -> dict:
         "description": kb.description,
         "document_count": document_count,
         "enabled": bool(getattr(kb, "enabled", True)),
+        # 前端按它判断启停/删除按钮该不该给：只看角色的话，普通成员会对
+        # 别人的知识库看到可用按钮，点下去后端 403，界面只表现为「没反应」
+        "created_by": getattr(kb, "created_by", None),
         # updated_at 为 NULL 时回退 created_at（兼容未跑回填的老库）。
         "updated_at": (
             (getattr(kb, "updated_at", None) or kb.created_at).isoformat()

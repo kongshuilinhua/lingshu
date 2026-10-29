@@ -72,9 +72,14 @@ export function WorkflowEditor({
   function addNode(type) {
     setNodes((current) => {
       const node = { id: newId(type, current), type, name: TYPE_LABELS[type], config: defaultConfig(type) };
-      // Start 永远在最前、Answer 永远在最后，避免用户排出一个跑不通的顺序
+      // Start 永远在最前、Answer 永远在最后，避免用户排出一个跑不通的顺序。
+      // Answer 单独一个分支不能省：画布那边会先移除旧 Answer 再追加，
+      // 两个视图对同一操作给出不同结果的话，切换视图后图会变成另一副样子。
       if (type === 'Start') return [node, ...current];
-      if (type === 'Answer') return [...current, node];
+      if (type === 'Answer') {
+        const withoutAnswer = current.filter((item) => item.type !== 'Answer');
+        return [...withoutAnswer, node];
+      }
       return [...current, node];
     });
     setAddMenuOpen(false);
@@ -85,13 +90,24 @@ export function WorkflowEditor({
     setNodes((current) => {
       const removed = current[index];
       const next = current.filter((_, position) => position !== index);
-      // 清理指向被删节点的跳转，避免留下悬空边
+      // 清理指向被删节点的跳转，避免留下悬空边。
+      // 这里必须和 workflowModel.removeNodeAt 保持一致：早先漏了 Classifier 的
+      // classes，删掉被分类指向的节点后校验会报「分类的目标节点不存在」，
+      // 用户删了节点却保存不了，还不知道该去改哪个分类。
       return next.map((node) => {
         const cleaned = { ...node };
         if (cleaned.next === removed.id) delete cleaned.next;
         if (cleaned.type === 'Condition') {
           const config = { ...(cleaned.config || {}) };
           config.branches = (config.branches || []).filter((branch) => branch.next !== removed.id);
+          if (config.default === removed.id) config.default = '';
+          cleaned.config = config;
+        }
+        if (cleaned.type === 'Classifier') {
+          const config = { ...(cleaned.config || {}) };
+          config.classes = (config.classes || []).map((item) => (
+            item.next === removed.id ? { ...item, next: '' } : item
+          ));
           if (config.default === removed.id) config.default = '';
           cleaned.config = config;
         }

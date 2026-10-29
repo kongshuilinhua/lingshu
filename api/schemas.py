@@ -124,7 +124,9 @@ class AgentCreateRequest(BaseModel):
     model_id: int | None = None
     user_model_config_id: int | None = None
     model: str | None = None
-    temperature: float = 0.4
+    # 与 WorkflowUpdateRequest 一致：超出 [0,2] 的温度会让上游模型直接 400，
+    # 现在没有边界，等于允许把非法值写进库、等到对话时才炸
+    temperature: float = Field(default=0.4, ge=0, le=2)
     knowledge_base_ids: list[int] = []
     tool_ids: list[int] = []
     suggested_questions: list[str] = []
@@ -145,7 +147,7 @@ class AgentUpdateRequest(BaseModel):
     model_id: int | None = None
     user_model_config_id: int | None = None
     model: str | None = None
-    temperature: float | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
     knowledge_base_ids: list[int] | None = None
     tool_ids: list[int] | None = None
     suggested_questions: list[str] | None = None

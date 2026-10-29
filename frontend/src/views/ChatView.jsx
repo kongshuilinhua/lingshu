@@ -1,4 +1,5 @@
-﻿import { ChatComposer } from '../components/chat/ChatComposer.jsx';
+import { ChatComposer } from '../components/chat/ChatComposer.jsx';
+import { VariableBar } from '../components/chat/VariableBar.jsx';
 import React, { Suspense, lazy } from 'react';
 import {
   SquarePen,
@@ -318,33 +319,6 @@ function ChatHomeV2({
         </div>
       )}
       {error && <p className="error inline">{error}</p>}
-    </div>
-  );
-}
-
-function VariableBar({ variables, values, onChange }) {
-  return (
-    <div className="chat-variable-bar">
-      {variables.map((variable) => (
-        <label key={variable.key}>
-          {variable.label || variable.key}
-          {variable.type === 'boolean' ? (
-            <select
-              value={String(values[variable.key] ?? variable.default_value ?? false)}
-              onChange={(e) => onChange(variable.key, e.target.value === 'true')}
-            >
-              <option value="false">false</option>
-              <option value="true">true</option>
-            </select>
-          ) : (
-            <input
-              type={variable.type === 'number' ? 'number' : 'text'}
-              value={values[variable.key] ?? variable.default_value ?? ''}
-              onChange={(e) => onChange(variable.key, e.target.value)}
-            />
-          )}
-        </label>
-      ))}
     </div>
   );
 }

@@ -13,7 +13,7 @@ const WorkflowCanvas = lazy(() => import('../components/WorkflowCanvas.jsx').the
  * 与智能体内置流程的区别是「归属于谁」——这里的工作流属于工作区，
  * 可以被多个智能体通过 `workflow_id` 引用；内置流程仍是智能体的一个配置字段。
  */
-export function WorkflowsHome({ token, agents = [], models = [], userModels = [], workflows: initialWorkflows, reloadWorkflows, canEdit = true, onChatWorkflow }) {
+export function WorkflowsHome({ token, agents = [], models = [], userModels = [], workflows: initialWorkflows, reloadWorkflows, canManage = false, currentUserId = null, onChatWorkflow }) {
   const [workflows, setWorkflows] = useState(initialWorkflows || []);
   const [activeId, setActiveId] = useState(null);
   // 画布有未保存改动时，切换/新建/删除都先确认，避免改动静默丢失
@@ -84,6 +84,13 @@ export function WorkflowsHome({ token, agents = [], models = [], userModels = []
     return data;
   }, [activeId, token]);
 
+  // 写权限与后端 require_workflow_write_access 一致：创建者本人或管理员。
+  // 只看 canManage 会让普通成员对别人的工作流出按钮，点下去必 403。
+  function canEditWorkflow(item) {
+    if (canManage) return true;
+    return !!item && item.created_by != null && item.created_by === currentUserId;
+  }
+
   return (
     <div className="content-page workflow-page">
       <header className="page-heading">
@@ -91,7 +98,7 @@ export function WorkflowsHome({ token, agents = [], models = [], userModels = []
           <h1>工作流</h1>
           <p>编排流程在这里独立维护，智能体通过引用使用它。</p>
         </div>
-        <button className="primary" type="button" disabled={!canEdit} onClick={() => confirmNavigation(createWorkflow)}>
+        <button className="primary" type="button" onClick={() => confirmNavigation(createWorkflow)}>
           <Plus size={16} />新建工作流
         </button>
       </header>
@@ -111,7 +118,7 @@ export function WorkflowsHome({ token, agents = [], models = [], userModels = []
                   <small>{item.node_count} 个节点</small>
                 </span>
               </button>
-              <button type="button" aria-label="删除工作流" disabled={!canEdit} onClick={() => confirmNavigation(() => removeWorkflow(item))}>
+              <button type="button" aria-label="删除工作流" disabled={!canEditWorkflow(item)} onClick={() => confirmNavigation(() => removeWorkflow(item))}>
                 <Trash2 size={13} />
               </button>
             </div>
@@ -121,9 +128,9 @@ export function WorkflowsHome({ token, agents = [], models = [], userModels = []
         <section className="workflow-stage">
           {active ? (
             <>
-              <WorkflowMeta key={active.id} workflow={active} canEdit={canEdit} onSave={renameWorkflow} />
+              <WorkflowMeta key={active.id} workflow={active} canEdit={canEditWorkflow(active)} onSave={renameWorkflow} />
               <WorkflowRuntime
-                key={`runtime-${active.id}`} workflow={active} token={token} canEdit={canEdit}
+                key={`runtime-${active.id}`} workflow={active} token={token} canEdit={canEditWorkflow(active)}
                 models={models} userModels={userModels} onSaved={renameWorkflow}
                 onChat={onChatWorkflow ? () => onChatWorkflow(active.id) : undefined}
               />
@@ -132,7 +139,7 @@ export function WorkflowsHome({ token, agents = [], models = [], userModels = []
                   key={active.id}
                   agentId={active.id}
                   token={token}
-                  canEdit={canEdit}
+                  canEdit={canEditWorkflow(active)}
                   agents={agents}
                   loadWorkflow={loadActive}
                   saveWorkflow={saveActive}

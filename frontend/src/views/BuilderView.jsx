@@ -27,6 +27,7 @@ import { PromptTemplateDialog } from '../components/PromptTemplateDialog.jsx';
 import { KnowledgeBaseDialog } from '../components/KnowledgeBaseDialog.jsx';
 import { KnowledgeDocumentList, KnowledgeUploadBox } from '../components/KnowledgeDocumentList.jsx';
 import { ChatComposer } from '../components/chat/ChatComposer.jsx';
+import { VariableBar } from '../components/chat/VariableBar.jsx';
 import { McpBindingPanel } from '../components/McpBindingPanel.jsx';
 import { SkillBindingPanel } from '../components/SkillBindingPanel.jsx';
 import { SubAgentBindingPanel } from '../components/SubAgentBindingPanel.jsx';

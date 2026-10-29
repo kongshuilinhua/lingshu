@@ -109,7 +109,7 @@ def _json_safe(value):
     return None
 
 
-def _pause_snapshot(runtime_workflow: list[dict], context: dict, node: dict, mode: str, executed: set[str]) -> dict:
+def _pause_snapshot(runtime_workflow: list[dict], context: dict, node: dict, mode: str, executed: set[str], node_index: int) -> dict:
     """构造 HumanApproval 暂停时的恢复快照。
 
     保存「暂停节点之后的位置」而不是节点本身：恢复时要跳过这个已经审批过的节点，
@@ -121,7 +121,9 @@ def _pause_snapshot(runtime_workflow: list[dict], context: dict, node: dict, mod
     """
     workflow = runtime_workflow
     next_id = resolve_next(node, {"paused": True}, context)
-    current_index = workflow.index(node) if node in workflow else 0
+    # 索引必须由调用方传入，不能用 `workflow.index(node)`：那是按「值相等」找，
+    # 图里两个结构相同的节点会命中第一个，恢复时就从错误的位置接着跑。
+    current_index = node_index if 0 <= node_index < len(workflow) else 0
     next_index = advance(current_index, next_id, workflow)
     return {
         "mode": mode,
@@ -420,18 +422,34 @@ class WorkflowRunner:
         )
         self.runtime = runtime
         steps: list[dict] = []
-        yield from self._advance_workflow(
-            runtime=runtime,
-            run=run,
-            context=context,
-            steps=steps,
-            executed=set(),
-            start_index=0,
-            user_message=user_message,
-            chat_session=chat_session,
-            async_memory=async_memory,
-            mode=mode,
-        )
+        try:
+            yield from self._advance_workflow(
+                runtime=runtime,
+                run=run,
+                context=context,
+                steps=steps,
+                executed=set(),
+                start_index=0,
+                user_message=user_message,
+                chat_session=chat_session,
+                async_memory=async_memory,
+                mode=mode,
+            )
+        except Exception as exc:
+            # 🛡️ 失败收尾必须在这里做：`run` 是本函数创建的局部对象，路由层拿不到，
+            # 它那段 `if run is not None: run.status = "failed"` 永远是空操作。
+            # 不在这里标记，任何报错的对话在 `GET /api/runs/{id}` 里都永远显示 running，
+            # 排查时连「这次跑失败了」都看不出来。
+            self.db.rollback()
+            try:
+                run.status = "failed"
+                # Run 表没有 error 列，失败原因进日志；前端拿到的是路由层抛出的错误事件
+                logger.warning("Workflow run %s failed: %s", run.id, exc)
+                run.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+            raise
 
     def _advance_workflow(self, *, runtime, run, context, steps, executed, start_index, user_message, chat_session, async_memory, mode: str):
         """
@@ -482,7 +500,7 @@ class WorkflowRunner:
                 run.status = "paused"
                 # 暂停时保存恢复快照：上下文（含已检索的证据与工具结果）、工作流、下一跳。
                 # 恢复接口据此从暂停点继续执行，而不是从头重跑。
-                run.resume_state = _pause_snapshot(runtime.workflow, context, node, mode, executed)
+                run.resume_state = _pause_snapshot(runtime.workflow, context, node, mode, executed, i)
                 self.db.commit()
                 yield {"event": "paused", "data": {"run_id": run.id, "node_id": node.get("id"), "prompt": output.get("approval_prompt")}}
                 return
@@ -1962,17 +1980,6 @@ class WorkflowRunner:
         context["confidence"] = result.confidence
         context["route"] = result.route
         context["query_understanding_event"] = result.event_payload()
-
-    @staticmethod
-    def _history_turns(memory_summary: str) -> list[dict]:
-        """把 session memory 解析成 [{user, assistant}] 轮次列表（兼容三种格式），失败则空。"""
-        if not memory_summary.strip():
-            return []
-        _, turns = parse_memory(memory_summary)
-        return turns
-
-    def _session_memory(self, session_id: int) -> SessionMemory | None:
-        return self.db.query(SessionMemory).filter(SessionMemory.session_id == session_id).first()
 
 
 def compact_session_memory(

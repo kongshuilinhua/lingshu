@@ -17,7 +17,7 @@ from api.serializers import (
     workspace_payload,
 )
 from core.config import get_settings
-from core.db.models import WorkspaceInvite, WorkspaceMember
+from core.db.models import User, WorkspaceInvite, WorkspaceMember
 from core.db.session import get_db
 from core.security.permissions import normalize_role
 
@@ -74,11 +74,14 @@ def create_invite(request: InviteCreateRequest, membership: WorkspaceMember = De
     db.add(invite)
     db.commit()
     db.refresh(invite)
-    return {"invite": invite_payload(invite, include_token=False)}
+    # 🎯 创建时这一次必须把 token 交给调用方：`POST /invites/accept` 只认 token，
+    #    而列表接口永远不回显（避免一次列表把全工作区的钥匙都抖出来）。
+    #    创建时不给，整个邀请流程就没有任何一处能拿到它——开关打开也永远走不通。
+    return {"invite": invite_payload(invite, include_token=True)}
 
 
 @router.post("/invites/accept")
-def accept_invite(request: InviteAcceptRequest, current_user: WorkspaceMember = Depends(get_current_user), db: Session = Depends(get_db)):
+def accept_invite(request: InviteAcceptRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not settings.invite_api_enabled:
         raise HTTPException(status_code=404, detail="Invite API is disabled")
     invite = db.query(WorkspaceInvite).filter(WorkspaceInvite.token == request.token, WorkspaceInvite.accepted_at.is_(None)).first()

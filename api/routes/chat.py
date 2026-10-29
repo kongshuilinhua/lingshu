@@ -15,7 +15,7 @@ from api.access import (
 from api.deps import get_current_membership, get_current_user
 from api.rate_limit import redis_rate_limit
 from api.schemas import ChatRequest, FeedbackRequest, SessionUpdateRequest
-from api.serializers import message_payload, session_payload
+from api.serializers import message_payload, session_message_counts, session_payload
 from core.db.models import (
     Agent,
     Feedback,
@@ -156,7 +156,7 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
         db.add(assistant)
         db.commit()
         db.refresh(assistant)
-        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id, "content": answer})
+        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id if run is not None else None, "content": answer})
 
         if runner.runtime and getattr(runner.runtime, "settings", {}).get("memory", {}).get("enabled"):
             dispatch(
@@ -226,7 +226,7 @@ def stream_resume_events(db: Session, run: Run, approved: bool) -> Iterable[str]
             elif event["event"] == "memory_compaction":
                 yield sse_event("memory_compaction", event["data"])
         if rejected:
-            yield sse_event("rejected", {"run_id": run.id, "session_id": session.id})
+            yield sse_event("rejected", {"run_id": run.id if run is not None else None, "session_id": session.id})
             return
         if sources:
             yield sse_event("sources", {"items": sources})
@@ -234,7 +234,7 @@ def stream_resume_events(db: Session, run: Run, approved: bool) -> Iterable[str]
         db.add(assistant)
         db.commit()
         db.refresh(assistant)
-        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id, "content": answer})
+        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id if run is not None else None, "content": answer})
     except Exception as exc:
         db.rollback()
         try:
@@ -299,7 +299,8 @@ def list_agent_sessions(agent_id: int, membership: WorkspaceMember = Depends(get
     if not can_manage(membership.role):
         query = query.filter(ChatSession.user_id == membership.user_id)
     sessions = query.order_by(ChatSession.updated_at.desc()).all()
-    return {"items": [session_payload(session, db) for session in sessions]}
+    counts = session_message_counts(db, [session.id for session in sessions])
+    return {"items": [session_payload(session, db, message_count=counts.get(session.id, 0)) for session in sessions]}
 
 
 @router.get("/api/sessions/{session_id}")

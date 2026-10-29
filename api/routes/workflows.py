@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from api.access import require_agent_read_access, require_workflow_write_access
 from api.deps import get_current_membership, get_current_user
 from api.rate_limit import redis_rate_limit
 from api.routes.chat import stream_chat_events
@@ -66,6 +67,7 @@ def get_workflow_endpoint(workflow_id: int, membership: WorkspaceMember = Depend
 @router.patch("/{workflow_id}")
 def update_workflow_endpoint(workflow_id: int, request: WorkflowUpdateRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     workflow = _require_workflow(db, membership.workspace_id, workflow_id)
+    require_workflow_write_access(workflow, membership)
     payload = request.model_dump(exclude_unset=True)
     if payload.get("nodes") is not None:
         errors = validate_graph(payload["nodes"])
@@ -92,6 +94,8 @@ def update_workflow_endpoint(workflow_id: int, request: WorkflowUpdateRequest, m
 @router.delete("/{workflow_id}")
 def delete_workflow_endpoint(workflow_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     workflow = _require_workflow(db, membership.workspace_id, workflow_id)
+    # 删除会连带删掉宿主智能体，必须先确认归属
+    require_workflow_write_access(workflow, membership)
     delete_workflow(db, workflow)
     return {"deleted": True}
 
@@ -121,6 +125,9 @@ def test_workflow_endpoint(workflow_id: int, request: WorkflowTestRequest, membe
     ).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    # 只查 workspace 会让成员拿别人的私有草稿智能体当运行时配置试跑，
+    # 连它绑定的知识库内容一起被间接读出来
+    require_agent_read_access(agent, membership)
 
     errors = validate_graph(workflow.nodes or [])
     if errors:

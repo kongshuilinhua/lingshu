@@ -16,10 +16,55 @@
     - 登录端点：20 请求/分钟
 """
 
+import ipaddress
 from collections.abc import Callable
 
 from fastapi import HTTPException, Request, status
-from slowapi.util import get_remote_address
+
+from core.config import get_settings
+
+
+def client_address(request: Request) -> str:
+    """
+    取真实客户端 IP，用于限流计数。
+
+    🎯 为什么要看 X-Forwarded-For：部署形态是同源 nginx 反代（见 frontend/nginx.conf），
+        反代后 `request.client.host` 恒为 nginx 容器 IP。只信它的话，所有用户的
+        登录/注册/对话配额会合并成一份全局配额——一个人打满就能把所有人挡在外面。
+
+    🛡️ 只有当直连方本身是受信代理时才采纳转发头：否则任何人加一行
+        `X-Forwarded-For: 任意值` 就能给自己换一个配额桶，限流形同虚设。
+        受信列表默认是私网/回环（容器网络），可用 LINGSHU_TRUSTED_PROXIES 覆盖。
+    """
+    peer = request.client.host if request.client else ""
+    if not _is_trusted_proxy(peer):
+        return peer or "anonymous"
+    forwarded = request.headers.get("x-forwarded-for") or ""
+    # 取最左一跳：右侧是逐跳追加的，最左边才是原始客户端
+    candidate = forwarded.split(",")[0].strip()
+    return candidate or peer
+
+
+def _is_trusted_proxy(address: str) -> bool:
+    if not address:
+        return False
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    configured = (get_settings().trusted_proxies or "").strip()
+    if configured:
+        for item in configured.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                if ip in ipaddress.ip_network(item, strict=False):
+                    return True
+            except ValueError:
+                continue
+        return False
+    return ip.is_private or ip.is_loopback
 
 
 def redis_rate_limit(limit: int, window_seconds: int, *, scope: str) -> Callable[[Request], None]:
@@ -36,7 +81,7 @@ def redis_rate_limit(limit: int, window_seconds: int, *, scope: str) -> Callable
     def dependency(request: Request) -> None:
         from core.services.rag_cache import redis_store
 
-        client_id = get_remote_address(request) or "anonymous"
+        client_id = client_address(request)
         allowed, _remaining = redis_store.rate_limit_check(f"rl:{scope}:{client_id}", limit, window_seconds)
         if not allowed:
             from core.observability.metrics import record_rate_limit_rejection

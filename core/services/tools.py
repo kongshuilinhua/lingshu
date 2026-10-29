@@ -6,6 +6,7 @@ import math as _math
 import operator as _operator
 import socket
 import time
+import ipaddress
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,10 +37,8 @@ _REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 # ── Built-in tool implementations ───────────────────────────────────
 
-_BUILTIN_OPS = {
-    "+": _operator.add, "-": _operator.sub, "*": _operator.mul, "/": _operator.truediv,
-    "**": _operator.pow, "%": _operator.mod, "//": _operator.floordiv,
-}
+# 运算符映射不在这里维护：真正的白名单在 `_safe_eval` 里按 AST 节点类型声明，
+# 这张表从来没被读过（早先是「字符串运算符 → 函数」的遗留形态）
 _BUILTIN_FUNCS = {
     "abs": abs, "round": round, "min": min, "max": max, "sum": sum,
     "int": int, "float": float, "pow": _operator.pow,
@@ -909,7 +908,14 @@ def _exec_currency_converter(args: dict) -> dict:
 
 def _exec_ip_lookup(args: dict) -> dict:
     """IP 归属地物理定位。"""
-    ip = str(args.get("ip") or "").strip()
+    raw_ip = str(args.get("ip") or "").strip()
+    # 参数直接拼进 URL 路径，必须先确认它真是个 IP：否则模型传进来一个
+    # `../../x` 或带查询串的字符串，就会改写到第三方站的其它路径上。
+    # 用 ipaddress 解析而不是正则，顺便挡住 `1.2.3.4@evil.com` 这类花招。
+    try:
+        ip = str(ipaddress.ip_address(raw_ip))
+    except ValueError:
+        return {"content": json.dumps({"error": "Invalid IP address"}), "result_preview": "IP Error: invalid address"}
     try:
         url = f"http://ip-api.com/json/{ip}"
         resp = httpx.get(url, timeout=5)
@@ -934,8 +940,13 @@ def _exec_url_shortener(args: dict) -> dict:
     url = str(args.get("url") or "").strip()
     if not url:
         return {"content": json.dumps({"error": "URL cannot be empty"}), "result_preview": "Error: Empty URL"}
+    # 目标串会被发给第三方短链服务，先确认它是 http(s) 链接：
+    # 否则模型可以拿这个工具把 `file://` 之类的本地路径外发出去。
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in {"http", "https"}:
+        return {"content": json.dumps({"error": "Only http(s) URLs can be shortened"}), "result_preview": "Error: unsupported URL scheme"}
     try:
-        api_url = f"http://tinyurl.com/api-create.php?url={urllib.parse.quote(url)}"
+        api_url = f"https://tinyurl.com/api-create.php?url={urllib.parse.quote(url, safe='')}"
         resp = httpx.get(api_url, timeout=5)
         if resp.status_code == 200:
             shortened = resp.text.strip()
@@ -977,7 +988,10 @@ def _exec_password_generator(args: dict) -> dict:
     # 🛡️ 安全设计：利用加密安全随机发生器（secrets.choice），保障密码绝对无法被统计预测。
     import secrets as _secrets
     pwd = "".join(_secrets.choice(chars) for _ in range(length))
-    return {"content": json.dumps({"password": pwd}), "result_preview": pwd}
+    # 密码只在 content 里给用户看，不进 result_preview：
+    # 后者会写进 tool_call 事件、显示在前端执行轨迹，还会被 workflow.py 当 tool 消息
+    # 回填进 LLM 上下文——等于把刚生成的密码读进了模型的对话记录。
+    return {"content": json.dumps({"password": pwd}), "result_preview": "已生成密码（内容不回显到轨迹）"}
 
 
 def _exec_uuid_generator(args: dict) -> dict:

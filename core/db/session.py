@@ -216,10 +216,16 @@ def _run_compat_migrations() -> None:
             },
         )
     if "agent_settings" in table_names:
-        settings_columns = {column["name"] for column in inspector.get_columns("agent_settings")}
-        if "rag" not in settings_columns:
-            with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE agent_settings ADD COLUMN rag JSON DEFAULT '{}'"))
+        # 全走 _ensure_columns：早先单独手写了 rag 一列，后续加列时忘了同步，
+        # query_understanding 因此漏在老库上，create_agent 每次 INSERT 都报 Unknown column。
+        # 新列一律加进这个字典，别再另起分支。
+        _ensure_columns(
+            "agent_settings",
+            {
+                "rag": "JSON DEFAULT '{}'",
+                "query_understanding": "JSON DEFAULT '{}'",
+            },
+        )
     if "tools" in table_names:
         _ensure_columns(
             "tools",
@@ -444,6 +450,9 @@ def _run_compat_migrations() -> None:
                 "error_message": "TEXT DEFAULT ''",
                 "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                 "segment_config": "JSON",
+                "doc_metadata": "JSON",
+                # 异步入库的分步日志；老库缺这列时入库收尾写入必炸
+                "ingestion_log": "JSON",
             },
         )
 

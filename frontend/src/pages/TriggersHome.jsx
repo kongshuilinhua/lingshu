@@ -10,13 +10,19 @@ import { api, errorMessage } from '../utils.js';
  *   schedule 按 cron 定时唤起，由平台内调度线程扫描
  * 触发一次跑的就是普通对话，结果会出现在「会话」里，能直接看运行详情。
  */
-export function TriggersHome({ token, canEdit = true }) {
+export function TriggersHome({ token, canManage = false, currentUserId = null }) {
   const [triggers, setTriggers] = useState([]);
   const [targets, setTargets] = useState({ agents: [], workflows: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState('');
+
+  // 写权限与后端 _require_trigger 一致：创建者本人或管理员
+  function canEdit(item) {
+    if (canManage) return true;
+    return !!item && item.created_by != null && item.created_by === currentUserId;
+  }
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -93,7 +99,7 @@ export function TriggersHome({ token, canEdit = true }) {
           <h1>触发器</h1>
           <p>让智能体或工作流在没人说话的时候也能被唤起：外部系统调用，或按 cron 定时。</p>
         </div>
-        <button className="primary" type="button" disabled={!canEdit || creating} onClick={() => setCreating(true)}>
+        <button className="primary" type="button" disabled={creating} onClick={() => setCreating(true)}>
           <Plus size={16} />新建触发器
         </button>
       </header>
@@ -124,7 +130,7 @@ export function TriggersHome({ token, canEdit = true }) {
               </small>
               <label className="trigger-toggle">
                 <input
-                  type="checkbox" checked={item.enabled} disabled={!canEdit}
+                  type="checkbox" checked={item.enabled} disabled={!canEdit(item)}
                   onChange={(event) => patch(item.id, { enabled: event.target.checked })}
                 />
                 启用
@@ -147,8 +153,8 @@ export function TriggersHome({ token, canEdit = true }) {
 
             <footer>
               <small>上次触发 {formatTime(item.last_fired_at)}</small>
-              <button type="button" disabled={!canEdit} onClick={() => runNow(item)}><Zap size={13} />立即执行</button>
-              <button type="button" className="danger-light" disabled={!canEdit} onClick={() => remove(item)}>
+              <button type="button" disabled={!canEdit(item)} onClick={() => runNow(item)}><Zap size={13} />立即执行</button>
+              <button type="button" className="danger-light" disabled={!canEdit(item)} onClick={() => remove(item)}>
                 <Trash2 size={13} />删除
               </button>
             </footer>

@@ -38,8 +38,8 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 - 绑定知识库（多对多）
 - 绑定工具（多对多）
 - 草稿模式调试聊天（仅创建者可见）
-- 发布 → 管理员审核 → 进入内部市场 → 其他用户可复制使用
-- 版本快照：每次发布保存完整配置快照，支持版本列表查看
+- 发布 → 进入内部市场 → 其他用户可复制使用（发布不再经过审核）
+- 版本快照：每次发布保存完整配置快照（`GET /api/agents/{id}/versions`）
 - 记忆画像（Memory Profile）：按用户 + 智能体维度存储用户偏好和事实
 
 ### 聊天交互
@@ -80,9 +80,9 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 
 ### 工具集成
 - **内置工具**：系统预置，所有用户可用（如 web_search）
-- **用户自定义 HTTP 工具**：CRUD 管理，支持 GET/POST 方法
+- **用户自定义 HTTP 工具**：CRUD 管理，支持 GET/POST/PUT/PATCH/DELETE 方法
   - 配置请求头、查询参数、请求体 Schema
-  - 认证方式：API Key（Header/Query）、Bearer Token、Basic Auth
+  - 认证方式：API Key（Header/Query）、Bearer Token
   - 响应路径提取（JSONPath）
   - 超时设置
 - 工具测试：填入参数即时测试工具连通性
@@ -112,9 +112,18 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 - 发布快照隔离：草稿聊天使用当前配置，已发布聊天使用发布时的快照配置
 
 ### 工作流引擎
-- 基于节点的可视化工作流执行（Start → Knowledge → Tool → LLM → Answer）
-- 每个节点产生 RunStep 记录，可追溯执行路径
-- 支持自定义工作流节点顺序
+- 基于节点的可视化工作流执行，支持 15 类节点：`Start` / `Knowledge` / `Tool` / `LLM` / `HTTP` / `Code` / `VariableAssign` / `VariableAggregate` / `ParameterExtract` / `Classifier` / `Condition` / `HumanApproval` / `Loop` / `Agent` / `Answer`
+- 工作流是独立资源（可在「工作流」页单独维护），智能体通过引用使用它；也可以直接与工作流对话
+- 画布（拖拽）与表单两种编排视图，行为一致
+- 每个节点产生 RunStep 记录，可追溯执行路径；运行失败时 Run 置 `failed` 而非停在 `running`
+- `Iteration` 支持并行迭代与失败策略；`HumanApproval` 暂停后可恢复，保留暂停时的检索证据与工具结果
+
+### 触发器
+- 让智能体/工作流在没人说话时也能被唤起：
+  - `webhook`：外部系统 `POST /api/triggers/hook/{token}`，body 字段可填入消息模板
+  - `schedule`：按 cron 定时唤起，由进程内调度线程每 30 秒扫描一次（`TRIGGER_SCHEDULER_ENABLED`）
+- 触发一次跑的就是普通对话，结果出现在「会话」里，可回溯到触发源
+- 原子抢占 `next_run_at` 防重复触发；成员只能管理自己建的触发器，管理员不限
 
 ### 评测与可观测
 - 提供 `eval/rag_cases.jsonl` 评测数据集
@@ -344,8 +353,7 @@ LINGSHU_DEPLOYMENT_MODE=production
 | System Models | `GET /api/models` `POST/PATCH/DELETE /api/admin/models` | 系统模型管理 |
 | User Models | `GET/POST/PATCH/DELETE /api/user-models` `POST /api/user-models/{id}/test` | 用户私有模型 |
 | Agents | `GET/POST /api/agents` `GET/PATCH/DELETE /api/agents/{id}` | 智能体管理 |
-| Publish | `POST /api/agents/{id}/publish` | 发布（需审核） |
-| Review | `GET /api/admin/agent-reviews` `POST .../{id}/approve` `POST .../{id}/reject` | 审核 |
+| Publish | `POST /api/agents/{id}/publish` | 发布（不经过审核） |
 | Market | `GET /api/market/agents` `POST /api/market/agents/{id}/copy` | 内部市场 |
 | Workflow | `GET/PATCH /api/agents/{id}/workflow` | 工作流配置 |
 | Chat | `POST /api/agents/{id}/chat/stream` | SSE 流式聊天 |

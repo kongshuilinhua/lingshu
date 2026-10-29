@@ -29,6 +29,7 @@ import {
 
 export function KnowledgeHome({
   canManage,
+  currentUserId = null,
   createKnowledgeBase,
   updateKnowledgeBase,
   deleteDocument,
@@ -47,6 +48,13 @@ export function KnowledgeHome({
   notify,
   runRetrievalTest,
 }) {
+  // 写权限与后端 require_kb_write_access 一致：创建者本人或管理员。
+  // 不看归属就把启停/删除按钮给到普通成员，点了必 403，界面只表现为「没反应」。
+  function canEditKb(kb) {
+    if (canManage) return true;
+    return !!kb && kb.created_by != null && kb.created_by === currentUserId;
+  }
+
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState(() => defaultKnowledgeBaseForm());
   const [saving, setSaving] = useState(false);
@@ -114,6 +122,7 @@ export function KnowledgeHome({
           openCreate={openCreate}
           onSelectKb={handleSelectKb}
           notify={notify}
+          canEditKb={canEditKb}
         />
       ) : (
         <KnowledgeWorkspace
@@ -197,6 +206,8 @@ function KnowledgeDashboard({
   openCreate,
   onSelectKb,
   notify,
+  // 由外层算好再传进来：它需要 canManage 与当前用户 id，这里没有这两个上下文
+  canEditKb = () => true,
 }) {
   const [openMenuKbId, setOpenMenuKbId] = useState(null);
   const [kbEnabled, setKbEnabled] = useState({});
@@ -267,6 +278,7 @@ function KnowledgeDashboard({
                       <input
                         type="checkbox"
                         checked={isEnabled}
+                        disabled={!canEditKb(kb)}
                         onChange={async () => {
                           const nextVal = !isEnabled;
                           setKbEnabled((prev) => ({ ...prev, [kb.id]: nextVal }));
@@ -301,6 +313,7 @@ function KnowledgeDashboard({
                           <button
                             type="button"
                             className="danger"
+                            disabled={!canEditKb(kb)}
                             onClick={() => {
                               setOpenMenuKbId(null);
                               deleteKnowledgeBase(kb);
@@ -477,9 +490,11 @@ function KnowledgeWorkspace({
       pasteGuard.markSaved();
       setPasteText('');
       setCustomInputOpen(false);
-      // Wait a moment and force reload
-      if (setDocForm) {
-        setDocForm((form) => ({ ...form, kb_id: String(kb.id) })); // triggers re-fetch in parent!
+      // 直接重拉列表。原先靠 setDocForm 期待父级 effect 重跑，但父级依赖的是
+      // 派生的 activeKbId：往默认知识库上传时该值不变，effect 根本不会触发，
+      // 表现为「上传成功但列表里看不到新文档」。
+      if (loadDocuments) {
+        await loadDocuments(kb.id);
       }
       return true;
     } catch (err) {
@@ -627,7 +642,7 @@ function KnowledgeWorkspace({
                     </small>
                   </div>
                   <span className={`document-status ${status}`}>
-                    {status === 'indexed' ? '已索引' : status === 'indexing' ? '索引中' : '失败'}
+                    {documentStatusLabel(status)}
                   </span>
                   <div className="doc-row-actions" aria-label="文档操作">
                     {(status === 'failed' || status === 'indexed') && (
@@ -638,10 +653,12 @@ function KnowledgeWorkspace({
                         aria-label={status === 'failed' ? '重新索引文档' : '重建文档索引'}
                         onClick={(e) => {
                           e.stopPropagation();
+                          // 失败不能静默：重建索引最容易因为 embedding 服务不可用而失败，
+                          // 吞掉错误会让用户以为已经重建完成
                           api(`/api/knowledge-bases/${currentKbId}/documents/${doc.id}/reindex`, { token, method: 'POST' })
                             .then(() => loadDocuments?.(currentKbId))
-                            .catch(() => {});
-                      }}
+                            .catch((err) => notify?.(`重建索引失败：${errorMessage?.(err) || err?.message || '未知错误'}`));
+                        }}
                     >
                         <RefreshCw size={15} />
                       </button>

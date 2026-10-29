@@ -38,6 +38,9 @@ def trigger_payload(trigger: Trigger, *, base_url: str = "") -> dict:
         "timezone": trigger.timezone,
         "message_template": trigger.message_template,
         "enabled": bool(trigger.enabled),
+        # 前端按它决定启停/立即执行/删除按钮该不该给：后端只允许创建者或管理员操作，
+        # 不下发归属的话普通成员会看到一堆点了必 403 的按钮
+        "created_by": trigger.created_by,
         "last_fired_at": trigger.last_fired_at.isoformat() if trigger.last_fired_at else None,
         "next_run_at": trigger.next_run_at.isoformat() if trigger.next_run_at else None,
         "created_at": trigger.created_at.isoformat() if trigger.created_at else None,
