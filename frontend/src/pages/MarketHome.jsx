@@ -66,7 +66,7 @@ export function MarketHome({ agents, canManage, copyMarketAgent, marketTab, setM
         <section className="market-agents" aria-label="智能体市场">
           <div className="market-agents-heading">
             <div><h2>智能体</h2></div>
-            <p>审核通过后上架；复制到工作区即可继续配置。</p>
+            <p>已发布即可见；复制到工作区即可继续配置。</p>
           </div>
           <div className="agent-grid">
             {agents.map((agent) => (
@@ -80,7 +80,7 @@ export function MarketHome({ agents, canManage, copyMarketAgent, marketTab, setM
                 </div>
               </article>
             ))}
-            {agents.length === 0 && <p className="empty-state">市场里还没有审核通过的智能体。</p>}
+            {agents.length === 0 && <p className="empty-state">市场里还没有已发布的智能体。</p>}
           </div>
         </section>
       )}

@@ -528,6 +528,11 @@ class InviteAcceptRequest(BaseModel):
     token: str
 
 
+class MemberRoleUpdateRequest(BaseModel):
+    """调整成员角色。只开放 user/admin 两档，owner 只能由首个管理员自然产生。"""
+    role: str = Field(pattern="^(user|admin)$")
+
+
 class FeedbackRequest(BaseModel):
     """对话最终结果评星与反馈建议请求契约（Rating 限制在 positive/negative/none 规范内）。"""
     rating: str = Field(pattern="^(positive|negative|none)$")

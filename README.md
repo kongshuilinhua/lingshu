@@ -1,6 +1,6 @@
 # Lingshu Agent
 
-本地可运行的自定义智能体平台，提供账号体系、智能体管理、知识库 RAG、工具集成、发布审核与多轮会话的完整闭环。
+本地可运行的自定义智能体平台，提供账号体系、工作区成员协作、智能体管理、知识库 RAG、工具集成、工作流编排与多轮会话的完整闭环。
 
 ---
 
@@ -8,7 +8,7 @@
 
 Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，前端基于 Vite + React 18，支持用户创建、配置和发布自定义 AI 智能体，并在聊天页面中进行多轮对话。
 
-核心闭环：**用户注册 → 配置私有模型 → 创建智能体（绑定知识库 + 工具 + 提示词）→ 发布审核 → 内部市场复制 → 多轮聊天（支持深度思考 + RAG + 附件）。**
+核心闭环：**用户注册 → 配置私有模型 → 创建智能体（绑定知识库 + 工具 + 提示词）→ 发布 → 内部市场复制 → 多轮聊天（支持深度思考 + RAG + 附件）。**
 
 ---
 
@@ -17,8 +17,10 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 ### 账号与权限
 - 本地注册/登录，JWT 鉴权
 - 个人资料管理（名称、头像）
-- `admin` / `user` 双角色：管理员审核智能体、查看成员列表；普通用户管理自己的智能体
-- 邀请制加入工作空间（可选，通过 `INVITE_API_ENABLED` 开关）
+- `admin` / `user` 双角色：管理员管理成员与全部资产；普通用户只能改自己创建的东西
+- 邀请成员：管理员填邮箱生成邀请链接，对方打开链接注册即可加入本工作区（有效期默认 7 天，用过即失效，重新邀请会作废旧链接）
+- 成员管理：改角色（普通用户 / 管理员）、移除成员；工作区所有者与本人不可被改，至少保留一位管理员
+- `INVITE_API_ENABLED=true` 时工作区转为邀请制：不带邀请链接的公开注册会被拒绝
 
 ### 模型配置
 - **系统模型**：管理员预设的模型配置，供所有用户选择
@@ -38,12 +40,12 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 - 绑定知识库（多对多）
 - 绑定工具（多对多）
 - 草稿模式调试聊天（仅创建者可见）
-- 发布 → 进入内部市场 → 其他用户可复制使用（发布不再经过审核）
+- 发布 → 进入内部市场 → 其他用户可复制使用（发布不需要审核）
 - 版本快照：每次发布保存完整配置快照（`GET /api/agents/{id}/versions`）
 - 记忆画像（Memory Profile）：按用户 + 智能体维度存储用户偏好和事实
 
 ### 聊天交互
-- 仅可选择已审核发布的智能体进行聊天
+- 仅可选择已发布的智能体进行聊天
 - SSE 流式输出，实时展示生成内容
 - 支持 Markdown 渲染、表格、代码块复制
 - 按模型能力可选开启单轮「深度思考」（reasoning）
@@ -179,7 +181,7 @@ langchain/
 │   │   ├── api_keys.py             #     API Key 加密存储
 │   │   └── permissions.py          #     角色鉴权（admin/user）
 │   └── services/                   #   业务服务
-│       ├── agents.py               #     智能体 CRUD + 发布/审核/复制
+│       ├── agents.py               #     智能体 CRUD + 发布/复制
 │       ├── knowledge.py            #     知识库 CRUD + 文档入库/索引/分段
 │       ├── rag.py                  #     RAG 检索管线（Dense+BM25+RRF+Rerank+Cache）
 │       ├── rag_cache.py            #     Redis RAG 缓存
@@ -270,7 +272,8 @@ WEB_SEARCH_ENABLED=true
 WEB_SEARCH_PROVIDER=duckduckgo_html
 
 # 其他
-INVITE_API_ENABLED=false          # 邀请 API 开关
+INVITE_API_ENABLED=false          # 邀请制开关：true 时只允许凭邀请链接注册
+INVITE_EXPIRE_HOURS=168           # 邀请链接有效期（小时）
 UPLOAD_MAX_BYTES=31457280         # 上传文件大小上限（30MB）
 ```
 
@@ -353,7 +356,7 @@ LINGSHU_DEPLOYMENT_MODE=production
 | System Models | `GET /api/models` `POST/PATCH/DELETE /api/admin/models` | 系统模型管理 |
 | User Models | `GET/POST/PATCH/DELETE /api/user-models` `POST /api/user-models/{id}/test` | 用户私有模型 |
 | Agents | `GET/POST /api/agents` `GET/PATCH/DELETE /api/agents/{id}` | 智能体管理 |
-| Publish | `POST /api/agents/{id}/publish` | 发布（不经过审核） |
+| Publish | `POST /api/agents/{id}/publish` | 发布（直接生效，无审核环节） |
 | Market | `GET /api/market/agents` `POST /api/market/agents/{id}/copy` | 内部市场 |
 | Workflow | `GET/PATCH /api/agents/{id}/workflow` | 工作流配置 |
 | Chat | `POST /api/agents/{id}/chat/stream` | SSE 流式聊天 |

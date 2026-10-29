@@ -187,7 +187,7 @@ def publish_agent_endpoint(agent_id: int, membership: WorkspaceMember = Depends(
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
     require_agent_write_access(agent, membership)
     version = publish_agent(db, agent, membership.user_id)
-    return {"status": agent.status, "review_required": False, "version": {"id": version.id, "version": version.version, "snapshot": version.snapshot}}
+    return {"status": agent.status, "version": {"id": version.id, "version": version.version, "snapshot": version.snapshot}}
 
 
 @router.get("/{agent_id}/versions")

@@ -1880,7 +1880,6 @@ def test_user_publish_goes_live_then_market_copy(client, auth_headers):
     published = client.post(f"/api/agents/{agent_id}/publish", headers=user_headers)
     assert published.status_code == 200
     assert published.json()["status"] == "published"
-    assert published.json()["review_required"] is False
 
     market_after = client.get("/api/market/agents", headers=user_headers)
     assert any(item["id"] == agent_id for item in market_after.json()["items"])

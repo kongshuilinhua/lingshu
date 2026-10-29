@@ -123,6 +123,9 @@ def _run_compat_migrations() -> None:
     if "avatar_url" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''"))
+    # 记录用户上次进入的工作区，登录时据此签发 workspace_id。
+    # 不加外键：工作区被删时留个失效 id，读取方按「查不到就回落」处理。
+    _ensure_columns("users", {"last_active_workspace_id": "INTEGER"})
     if "workflows" in table_names:
         _ensure_columns("workflows", {"agent_id": "INTEGER"})
         workflow_indexes = {index["name"] for index in inspector.get_indexes("workflows")}

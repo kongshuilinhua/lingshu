@@ -41,7 +41,7 @@ import {
 import './styles.css';
 // Phase 4: api/ client modules
 import { fetchAgents, fetchMarketAgents } from './api/agents.js';
-import { fetchKnowledgeBases, fetchTools, fetchModels, fetchUserModels, fetchPromptTemplates, fetchMembers } from './api/resources.js';
+import { fetchKnowledgeBases, fetchTools, fetchModels, fetchUserModels, fetchPromptTemplates, fetchMembers, previewInvite } from './api/resources.js';
 import { useAuthStore } from './store/useAuthStore.js';
 import { useAgentStore } from './store/useAgentStore.js';
 import { useChatStore } from './store/useChatStore.js';
@@ -194,10 +194,35 @@ function App() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     if (passwordLogoutTimerRef.current) clearTimeout(passwordLogoutTimerRef.current);
   }, []);
+  // 邀请链接：地址栏带 ?invite=xxx 时先问服务端这枚邀请还能不能用，
+  // 好用就切到注册页并回填邮箱，不好用直接说清是过期还是无效——否则用户只会看到
+  // 注册按钮点下去报个 404，猜不出到底哪一步错了。
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const invited = params.get('invite');
+    if (!invited) return;
+    let cancelled = false;
+    previewInvite(invited)
+      .then((info) => {
+        if (cancelled) return;
+        setInviteToken(invited);
+        setInviteHint(info);
+        setAuthMode('register');
+        setAuthForm((form) => ({ ...form, email: info.email || form.email }));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setInviteHint({ error: err?.status === 410 ? '这条邀请链接已过期，请让管理员重新邀请。' : '这条邀请链接无效或已被使用。' });
+      });
+    return () => { cancelled = true; };
+  }, []);
   // 登录过的老用户默认停在「登录」：登出后回到注册页签，还得手动切一下才能登录
   const [authMode, setAuthMode] = useState(() => (localStorage.getItem('lingshu_last_email') ? 'login' : 'register'));
   // 不预填任何账号密码：原先写死的 admin@example.com / password123 会让登录页直接带着可用的演示凭据
   const [authForm, setAuthForm] = useState({ email: '', name: '', password: '' });
+  // 邀请链接里的 token。注册时随请求带上，服务端校验邮箱是否对得上。
+  const [inviteToken, setInviteToken] = useState('');
+  const [inviteHint, setInviteHint] = useState(null);
   const [docForm, setDocForm] = useState({ filename: 'guide.txt', text: '这里是一段知识库资料。', kb_id: '' });
   const [uploadingKnowledgeFile, setUploadingKnowledgeFile] = useState(false);
   const [uploadingFileName, setUploadingFileName] = useState('');
@@ -428,6 +453,16 @@ function App() {
     }
   }
 
+  async function loadMembers() {
+    const currentToken = useAuthStore.getState().token;
+    if (!currentToken) return;
+    try {
+      setMembers(await fetchMembers(currentToken));
+    } catch (err) {
+      notify(errorMessage(err));
+    }
+  }
+
   function logout() {
     // 先中断进行中的 SSE 流，否则登出后旧流仍会继续往 messages 里写 token。
     useChatStore.getState().stopStream();
@@ -492,12 +527,23 @@ function App() {
     try {
       const path = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
       const payload = authMode === 'register'
-        ? { email: authForm.email, name: authForm.name, password: authForm.password }
+        ? {
+            email: authForm.email,
+            name: authForm.name,
+            password: authForm.password,
+            ...(inviteToken ? { invite_token: inviteToken } : {}),
+          }
         : { email: authForm.email, password: authForm.password };
       const data = await api(path, { method: 'POST', body: payload });
       localStorage.setItem(AUTH_TOKEN_KEY, data.access_token);
       // 记住登录过的邮箱（只用于下次默认停在登录页并回填邮箱，不含任何凭据）
       localStorage.setItem('lingshu_last_email', authForm.email);
+      // 邀请用完就从地址栏抹掉：刷新页面不该再带着一枚已经失效的 token。
+      if (inviteToken) {
+        setInviteToken('');
+        setInviteHint(null);
+        window.history.replaceState({}, '', window.location.pathname);
+      }
       useAuthStore.getState().setToken(data.access_token);
     } catch (err) {
       setError(errorMessage(err));
@@ -1306,15 +1352,23 @@ function App() {
           <div className="brand-mark"><Sparkles size={22} /> Lingshu Agent</div>
           <h1>创建你的智能体工作台</h1>
           <p>本地账号、智能体聊天主页、我的模型配置和可发布的智能体工作台。</p>
+          {inviteHint && !inviteHint.error && (
+            <p className="invite-banner">
+              即将加入工作区「{inviteHint.workspace_name || '同事的工作区'}」，请用 <strong>{inviteHint.email}</strong> 注册。
+            </p>
+          )}
+          {inviteHint?.error && <p className="error">{inviteHint.error}</p>}
           <form onSubmit={authenticate} className="auth-form">
-            <div className="auth-toggle">
-              <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => setAuthMode('register')}>注册</button>
-              <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => setAuthMode('login')}>登录</button>
-            </div>
-            <input value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} placeholder="邮箱" />
+            {!inviteToken && (
+              <div className="auth-toggle">
+                <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => setAuthMode('register')}>注册</button>
+                <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => setAuthMode('login')}>登录</button>
+              </div>
+            )}
+            <input value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} placeholder="邮箱" readOnly={!!inviteToken} />
             {authMode === 'register' && <input value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} placeholder="姓名" />}
             <input type="password" value={authForm.password} onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })} placeholder="密码，至少 8 位" />
-            <button className="primary" type="submit"><LogIn size={18} />进入工作台</button>
+            <button className="primary" type="submit"><LogIn size={18} />{inviteToken ? '接受邀请并加入' : '进入工作台'}</button>
           </form>
           {error && <p className="error">{error}</p>}
         </section>
@@ -1378,6 +1432,7 @@ function App() {
     marketScope,
     me,
     members,
+    loadMembers,
     messages,
     models,
     openBuilder: (id) => confirmNavigation(() => openBuilder(id)),
@@ -1578,6 +1633,7 @@ function HomeView(props) {
     marketScope,
     me,
     members,
+    loadMembers,
     messages,
     openBuilder,
     promptTemplates,
@@ -1914,7 +1970,7 @@ function HomeView(props) {
         )}
 
         {activeNav === 'members' && canManage && (
-          <MembersHome members={members} />
+          <MembersHome members={members} token={token} me={me} loadMembers={loadMembers} notify={notify} />
         )}
 
         {activeNav === 'workflows' && (

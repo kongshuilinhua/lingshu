@@ -4,8 +4,6 @@
 提供注册、登录、获取/更新当前用户信息。
 """
 
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
@@ -23,6 +21,7 @@ from api.serializers import (
     user_payload,
     workspace_payload,
 )
+from core.config import get_settings
 from core.db.models import User, WorkspaceMember, WorkspaceInvite
 from core.db.session import get_db
 from core.security.auth import (
@@ -37,8 +36,26 @@ from core.services.bootstrap import (
     create_first_user_workspace,
     has_any_user,
 )
+from core.services.workspaces import accept_invite, ensure_usable_invite
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+settings = get_settings()
+
+
+def pick_membership(db: Session, user: User) -> WorkspaceMember | None:
+    """登录时决定进哪个工作区：上次停留的那个优先，失效了再退回最早一条。"""
+    if user.last_active_workspace_id:
+        membership = (
+            db.query(WorkspaceMember)
+            .filter(
+                WorkspaceMember.user_id == user.id,
+                WorkspaceMember.workspace_id == user.last_active_workspace_id,
+            )
+            .first()
+        )
+        if membership:
+            return membership
+    return db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user.id).order_by(WorkspaceMember.id.asc()).first()
 
 
 @router.post("/register", dependencies=[Depends(redis_rate_limit(10, 60, scope="register"))])
@@ -47,32 +64,32 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="Email already registered")
     invite = None
     if request.invite_token:
-        invite = (
-            db.query(WorkspaceInvite)
-            .filter(
-                WorkspaceInvite.token == request.invite_token,
-                WorkspaceInvite.accepted_at.is_(None),
-                WorkspaceInvite.email == request.email.lower(),
-            )
-            .first()
-        )
-        if not invite:
+        invite = db.query(WorkspaceInvite).filter(WorkspaceInvite.token == request.invite_token).first()
+        # 邮箱必须对上：链接可能被转发，不校验就等于谁拿到都能进。
+        ensure_usable_invite(invite)
+        if invite.email != request.email.lower():
             raise HTTPException(status_code=404, detail="Invite not found")
-    if invite:
         user = User(email=request.email.lower(), name=request.name, password_hash=hash_password(request.password))
         db.add(user)
         db.flush()
-        db.add(WorkspaceMember(workspace_id=invite.workspace_id, user_id=user.id, role=normalize_role(invite.role)))
-        invite.accepted_at = datetime.now(timezone.utc)
-        db.commit()
-        workspace = invite_workspace(db, invite.workspace_id)
-        role = normalize_role(invite.role)
-    elif has_any_user(db):
-        user, workspace = create_default_workspace_user(db, email=request.email, name=request.name, password=request.password)
-        role = "user"
-    else:
+        membership = accept_invite(db, invite=invite, user=user)
+        workspace = invite_workspace(db, membership.workspace_id)
+        role = normalize_role(membership.role)
+    elif not has_any_user(db):
+        # 首个账号必须放行，且要排在邀请制开关之前：开关打开时若连首用户也拦，
+        # 就没人能进系统建出第一条邀请，整个部署当场死锁（浏览器验证时实测踩到）。
         user, workspace = create_first_user_workspace(db, email=request.email, name=request.name, password=request.password)
         role = "admin"
+    elif settings.invite_api_enabled:
+        # 🛡️ 开关打开 = 只允许被邀请的人进来。此前这个开关只管邀请端点，
+        #    注册照样对所有人开放并自动并入默认工作区，等于开着也拦不住任何人。
+        raise HTTPException(status_code=403, detail="当前工作区为邀请制，请使用邀请链接注册")
+    else:
+        user, workspace = create_default_workspace_user(db, email=request.email, name=request.name, password=request.password)
+        role = "user"
+    # 记录本次进入的工作区，下次登录签发的令牌才不会退回最早那条成员身份
+    user.last_active_workspace_id = workspace.id
+    db.commit()
     token = create_access_token({"sub": str(user.id), "workspace_id": workspace.id})
     return {"access_token": token, "token_type": "bearer", "user": user_payload(user), "workspace": workspace_payload(workspace, role)}
 
@@ -82,7 +99,9 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == request.email.lower()).first()
     if not user or not verify_password(request.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    membership = db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user.id).first()
+    membership = pick_membership(db, user)
+    user.last_active_workspace_id = membership.workspace_id if membership else None
+    db.commit()
     token = create_access_token({"sub": str(user.id), "workspace_id": membership.workspace_id if membership else None})
     return {"access_token": token, "token_type": "bearer", "user": user_payload(user)}
 

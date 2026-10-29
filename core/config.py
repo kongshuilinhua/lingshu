@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     mcp_client_metadata_url: str = Field(default="", alias="MCP_CLIENT_METADATA_URL")
     # 邀请制注册开关：关闭时任何人可自由注册
     invite_api_enabled: bool = Field(default=False, alias="INVITE_API_ENABLED")
+    # 邀请链接有效期（小时）。不设过期的话，一条泄露的链接就是永久后门：
+    # 邀请表只记 created_at，到期与否在读取时按这个值现算，不加列也就无需迁移。
+    invite_expire_hours: int = Field(default=168, alias="INVITE_EXPIRE_HOURS")
     # 🛡️ CORS 白名单：限制前端来源，防止跨站请求伪造
     cors_origins: str = Field(default="http://127.0.0.1:5174,http://localhost:5174", alias="CORS_ORIGINS")
     # 🛡️ 受信反代列表（逗号分隔的 IP/CIDR）。为空时只信私网与回环——

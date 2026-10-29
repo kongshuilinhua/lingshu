@@ -40,6 +40,11 @@ class User(Base):
     # 🛡️ 安全设计：存储单向加盐加密后的密码哈希，绝对禁止明文存储。
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 🎯 上次进入的工作区。登录时用它决定令牌里的 workspace_id。
+    #    没有它的话，被邀请进第二个工作区的人下次登录会退回最早那条成员身份，
+    #    邀请接受算是白做了。不设外键：工作区被删时这里留个失效 id，
+    #    读取方按「查不到成员身份就回落」处理，不值得为它加级联。
+    last_active_workspace_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

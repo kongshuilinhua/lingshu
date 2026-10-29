@@ -13,7 +13,7 @@
     - api/routes/tools.py      → /api/tools/*
     - api/routes/models.py     → /api/models/*, /api/admin/models/*, /api/user-models/*
     - api/routes/prompts.py    → /api/prompt-templates/*
-    - api/routes/admin.py      → /api/admin/agent-reviews/*, /api/market/*, /api/uploads
+    - api/routes/admin.py      → /api/market/*, /api/uploads
     - api/routes/chat.py       → /api/agents/{id}/chat/stream, /api/sessions/*, /api/runs/*, /api/messages/*
     - api/routes/search.py     → /api/search/test, /api/knowledge/jobs/*
 """
