@@ -136,27 +136,6 @@ def memory_used_event(
     }
 
 
-def format_profile_memory(profile: AgentMemoryProfile | None) -> str:
-    """
-    将用户的长效记忆（长期摘要、事实列表、特征偏好）格式化拼接为平底纯文本，
-    以便下游在 `workflow.py` 拼接并塞入 System Prompt 的上下文。
-    """
-    if not profile or not profile.enabled:
-        return ""
-    parts = []
-    summary = (profile.summary or "").strip()
-    if summary:
-        parts.append(f"Long-term memory summary:\n{summary}")
-    facts = normalize_facts(profile.facts)
-    if facts:
-        parts.append("Long-term memory facts:\n" + "\n".join(f"- {item['text']}" for item in facts))
-    preferences = normalize_preferences(profile.preferences)
-    if preferences:
-        lines = [f"- {key}: {value}" for key, value in sorted(preferences.items())]
-        parts.append("Long-term memory preferences:\n" + "\n".join(lines))
-    return "\n\n".join(parts)
-
-
 def normalize_summary(value) -> str:
     """规整并严格截断长效记忆摘要。"""
     return str(value or "").strip()[:MAX_MEMORY_SUMMARY_CHARS]

@@ -3,6 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { AgentAvatar, UserAvatar } from './components/AgentAvatar.jsx';
 import { ConfirmDialog } from './components/ConfirmDialog.jsx';
+import { ErrorBoundary } from './components/ErrorBoundary.jsx';
+import { AuthPage } from './pages/AuthPage.jsx';
+import { WorkspaceSwitcher } from './components/WorkspaceSwitcher.jsx';
 
 import {
   AlertTriangle,
@@ -17,28 +20,28 @@ import {
   ImagePlus,
   Home,
   KeyRound,
-  LogIn,
   LogOut,
   MessageSquare,
   MoreHorizontal,
   Plus,
+  Radio,
   RefreshCw,
   Rocket,
   Search,
   Send,
   ServerCog,
-  Shield,
   Sparkles,
   SquarePen,
   ThumbsDown,
   ThumbsUp,
   Trash2,
   UploadCloud,
+  Workflow,
   X,
 } from 'lucide-react';
 import './styles.css';
 // Phase 4: api/ client modules
-import { fetchAgents, fetchMarketAgents, fetchReviews } from './api/agents.js';
+import { fetchAgents, fetchMarketAgents } from './api/agents.js';
 import { fetchKnowledgeBases, fetchTools, fetchModels, fetchUserModels, fetchPromptTemplates, fetchMembers } from './api/resources.js';
 import { useAuthStore } from './store/useAuthStore.js';
 import { useAgentStore } from './store/useAgentStore.js';
@@ -50,11 +53,13 @@ const lazyNamed = (loader, exportName) => lazy(() => loader().then((module) => (
 const ChatView = lazyNamed(() => import('./views/ChatView.jsx'), 'ChatView');
 const BuilderView = lazyNamed(() => import('./views/BuilderView.jsx'), 'BuilderView');
 const AgentsHome = lazyNamed(() => import('./pages/AgentsHome.jsx'), 'AgentsHome');
+const WorkflowsHome = lazyNamed(() => import('./pages/WorkflowsHome.jsx'), 'WorkflowsHome');
+const TriggersHome = lazyNamed(() => import('./pages/TriggersHome.jsx'), 'TriggersHome');
 const MarketHome = lazyNamed(() => import('./pages/MarketHome.jsx'), 'MarketHome');
-const ReviewHome = lazyNamed(() => import('./pages/ReviewHome.jsx'), 'ReviewHome');
 const MembersHome = lazyNamed(() => import('./pages/MembersHome.jsx'), 'MembersHome');
 const KnowledgeHome = lazyNamed(() => import('./pages/KnowledgeHome.jsx'), 'KnowledgeHome');
 const UserModelsHome = lazyNamed(() => import('./pages/UserModelsHome.jsx'), 'UserModelsHome');
+const ToolsHome = lazyNamed(() => import('./pages/ToolsHome.jsx'), 'ToolsHome');
 
 function PageFallback() {
   return <p className="empty-state">加载中...</p>;
@@ -155,9 +160,11 @@ function App() {
   const [adminModels, setAdminModels] = useState([]);
   const [userModels, setUserModels] = useState([]);
   const [chatModelSelection, setChatModelSelection] = useState('');
+  // 首页可以直接选工作流对话；为 null 时走智能体
+  const [activeWorkflowId, setActiveWorkflowId] = useState(null);
   const [runtimeStatus, setRuntimeStatus] = useState(() => defaultRuntimeStatus());
   const [marketAgents, setMarketAgents] = useState([]);
-  const [reviewItems, setReviewItems] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
   const [members, setMembers] = useState([]);
   // Phase 4: Zustand chat store replaces 19 useState calls
   const {
@@ -169,15 +176,26 @@ function App() {
     setRagEnabled, setThinkingEnabled, setSearchEnabled, setChatAttachments,
     setUploadingAttachment, setDraft, setError, setHomePrompt,
     startNewChat: storeStartNewChat, sendMessage: storeSendMessage,
+    resolveApproval,
   } = useChatStore();
   const [documents, setDocuments] = useState([]);
   const [toastMsg, setToastMsg] = useState('');
+  // 连续两条提示时，前一个定时器会把后一条提前清掉；存下句柄，新的来了先撤旧的。
+  const toastTimerRef = useRef(null);
+  const passwordLogoutTimerRef = useRef(null);
   const notify = useCallback((msg) => {
     setToastMsg(msg);
-    setTimeout(() => setToastMsg(''), 3000);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      setToastMsg('');
+      toastTimerRef.current = null;
+    }, 3000);
   }, []);
-  const [authMode, setAuthMode] = useState('register');
-  const [authForm, setAuthForm] = useState({ email: 'admin@example.com', name: 'Admin', password: 'password123' });
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    if (passwordLogoutTimerRef.current) clearTimeout(passwordLogoutTimerRef.current);
+  }, []);
+  const [inviteToken, setInviteToken] = useState(() => new URLSearchParams(window.location.search).get('invite') || '');
   const [docForm, setDocForm] = useState({ filename: 'guide.txt', text: '这里是一段知识库资料。', kb_id: '' });
   const [uploadingKnowledgeFile, setUploadingKnowledgeFile] = useState(false);
   const [uploadingFileName, setUploadingFileName] = useState('');
@@ -187,7 +205,14 @@ function App() {
   const [marketScope, setMarketScope] = useState('discover');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
-  const [profileError, setProfileError] = useState('');
+  const [profileError, setProfileErrorState] = useState('');
+  // 写入即弹 toast：这个 state 原先只在「个人资料」弹窗里渲染，
+  // 而工具页/模型页/资源库/编排页全把保存失败写进它，用户点保存失败后
+  // 界面上什么都不会出现。改在入口统一提示，四处调用点一处都不用动。
+  const setProfileError = useCallback((message) => {
+    setProfileErrorState(message || '');
+    if (message) notify(String(message));
+  }, [notify]);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [memoryProfile, setMemoryProfile] = useState(() => defaultMemoryProfile());
   const [memoryProfileDraft, setMemoryProfileDraft] = useState(() => profileToDraft(defaultMemoryProfile()));
@@ -364,7 +389,7 @@ function App() {
     await storeBootstrap();  // Phase 4: Zustand loads token/me/workspace
     const { token, me, workspace } = useAuthStore.getState();
     if (!token || token !== requestedToken || !workspace) return;
-    const [health, agentList, kbList, toolList, modelList, userModelList, marketList, reviewList, promptTemplateList, memberList] = await Promise.all([
+    const [health, agentList, kbList, toolList, modelList, userModelList, marketList, workflowList, promptTemplateList, memberList] = await Promise.all([
       api('/api/health').catch(() => defaultRuntimeStatus()),
       fetchAgents(token).catch(() => []),
       fetchKnowledgeBases(token).catch(() => []),
@@ -372,7 +397,7 @@ function App() {
       fetchModels(false, token).catch(() => []),
       fetchUserModels(token).catch(() => []),
       fetchMarketAgents(token).catch(() => []),
-      isAdminRole(workspace.role) ? fetchReviews(token).catch(() => []) : Promise.resolve([]),
+      api('/api/workflows', { token }).then((data) => data.items || []).catch(() => []),
       fetchPromptTemplates(false, token).catch(() => []),
       isAdminRole(workspace.role) ? fetchMembers(token).catch(() => []) : Promise.resolve([]),
     ]);
@@ -385,12 +410,12 @@ function App() {
     setAdminModels(modelList);
     setUserModels(userModelList);
     setRuntimeStatus(health);
-    if (isAdminRole(workspace?.role)) {
+    if (workspace?.can_manage_platform) {
       const adminModelList = await fetchModels(true, token).catch(() => modelList);
       setAdminModels(adminModelList);
     }
     setMarketAgents(marketList);
-    setReviewItems(reviewList);
+    setWorkflows(workflowList);
     setMembers(memberList);
     const publishedAgents = agentList.filter((item) => item.status === 'published' && item.published_version_id);
     const fallbackAgent = publishedAgents[0] || agentList[0];
@@ -401,15 +426,30 @@ function App() {
     }
   }
 
+  async function loadMembers() {
+    const currentToken = useAuthStore.getState().token;
+    if (!currentToken) return;
+    try {
+      setMembers(await fetchMembers(currentToken));
+    } catch (err) {
+      notify(errorMessage(err));
+    }
+  }
+
   function logout() {
     // 先中断进行中的 SSE 流，否则登出后旧流仍会继续往 messages 里写 token。
     useChatStore.getState().stopStream();
     // 通知服务端把当前令牌加入黑名单。令牌有效期 24 小时，仅清本地存储的话
     // 泄露的令牌在这段时间内依然可用。失败不阻塞本地登出。
-    if (token) {
+    //
+    // 令牌必须现取不能闭包：`logout` 会被空依赖的 effect 捕获（401 处理），
+    // 那里拿到的是首帧的 `token`（null），于是这个分支永远不会执行，
+    // 服务端令牌一次也没被撤销过。
+    const currentToken = useAuthStore.getState().token;
+    if (currentToken) {
       fetch(`${API_BASE}/api/auth/logout`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${currentToken}` },
       }).catch(() => {});
     }
     storeLogout();  // Phase 4: Zustand handles token/me/workspace cleanup
@@ -424,7 +464,6 @@ function App() {
     setUserModels([]);
     setRuntimeStatus(defaultRuntimeStatus());
     setMarketAgents([]);
-    setReviewItems([]);
     setMembers([]);
     setSessions([]);
     setActiveSessionId(null);
@@ -452,23 +491,25 @@ function App() {
     setAccountMenuOpen(false);
   }
 
-  async function authenticate(event) {
-    event.preventDefault();
-    setError('');
-    try {
-      const path = authMode === 'register' ? '/api/auth/register' : '/api/auth/login';
-      const payload = authMode === 'register'
-        ? { email: authForm.email, name: authForm.name, password: authForm.password }
-        : { email: authForm.email, password: authForm.password };
-      const data = await api(path, { method: 'POST', body: payload });
-      localStorage.setItem(AUTH_TOKEN_KEY, data.access_token);
-      useAuthStore.getState().setToken(data.access_token);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+  function clearInvite() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('invite');
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    setInviteToken('');
+  }
+
+  function finishAuthentication(accessToken, email) {
+    // 完成加入后再切换会话，重新加载页面以清除旧工作区缓存和未完成请求。
+    useChatStore.getState().stopStream();
+    localStorage.setItem(AUTH_TOKEN_KEY, accessToken);
+    localStorage.setItem('lingshu_last_email', email);
+    clearInvite();
+    window.location.reload();
   }
 
   async function loadAgent(agentId, { preserveMemoryProfile = false } = {}) {
+    // 换智能体时旧流不能继续：它写的还是上一个智能体的上下文，会串进新会话
+    useChatStore.getState().stopStream();
     await storeLoadAgent(agentId, token);  // Phase 4: Zustand loads agent + agentForm
     const { activeAgent: agent, agentForm: form } = useAgentStore.getState();
     agentGuard.markSaved(form);
@@ -683,7 +724,8 @@ function App() {
   }
 
   async function testUserModelConfig(configId) {
-    return api(`/api/user-models/${configId}/test?detect_image=true`, { token, method: 'POST' });
+    // 不带 detect_image：后端不实现能力探测（只测连通性），传了也是被忽略的死参数
+    return api(`/api/user-models/${configId}/test`, { token, method: 'POST' });
   }
 
   async function refreshTools() {
@@ -823,7 +865,7 @@ function App() {
     if (!saved) return; // 保存失败已提示，不继续发布
     try {
       const data = await api(`/api/agents/${activeAgentId}/publish`, { token, method: 'POST' });
-      notify(data.review_required ? '已提交管理员审核，通过后会出现在市场。' : '已发布到市场。');
+      notify('已发布到市场。');
       await bootstrap();
     } catch (err) {
       notify(`发布失败：${errorMessage(err)}`);
@@ -837,18 +879,6 @@ function App() {
     setView('builder');
     setActiveNav('agents');
     notify('已复制到你的智能体草稿。');
-  }
-
-  async function approveReview(agentId) {
-    await api(`/api/admin/agent-reviews/${agentId}/approve`, { token, method: 'POST' });
-    await bootstrap();
-    notify('审核通过，智能体已上架市场。');
-  }
-
-  async function rejectReview(agentId) {
-    await api(`/api/admin/agent-reviews/${agentId}/reject`, { token, method: 'POST' });
-    await bootstrap();
-    notify('已驳回该智能体发布申请。');
   }
 
   async function createKnowledgeBase(payload = defaultKnowledgeBaseForm()) {
@@ -1034,6 +1064,8 @@ function App() {
   }
 
   function startNewChat() {
+    // 旧流还在跑的话，它的 token 会直接写进这个刚清空的新会话
+    useChatStore.getState().stopStream();
     setChatModelSelection('');
     setActiveSessionId(null);
     setSessionTitleDraft('');
@@ -1065,6 +1097,18 @@ function App() {
     setFeedbackByMessage((items) => ({ ...items, [messageId]: data.feedback.rating }));
   }
 
+  // 运行详情按需加载：消息展开「运行详情」时才拉取该次运行的节点记录
+  async function loadRunSteps(runId) {
+    return api(`/api/runs/${runId}/steps`, { token });
+  }
+
+  // 人工审批的通过/驳回：store 里需要 token 才能带 Authorization，
+  // 直接把 store 方法传给组件会让请求头变成 `Bearer undefined`，按钮必然 401。
+  // 与 loadRunSteps 同理，在这一层注入 token 后再下发。
+  function handleResolveApproval({ runId, approved }) {
+    return resolveApproval({ runId, approved, token });
+  }
+
   const chatModeRef = useRef(chatMode);
   useEffect(() => {
     chatModeRef.current = chatMode;
@@ -1080,6 +1124,8 @@ function App() {
 
   // Clean chat state when switching between draft debugging and published preview
   useEffect(() => {
+    // 不清流就会让上一模式的 token 继续往新模式的消息列表里追加
+    useChatStore.getState().stopStream();
     setMessages([]);
     setSources([]);
     setToolDebugEvents([]);
@@ -1091,16 +1137,19 @@ function App() {
     event?.preventDefault();
     const text = (explicitText ?? draft ?? homePrompt).trim();
     const outgoingAttachments = chatAttachments;
-    if ((!text && !outgoingAttachments.length) || !activeAgentId || busy) return;
-    if (viewRef.current !== 'builder' && (!activeSummary || activeSummary.status !== 'published' || !activeSummary.published_version_id)) {
+    const workflowChat = Boolean(activeWorkflowId) && viewRef.current !== 'builder';
+    if ((!text && !outgoingAttachments.length) || busy) return;
+    if (!workflowChat && !activeAgentId) return;
+    if (!workflowChat && viewRef.current !== 'builder' && (!activeSummary || activeSummary.status !== 'published' || !activeSummary.published_version_id)) {
       const firstPublished = chatAgents[0];
       if (firstPublished) {
         setActiveAgentId(firstPublished.id);
       }
-      setError('对话只能使用已经过审核并上架的智能体。');
+      setError('对话只能使用已发布的智能体。');
       return;
     }
-    const currentModel = viewRef.current === 'builder' ? selectedDraftModel : currentChatModel;
+    // 工作流对话用的是工作流的运行配置，模型提示只在编辑页/智能体对话时判断
+    const currentModel = viewRef.current === 'builder' ? selectedDraftModel : (workflowChat ? null : currentChatModel);
     const modelWarning = modelCapabilityWarning(currentModel, outgoingAttachments);
     if (modelWarning) {
       setError(modelWarning);
@@ -1134,6 +1183,7 @@ function App() {
         text,
         activeAgentId,
         token,
+        workflowId: activeWorkflowId,
         sessionId: activeSessionId || null,
         mode: viewRef.current === 'builder' ? chatModeRef.current : 'published',
         isDebug: viewRef.current === 'builder',
@@ -1252,30 +1302,14 @@ function App() {
     }));
   }
 
-  if (!token) {
-    return (
-      <main className="auth-shell">
-        <section className="auth-panel">
-          <div className="brand-mark"><Sparkles size={22} /> Lingshu Agent</div>
-          <h1>创建你的智能体工作台</h1>
-          <p>本地账号、智能体聊天主页、我的模型配置和可发布的智能体工作台。</p>
-          <form onSubmit={authenticate} className="auth-form">
-            <div className="auth-toggle">
-              <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => setAuthMode('register')}>注册</button>
-              <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => setAuthMode('login')}>登录</button>
-            </div>
-            <input value={authForm.email} onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })} placeholder="邮箱" />
-            {authMode === 'register' && <input value={authForm.name} onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })} placeholder="姓名" />}
-            <input type="password" value={authForm.password} onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })} placeholder="密码，至少 8 位" />
-            <button className="primary" type="submit"><LogIn size={18} />进入工作台</button>
-          </form>
-          {error && <p className="error">{error}</p>}
-        </section>
-      </main>
-    );
+  if (!token || inviteToken) {
+    return <AuthPage token={token} inviteToken={inviteToken}
+      onAuthenticated={finishAuthentication} onCancelInvite={clearInvite}
+      onLogout={logout} initialError={error} />;
   }
 
   const shellProps = {
+    switchWorkspace: (accessToken) => finishAuthentication(accessToken, me?.email || ''),
     confirmNavigation,
     chatModels,
     chatModelSelection,
@@ -1293,6 +1327,8 @@ function App() {
     canEditActive,
     chatMode,
     chatAgents,
+    activeWorkflowId,
+    setActiveWorkflowId,
     chatAttachments,
     chatVariables,
     copyMarketAgent,
@@ -1323,10 +1359,13 @@ function App() {
     loadSession: (id, options) => confirmNavigation(() => loadSession(id, options)),
     logout: () => confirmNavigation(logout),
     marketAgents,
+    workflows,
+    reloadWorkflows: bootstrap,
     marketTab,
     marketScope,
     me,
     members,
+    loadMembers,
     messages,
     models,
     openBuilder: (id) => confirmNavigation(() => openBuilder(id)),
@@ -1355,7 +1394,7 @@ function App() {
     sendSuggestedQuestion,
     sessions,
     setError,
-    setActiveAgentId: (id) => id === activeAgentId ? undefined : confirmNavigation(() => setActiveAgentId(id)),
+    setActiveAgentId: (id) => (id === activeAgentId ? undefined : confirmNavigation(() => { setActiveWorkflowId(null); setActiveAgentId(id); })),
     setActiveNav: (nav) => nav === activeNav ? undefined : confirmNavigation(() => setActiveNav(nav)),
     setMarketTab,
     setMarketScope,
@@ -1373,10 +1412,10 @@ function App() {
     sources,
     startNewChat: () => confirmNavigation(startNewChat),
     submitFeedback,
+    resolveApproval,
+    handleResolveApproval,
+    loadRunSteps,
     deleteMemoryProfile,
-    approveReview,
-    rejectReview,
-    reviewItems,
     tools,
     toolDebugEvents,
     testToolConfig,
@@ -1490,6 +1529,8 @@ function HomeView(props) {
     canEditActive,
     chatMode,
     chatAgents,
+    activeWorkflowId,
+    setActiveWorkflowId,
     chatAttachments,
     chatVariables,
     copyBuiltinPromptTemplate,
@@ -1519,10 +1560,13 @@ function HomeView(props) {
     loadSession,
     logout,
     marketAgents,
+    workflows,
+    reloadWorkflows,
     marketTab,
     marketScope,
     me,
     members,
+    loadMembers,
     messages,
     openBuilder,
     promptTemplates,
@@ -1546,9 +1590,9 @@ function HomeView(props) {
     sources,
     startNewChat,
     submitFeedback,
-    approveReview,
-    rejectReview,
-    reviewItems,
+    resolveApproval,
+    handleResolveApproval,
+    loadRunSteps,
     tools,
     testToolConfig,
     uploadChatAttachment,
@@ -1581,6 +1625,7 @@ function HomeView(props) {
     probeUserModels,
     testUserModelConfig,
     token,
+    models,
     userModels,
     webSearchRuntime,
     thinkingEnabled,
@@ -1664,8 +1709,9 @@ function HomeView(props) {
           <NavButton icon={<Home size={17} />} label="首页" active={activeNav === 'chat'} onClick={() => setActiveNav('chat')} />
           <NavButton icon={<Bot size={17} />} label="智能体" active={activeNav === 'agents'} onClick={() => setActiveNav('agents')} />
           <NavButton icon={<Boxes size={17} />} label="市场" active={activeNav === 'market'} onClick={() => setActiveNav('market')} />
+          <NavButton icon={<Workflow size={17} />} label="工作流" active={activeNav === 'workflows'} onClick={() => setActiveNav('workflows')} />
+          <NavButton icon={<Radio size={17} />} label="触发器" active={activeNav === 'triggers'} onClick={() => setActiveNav('triggers')} />
           <NavButton icon={<ServerCog size={17} />} label="我的模型" active={activeNav === 'my-models'} onClick={() => setActiveNav('my-models')} />
-          {canManage && <NavButton icon={<Shield size={17} />} label="审核" active={activeNav === 'reviews'} onClick={() => setActiveNav('reviews')} />}
           {canManage && <NavButton icon={<KeyRound size={17} />} label="成员" active={activeNav === 'members'} onClick={() => setActiveNav('members')} />}
           <NavButton icon={<Database size={17} />} label="知识库" active={activeNav === 'knowledge'} onClick={() => setActiveNav('knowledge')} />
         </nav>
@@ -1758,6 +1804,7 @@ function HomeView(props) {
                 <ChevronLeft className="account-chevron" size={16} />
               </button>
               <div className="account-menu-group">
+                <WorkspaceSwitcher token={token} workspace={workspace} onSwitch={props.switchWorkspace} confirmNavigation={props.confirmNavigation} />
                 <button
                   type="button"
                   onClick={() => {
@@ -1819,6 +1866,9 @@ function HomeView(props) {
             activeAgentId={activeAgentId}
             activeSummary={activeSummary}
             chatAgents={chatAgents}
+            chatWorkflows={workflows}
+            activeWorkflowId={activeWorkflowId}
+            setActiveWorkflowId={setActiveWorkflowId}
             canEditActive={canEditActive}
             openBuilder={openBuilder}
             setActiveAgentId={setActiveAgentId}
@@ -1841,6 +1891,8 @@ function HomeView(props) {
             setSearchEnabled={setSearchEnabled}
             sources={sources}
             submitFeedback={submitFeedback}
+            resolveApproval={handleResolveApproval}
+            loadRunSteps={loadRunSteps}
             ragRuntime={ragRuntime}
             webSearchRuntime={webSearchRuntime}
             thinkingEnabled={thinkingEnabled}
@@ -1852,12 +1904,25 @@ function HomeView(props) {
         )}
 
         {activeNav === 'members' && canManage && (
-          <MembersHome members={members} />
+          <MembersHome members={members} token={token} me={me} loadMembers={loadMembers} notify={notify} />
+        )}
+
+        {activeNav === 'workflows' && (
+          <WorkflowsHome
+            token={token} agents={agents} workflows={workflows} models={models} userModels={userModels}
+            reloadWorkflows={reloadWorkflows} canManage={canManage} currentUserId={me?.id ?? null}
+            onChatWorkflow={(id) => { setActiveWorkflowId(id); setActiveNav('chat'); }}
+          />
+        )}
+
+        {activeNav === 'triggers' && (
+          <TriggersHome token={token} canManage={canManage} currentUserId={me?.id ?? null} />
         )}
 
         {activeNav === 'knowledge' && (
           <KnowledgeHome
             canManage={canManage}
+            currentUserId={me?.id ?? null}
             createKnowledgeBase={createKnowledgeBase}
             updateKnowledgeBase={updateKnowledgeBase}
             deleteDocument={deleteDocument}
@@ -1873,6 +1938,7 @@ function HomeView(props) {
             uploadDocument={uploadDocument}
             uploadKnowledgeFile={uploadKnowledgeFile}
             loadDocuments={loadDocuments}
+            runRetrievalTest={(kbId, payload) => api(`/api/knowledge-bases/${kbId}/retrieval-test`, { token, method: 'POST', body: payload })}
             notify={notify}
           />
         )}
@@ -1912,7 +1978,7 @@ function HomeView(props) {
         {activeNav === 'my-models' && (
           <UserModelsHome
             adminModels={adminModels}
-            canManage={canManage}
+            canManage={!!workspace?.can_manage_platform}
             createModelConfig={createModelConfig}
             deleteModelConfig={deleteModelConfig}
             requestDeleteConfirm={requestDeleteConfirm}
@@ -1930,11 +1996,16 @@ function HomeView(props) {
 
 
 
-        {activeNav === 'reviews' && canManage && (
-          <ReviewHome
-            items={reviewItems}
-            approveReview={approveReview}
-            rejectReview={rejectReview}
+        {activeNav === 'tools' && (
+          <ToolsHome
+            createToolConfig={createToolConfig}
+            deleteToolConfig={deleteToolConfig}
+            openBuilder={() => confirmNavigation(() => { setView('builder'); setActiveNav('agents'); })}
+            requestDeleteConfirm={requestDeleteConfirm}
+            setProfileError={setProfileError}
+            testToolConfig={testToolConfig}
+            tools={tools}
+            updateToolConfig={updateToolConfig}
           />
         )}
 
@@ -1947,6 +2018,7 @@ function HomeView(props) {
           onClose={() => setProfileDialogOpen(false)}
           profileError={profileError}
           setProfileError={setProfileError}
+          token={token}
           updateProfile={updateProfile}
           workspace={workspace}
         />
@@ -2042,11 +2114,15 @@ function ProfileDialog({
   onClose,
   profileError,
   setProfileError,
+  token,
   updateProfile,
   workspace,
 }) {
   const [nameDraft, setNameDraft] = useState(me?.name || '');
   const [savingProfile, setSavingProfile] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
+  const [passwordMessage, setPasswordMessage] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
   const guard = useUnsavedForm({ value: nameDraft, label: '个人资料', busy: savingProfile, onSave: saveName });
   const closeProfile = () => guard.confirmLeave(onClose);
 
@@ -2076,6 +2152,41 @@ function ProfileDialog({
       return false;
     } finally {
       setSavingProfile(false);
+    }
+  }
+
+  async function changePassword() {
+    setPasswordMessage('');
+    if (passwordForm.next.length < 8) {
+      setPasswordMessage('新密码至少 8 位。');
+      return;
+    }
+    if (passwordForm.next !== passwordForm.confirm) {
+      setPasswordMessage('两次输入的新密码不一致。');
+      return;
+    }
+    setSavingPassword(true);
+    try {
+      const data = await api('/api/auth/password', {
+        token: token,
+        method: 'POST',
+        body: { current_password: passwordForm.current, new_password: passwordForm.next },
+      });
+      setPasswordForm({ current: '', next: '', confirm: '' });
+      // 改密后当前令牌已作废：直接回登录页，避免用户继续操作却每次都 401
+      setPasswordMessage(data.revoked === false
+        ? '密码已修改，但令牌撤销未生效（缓存服务不可用），请重新登录。'
+        : '密码已修改，请用新密码重新登录。');
+      // 存句柄以便弹窗在跳转前被关掉时不留下一个孤儿定时器
+      if (passwordLogoutTimerRef.current) clearTimeout(passwordLogoutTimerRef.current);
+      passwordLogoutTimerRef.current = setTimeout(() => {
+        passwordLogoutTimerRef.current = null;
+        logout();
+      }, 1200);
+    } catch (err) {
+      setPasswordMessage(errorMessage(err));
+    } finally {
+      setSavingPassword(false);
     }
   }
 
@@ -2126,6 +2237,32 @@ function ProfileDialog({
           <button type="button" onClick={saveName} disabled={savingProfile || !nameDraft.trim()}>保存姓名</button>
         </div>
         {profileError && <p className="error">{profileError}</p>}
+        <div className="profile-password">
+          <h4>修改密码</h4>
+          <input
+            type="password" autoComplete="current-password" placeholder="当前密码"
+            value={passwordForm.current}
+            onChange={(event) => setPasswordForm({ ...passwordForm, current: event.target.value })}
+          />
+          <input
+            type="password" autoComplete="new-password" placeholder="新密码，至少 8 位"
+            value={passwordForm.next}
+            onChange={(event) => setPasswordForm({ ...passwordForm, next: event.target.value })}
+          />
+          <input
+            type="password" autoComplete="new-password" placeholder="再输一次新密码"
+            value={passwordForm.confirm}
+            onChange={(event) => setPasswordForm({ ...passwordForm, confirm: event.target.value })}
+          />
+          <button
+            type="button"
+            disabled={savingPassword || !passwordForm.current || !passwordForm.next}
+            onClick={changePassword}
+          >
+            {savingPassword ? '修改中…' : '修改密码'}
+          </button>
+          {passwordMessage && <p className="profile-password-message">{passwordMessage}</p>}
+        </div>
         <div className="profile-grid">
           <span>邮箱</span>
           <strong>{me?.email || '-'}</strong>
@@ -2140,35 +2277,4 @@ function ProfileDialog({
   );
 }
 
-class AppErrorBoundary extends Component {
-  constructor(props) {
-    super(props);
-    this.state = { error: null };
-  }
-
-  static getDerivedStateFromError(error) {
-    return { error };
-  }
-
-  componentDidCatch(error, info) {
-    console.error(error, info);
-  }
-
-  render() {
-    if (this.state.error) {
-      return (
-        <main className="fatal-error" style={{ padding: '20px', maxWidth: '800px', margin: '50px auto' }}>
-          <h1>页面渲染失败</h1>
-          <p style={{ color: '#d9383a', fontWeight: 'bold' }}>{this.state.error.message}</p>
-          <pre style={{ textAlign: 'left', background: '#fafafa', border: '1px solid #eaeaea', borderRadius: '6px', padding: '15px', overflow: 'auto', fontSize: '11px', lineHeight: '1.5', fontFamily: 'monospace', color: '#333' }}>
-            {this.state.error.stack}
-          </pre>
-          <button type="button" onClick={() => window.location.reload()} style={{ marginTop: '15px', padding: '8px 16px', background: '#181b25', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>刷新页面</button>
-        </main>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-createRoot(document.getElementById('root')).render(<AppErrorBoundary><UnsavedChangesProvider><App /></UnsavedChangesProvider></AppErrorBoundary>);
+createRoot(document.getElementById('root')).render(<ErrorBoundary><UnsavedChangesProvider><App /></UnsavedChangesProvider></ErrorBoundary>);

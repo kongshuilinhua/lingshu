@@ -12,6 +12,9 @@ import {
   X,
 } from 'lucide-react';
 import { ResegmentModal } from '../components/ResegmentModal.jsx';
+import { ChunkList } from '../components/ChunkList.jsx';
+import { DocumentMetadataEditor } from '../components/DocumentMetadataEditor.jsx';
+import { RetrievalTestPanel } from '../components/RetrievalTestPanel.jsx';
 import { KnowledgeBaseDialog } from '../components/KnowledgeBaseDialog.jsx';
 import { useUnsavedForm } from '../components/UnsavedChanges.jsx';
 import { KnowledgeDocumentList, KnowledgeUploadBox } from '../components/KnowledgeDocumentList.jsx';
@@ -26,6 +29,7 @@ import {
 
 export function KnowledgeHome({
   canManage,
+  currentUserId = null,
   createKnowledgeBase,
   updateKnowledgeBase,
   deleteDocument,
@@ -42,7 +46,15 @@ export function KnowledgeHome({
   token,
   loadDocuments,
   notify,
+  runRetrievalTest,
 }) {
+  // 写权限与后端 require_kb_write_access 一致：创建者本人或管理员。
+  // 不看归属就把启停/删除按钮给到普通成员，点了必 403，界面只表现为「没反应」。
+  function canEditKb(kb) {
+    if (canManage) return true;
+    return !!kb && kb.created_by != null && kb.created_by === currentUserId;
+  }
+
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState(() => defaultKnowledgeBaseForm());
   const [saving, setSaving] = useState(false);
@@ -110,6 +122,7 @@ export function KnowledgeHome({
           openCreate={openCreate}
           onSelectKb={handleSelectKb}
           notify={notify}
+          canEditKb={canEditKb}
         />
       ) : (
         <KnowledgeWorkspace
@@ -132,6 +145,7 @@ export function KnowledgeHome({
           token={token}
           activeKbId={activeKbId}
           loadDocuments={loadDocuments}
+          runRetrievalTest={runRetrievalTest}
         />
       )}
 
@@ -192,6 +206,8 @@ function KnowledgeDashboard({
   openCreate,
   onSelectKb,
   notify,
+  // 由外层算好再传进来：它需要 canManage 与当前用户 id，这里没有这两个上下文
+  canEditKb = () => true,
 }) {
   const [openMenuKbId, setOpenMenuKbId] = useState(null);
   const [kbEnabled, setKbEnabled] = useState({});
@@ -262,6 +278,7 @@ function KnowledgeDashboard({
                       <input
                         type="checkbox"
                         checked={isEnabled}
+                        disabled={!canEditKb(kb)}
                         onChange={async () => {
                           const nextVal = !isEnabled;
                           setKbEnabled((prev) => ({ ...prev, [kb.id]: nextVal }));
@@ -296,6 +313,7 @@ function KnowledgeDashboard({
                           <button
                             type="button"
                             className="danger"
+                            disabled={!canEditKb(kb)}
                             onClick={() => {
                               setOpenMenuKbId(null);
                               deleteKnowledgeBase(kb);
@@ -347,9 +365,11 @@ function KnowledgeWorkspace({
   loadDocuments,
   notify,
   token,
+  runRetrievalTest,
 }) {
   const [docSearchQuery, setDocSearchQuery] = useState('');
   const [addDropdownOpen, setAddDropdownOpen] = useState(false);
+  const [retrievalTestOpen, setRetrievalTestOpen] = useState(false);
   const [customInputOpen, setCustomInputOpen] = useState(false);
   const currentKbId = activeKbId || kb?.id;
 
@@ -470,9 +490,11 @@ function KnowledgeWorkspace({
       pasteGuard.markSaved();
       setPasteText('');
       setCustomInputOpen(false);
-      // Wait a moment and force reload
-      if (setDocForm) {
-        setDocForm((form) => ({ ...form, kb_id: String(kb.id) })); // triggers re-fetch in parent!
+      // 直接重拉列表。原先靠 setDocForm 期待父级 effect 重跑，但父级依赖的是
+      // 派生的 activeKbId：往默认知识库上传时该值不变，effect 根本不会触发，
+      // 表现为「上传成功但列表里看不到新文档」。
+      if (loadDocuments) {
+        await loadDocuments(kb.id);
       }
       return true;
     } catch (err) {
@@ -529,6 +551,14 @@ function KnowledgeWorkspace({
           </div>
         </div>
         <div className="workspace-header-actions">
+          <button
+            type="button"
+            className={retrievalTestOpen ? 'active' : ''}
+            aria-pressed={retrievalTestOpen}
+            onClick={() => setRetrievalTestOpen((open) => !open)}
+          >
+            <Search size={16} />召回测试
+          </button>
           <button
             className="primary"
             type="button"
@@ -612,7 +642,7 @@ function KnowledgeWorkspace({
                     </small>
                   </div>
                   <span className={`document-status ${status}`}>
-                    {status === 'indexed' ? '已索引' : status === 'indexing' ? '索引中' : '失败'}
+                    {documentStatusLabel(status)}
                   </span>
                   <div className="doc-row-actions" aria-label="文档操作">
                     {(status === 'failed' || status === 'indexed') && (
@@ -623,10 +653,12 @@ function KnowledgeWorkspace({
                         aria-label={status === 'failed' ? '重新索引文档' : '重建文档索引'}
                         onClick={(e) => {
                           e.stopPropagation();
+                          // 失败不能静默：重建索引最容易因为 embedding 服务不可用而失败，
+                          // 吞掉错误会让用户以为已经重建完成
                           api(`/api/knowledge-bases/${currentKbId}/documents/${doc.id}/reindex`, { token, method: 'POST' })
                             .then(() => loadDocuments?.(currentKbId))
-                            .catch(() => {});
-                      }}
+                            .catch((err) => notify?.(`重建索引失败：${errorMessage?.(err) || err?.message || '未知错误'}`));
+                        }}
                     >
                         <RefreshCw size={15} />
                       </button>
@@ -659,7 +691,12 @@ function KnowledgeWorkspace({
 
         {/* Right column: active doc details & chunk stream */}
         <section className="workspace-column right-column plain-panel">
-          {activeDoc ? (
+          {retrievalTestOpen ? (
+            <RetrievalTestPanel
+              kbId={currentKbId} token={token} runRetrievalTest={runRetrievalTest} onClose={() => setRetrievalTestOpen(false)}
+              metadataKeys={[...new Set(documents.flatMap((doc) => Object.keys(doc.metadata || {})))]}
+            />
+          ) : activeDoc ? (
             <div className="doc-detail-view">
               <div className="doc-detail-header-card">
                 <div className="doc-meta-title-row">
@@ -684,38 +721,24 @@ function KnowledgeWorkspace({
                   <div className="meta-item">
                     <span>索引状态</span>
                     <strong className={`status-text ${activeDoc.status}`}>
-                      {activeDoc.status === 'indexed' ? '已完成' : '同步中'}
+                      {{ indexed: '已完成', failed: '失败' }[activeDoc.status] || '同步中'}
                     </strong>
                   </div>
                 </div>
+                {activeDoc.status === 'failed' && activeDoc.error_message && (
+                  <p className="doc-error-message">{activeDoc.error_message}</p>
+                )}
               </div>
 
-              <div className="chunk-list-section">
-                <h5>分块预览 ({chunks.length} 个)</h5>
-                <div className="chunk-card-stream">
-                  {chunksLoading ? (
-                    <div className="chunks-loading">
-                      <span className="spinner"></span>加载分块中...
-                    </div>
-                  ) : (
-                    chunks.map((chunk, index) => (
-                      <div key={chunk.id || index} className="chunk-card">
-                        <div className="chunk-card-header">
-                          <span className="chunk-index-badge">#{chunk.chunk_index ?? index}</span>
-                          <span className="chunk-dim">{chunk.embedding_dimension || 768}d</span>
-                          {chunk.hierarchy_path && (
-                            <span className="chunk-path-badge">🌳 {chunk.hierarchy_path}</span>
-                          )}
-                        </div>
-                        <div className="chunk-text-content">{chunk.text}</div>
-                      </div>
-                    ))
-                  )}
-                  {!chunksLoading && chunks.length === 0 && (
-                    <p className="muted empty-chunks">此文档暂无分块，请重新切片或检查索引状态。</p>
-                  )}
-                </div>
-              </div>
+              <DocumentMetadataEditor
+                kbId={kb.id} document={activeDoc} token={token} notify={notify}
+                onSaved={(doc) => { setActiveDoc(doc); loadDocuments?.(currentKbId); }}
+              />
+              <ChunkList
+                kbId={kb.id} documentId={activeDoc.id} chunks={chunks} loading={chunksLoading}
+                canEdit token={token} notify={notify}
+                onChange={(next) => { setChunks(next); loadDocuments?.(currentKbId); }}
+              />
             </div>
           ) : (
             <div className="workspace-empty-detail">

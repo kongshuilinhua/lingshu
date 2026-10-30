@@ -91,6 +91,51 @@ def _drain(generator):
             return stop.value
 
 
+def _json_safe(value):
+    """把上下文值转成可存进 JSON 列的形式。
+
+    HumanApproval 暂停时要把运行上下文快照落库，恢复时再读回来接着跑。
+    上下文里绝大多数是 dict/list/str/num/bool，但有两类例外：
+    - `uploads` 是 ORM 对象，单独按 id 存（见 `_pause_snapshot`）；
+    - `_skill_metadata` / `_mcp_metadata` 等以下划线开头的内部缓存，恢复时会重新装配。
+    无法序列化的值一律丢弃，宁可少恢复一点也不能让暂停本身失败。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items() if not str(key).startswith("_")}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return None
+
+
+def _pause_snapshot(runtime_workflow: list[dict], context: dict, node: dict, mode: str, executed: set[str], node_index: int) -> dict:
+    """构造 HumanApproval 暂停时的恢复快照。
+
+    保存「暂停节点之后的位置」而不是节点本身：恢复时要跳过这个已经审批过的节点，
+    直接执行下一跳。这样审批语义是「放行」，不会把同一个审批点再问一次。
+
+    `executed` 必须由调用方传入真实集合，不能从 `workflow[:next_index]` 推断——
+    Condition 跳转会让实际执行过的节点与位置区间不一致，推断出来的集合会让恢复后的
+    防环判断失效。
+    """
+    workflow = runtime_workflow
+    next_id = resolve_next(node, {"paused": True}, context)
+    # 索引必须由调用方传入，不能用 `workflow.index(node)`：那是按「值相等」找，
+    # 图里两个结构相同的节点会命中第一个，恢复时就从错误的位置接着跑。
+    current_index = node_index if 0 <= node_index < len(workflow) else 0
+    next_index = advance(current_index, next_id, workflow)
+    return {
+        "mode": mode,
+        "workflow": _json_safe(workflow),
+        "context": _json_safe(context),
+        "upload_ids": [str(item.get("id")) for item in context.get("uploads") or [] if getattr(item, "id", None)],
+        "next_index": next_index,
+        "executed": sorted(executed),
+        "paused_node_id": node.get("id"),
+    }
+
+
 def default_workflow() -> list[dict]:
     """
     提供全平台默认的线性编排工作流图元。
@@ -175,6 +220,7 @@ class WorkflowRunner:
         thinking_enabled: bool | None = None,
         search_enabled: bool | None = None,
         attachments: list[dict] | None = None,
+        workflow_override: list[dict] | None = None,
         _agent_call_stack: list[int] | None = None,
         current_message_id: int | None = None,
         model_override: dict | None = None,
@@ -187,6 +233,9 @@ class WorkflowRunner:
             SQLAlchemy 事务边界（db.commit），确保即使中间某个节点崩溃，前面的运行步骤依旧能持久化，为系统可观测性留下链路 Trace。
         """
         runtime = self._runtime_agent(agent, mode, chat_session.user_id, model_override)
+        if workflow_override:
+            # 试运行：用调用方给的节点替换掉智能体自带的流程，其余配置不变
+            runtime.workflow = workflow_override
         self.runtime = runtime
         upload_ids = [str(item.get("id")) for item in attachments or [] if item.get("id")]
         uploads = get_workspace_uploads(self.db, workspace_id=agent.workspace_id, upload_ids=upload_ids)
@@ -373,14 +422,50 @@ class WorkflowRunner:
         )
         self.runtime = runtime
         steps: list[dict] = []
-        executed: set[str] = set()
-        i = 0
+        try:
+            yield from self._advance_workflow(
+                runtime=runtime,
+                run=run,
+                context=context,
+                steps=steps,
+                executed=set(),
+                start_index=0,
+                user_message=user_message,
+                chat_session=chat_session,
+                async_memory=async_memory,
+                mode=mode,
+            )
+        except Exception as exc:
+            # 🛡️ 失败收尾必须在这里做：`run` 是本函数创建的局部对象，路由层拿不到，
+            # 它那段 `if run is not None: run.status = "failed"` 永远是空操作。
+            # 不在这里标记，任何报错的对话在 `GET /api/runs/{id}` 里都永远显示 running，
+            # 排查时连「这次跑失败了」都看不出来。
+            self.db.rollback()
+            try:
+                run.status = "failed"
+                # Run 表没有 error 列，失败原因进日志；前端拿到的是路由层抛出的错误事件
+                logger.warning("Workflow run %s failed: %s", run.id, exc)
+                run.completed_at = datetime.now(timezone.utc)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+            raise
+
+    def _advance_workflow(self, *, runtime, run, context, steps, executed, start_index, user_message, chat_session, async_memory, mode: str):
+        """
+        游标推进执行循环（首次运行与 HumanApproval 恢复共用）。
+
+        产出 step / token / runtime / complete 等事件；遇到 HumanApproval 时写恢复快照、
+        把 Run 置 paused 并直接返回（不产出 complete）。
+        """
+        i = start_index
         while i < len(runtime.workflow):
             node = runtime.workflow[i]
             # 🛡️ 防环与防失控:已执行节点不再进入(Condition 死循环)+ 全局步数硬墙
             if node.get("id") in executed or len(executed) >= MAX_GRAPH_STEPS:
                 break
             executed.add(node.get("id"))
+            node_started = time.monotonic()
             if node["type"] == "LLM":
                 # LLM 节点流式输出专用生成器中继
                 output = yield from self._stream_llm_node(runtime, node, context)
@@ -388,6 +473,7 @@ class WorkflowRunner:
                 output = yield from self._tool_node(runtime, node, context, stream=True)
             else:
                 output = self._execute_node(runtime, node, context)
+            latency_ms = int((time.monotonic() - node_started) * 1000)
             if not steps:
                 self._inject_first_node_events(output, context)
             events = output.pop("events", [])
@@ -395,11 +481,15 @@ class WorkflowRunner:
             context.update(output)
             is_paused = bool(output.get("paused"))
             step = self._persist_step(run, node, user_message, output, status="paused" if is_paused else "succeeded")
+            if isinstance(step, RunStep):
+                step.latency_ms = latency_ms
+                self.db.commit()
             step_payload = {
                 "id": step.id,
                 "node_id": step.node_id,
                 "node_type": step.node_type,
                 "status": step.status,
+                "latency_ms": latency_ms,
                 "output": output,
                 "events": events,
                 "events_streamed": events_streamed,
@@ -408,8 +498,11 @@ class WorkflowRunner:
             yield {"event": "step", "step": step_payload}
             if is_paused:
                 run.status = "paused"
+                # 暂停时保存恢复快照：上下文（含已检索的证据与工具结果）、工作流、下一跳。
+                # 恢复接口据此从暂停点继续执行，而不是从头重跑。
+                run.resume_state = _pause_snapshot(runtime.workflow, context, node, mode, executed, i)
                 self.db.commit()
-                yield {"event": "paused", "data": {"node_id": node.get("id"), "prompt": output.get("approval_prompt")}}
+                yield {"event": "paused", "data": {"run_id": run.id, "node_id": node.get("id"), "prompt": output.get("approval_prompt")}}
                 return
             next_id = resolve_next(node, output, context)
             i = advance(i, next_id, runtime.workflow)
@@ -427,6 +520,7 @@ class WorkflowRunner:
             )
         run.status = "succeeded"
         run.completed_at = datetime.now(timezone.utc)
+        run.resume_state = {}
         self.db.commit()
         yield {
             "event": "complete",
@@ -442,6 +536,57 @@ class WorkflowRunner:
                 "event": "memory_compaction",
                 "data": compaction_event_copy,
             }
+
+    def resume_events(self, *, run: Run, agent: Agent, chat_session: ChatSession, user_message: str, approved: bool = True):
+        """
+        从 HumanApproval 暂停点继续执行。
+
+        🎯 与「重新发起一次对话」的区别：
+            恢复复用暂停时保存的上下文快照（RAG 证据、工具结果、查询改写、变量），
+            只从审批节点的下一跳继续，不会重复检索、重复调工具，也不会重新问一次审批。
+
+        🛡️ 审批拒绝时不执行后续节点，Run 置 rejected，并清空恢复快照防止重复恢复。
+        """
+        state = dict(run.resume_state or {})
+        if not state:
+            raise ValueError("该运行没有可恢复的暂停状态。")
+        if run.status != "paused":
+            raise ValueError("只有暂停中的运行可以恢复。")
+        if not approved:
+            run.status = "rejected"
+            run.completed_at = datetime.now(timezone.utc)
+            run.resume_state = {}
+            self.db.commit()
+            yield {"event": "rejected", "run": run}
+            return
+
+        mode = state.get("mode") or "draft"
+        runtime = self._runtime_agent(agent, mode, chat_session.user_id, None)
+        workflow = state.get("workflow")
+        if isinstance(workflow, list) and workflow:
+            runtime.workflow = workflow
+        self.runtime = runtime
+
+        context = dict(state.get("context") or {})
+        # uploads 是 ORM 对象，快照里只存了 id；恢复时按工作区重新取回（同时做归属校验）
+        upload_ids = [str(item) for item in state.get("upload_ids") or []]
+        context["uploads"] = get_workspace_uploads(self.db, workspace_id=agent.workspace_id, upload_ids=upload_ids)
+        run.status = "running"
+        self.db.commit()
+
+        steps: list[dict] = []
+        yield from self._advance_workflow(
+            runtime=runtime,
+            run=run,
+            context=context,
+            steps=steps,
+            executed=set(state.get("executed") or []),
+            start_index=int(state.get("next_index") or 0),
+            user_message=user_message,
+            chat_session=chat_session,
+            async_memory=True,
+            mode=mode,
+        )
 
     def _start_run(
         self,
@@ -575,6 +720,22 @@ class WorkflowRunner:
         # ==========================================
         if node_type == "Knowledge":
             effective_source = "request" if "rag_enabled_request" in context else "agent_default"
+            # 节点级 top_k 优先于 agent 级检索配置：工作流作者显式写了就以它为准，
+            # 未写（默认工作流不写）则继承 agent 的 rag.top_k。
+            # 旧实现写的是 `context.get("rag_top_k") or node.config["top_k"]`，
+            # 而 rag_top_k 在 _start_run 里总会被赋值，节点配置因此永远读不到。
+            node_top_k = (node.get("config") or {}).get("top_k")
+            effective_top_k = int(node_top_k or context.get("rag_top_k") or 4)
+            run_config = context.get("rag_config") or {}
+            if node_top_k:
+                # 只覆盖本轮检索的最终截断数，不改动 agent 级其余参数
+                run_config = {**run_config, "top_k": effective_top_k}
+            node_filter = (node.get("config") or {}).get("metadata_filter")
+            if node_filter and node_filter.get("conditions"):
+                # 条件值可写 {{变量}}：例如先用参数提取拿到「产品」，再只在该产品的文档里检索
+                from core.runtime.flow_nodes import render_template
+
+                run_config = {**run_config, "metadata_filter": render_template(node_filter, context)}
             # 若用户强制关闭了 RAG 功能，直接平滑退出并吐出空结果，避免任何多余的嵌入和检索开销
             if not context.get("rag_enabled", True):
                 status = {
@@ -582,7 +743,7 @@ class WorkflowRunner:
                     "effective_source": effective_source,
                     "knowledge_base_ids": [],
                     "query": context["input"],
-                    "top_k": int(context.get("rag_top_k") or node.get("config", {}).get("top_k", 4)),
+                    "top_k": effective_top_k,
                     "matched_chunks": 0,
                     "sources_emitted": False,
                     "reason": "disabled",
@@ -605,7 +766,7 @@ class WorkflowRunner:
                     "retrieval_mode": "on_demand",
                     "knowledge_base_ids": kb_ids,
                     "query": context["input"],
-                    "top_k": int(context.get("rag_top_k") or node.get("config", {}).get("top_k", 4)),
+                    "top_k": effective_top_k,
                     "matched_chunks": 0,
                     "sources_emitted": False,
                     "reason": "on_demand",
@@ -613,7 +774,10 @@ class WorkflowRunner:
                 }
                 return {"sources": [], "rag_enabled": True, "rag_status": status, "events": [{"event": "rag_status", "data": status}]}
 
-            rag_result = self._retrieve(agent, kb_ids, context.get("rewritten_query") or context["input"], context)
+            rag_result = self._retrieve(
+                agent, kb_ids, context.get("rewritten_query") or context["input"], context,
+                config=run_config if (node_top_k or "metadata_filter" in run_config) else None,
+            )
             sources = rag_result.sources
             status = {**rag_result.status, "effective_source": effective_source}
 
@@ -696,7 +860,7 @@ class WorkflowRunner:
         if node_type == "LLM":
             if context.get("draft"):
                 return self._llm_output(agent, context, context["draft"])
-            messages = self._llm_messages(agent, context)
+            messages = self._llm_messages(agent, context, node)
             draft = self.provider.chat(
                 messages,
                 model=agent.model,
@@ -719,6 +883,53 @@ class WorkflowRunner:
         if node_type == "HumanApproval":
             config = node.get("config") or {}
             return {"paused": True, "approval_prompt": config.get("prompt", "请确认是否继续执行")}
+        # ==========================================
+        # 扩展节点：HTTP / 代码 / 变量赋值 / 参数提取 / 问题分类
+        # 逻辑放在 core/runtime/flow_nodes.py，这里只做分发
+        # ==========================================
+        if node_type in {"HTTP", "Code", "VariableAssign", "VariableAggregate", "ParameterExtract", "Classifier"}:
+            from core.runtime import flow_nodes
+
+            if node_type == "HTTP":
+                return flow_nodes.run_http_node(node, context)
+            if node_type == "Code":
+                return flow_nodes.run_code_node(node, context)
+            if node_type == "VariableAssign":
+                return flow_nodes.run_variable_assign(node, context)
+            if node_type == "VariableAggregate":
+                return flow_nodes.run_variable_aggregate(node, context)
+            if node_type == "ParameterExtract":
+                return flow_nodes.run_parameter_extract(node, context, provider=self.provider, agent=agent)
+            if node_type == "Classifier":
+                return flow_nodes.run_classifier(node, context, provider=self.provider, agent=agent)
+        if node_type == "Loop":
+            from core.runtime import flow_nodes
+
+            # 循环体走非流式节点分发：循环内部的中间结果不推给前端，
+            # 由循环之后的 LLM 节点统一输出最终回答。
+            def _execute_body(body_node, body_context):
+                return self._execute_node(agent, body_node, body_context)
+
+            def _parallel_executor():
+                # 并行迭代的每个线程各开一个数据库会话：Session 不是线程安全的
+                from core.db.session import SessionLocal
+
+                db = SessionLocal()
+                runner = WorkflowRunner(db)
+                runner.runtime = getattr(self, "runtime", None)
+                return (lambda body_node, body_context: runner._execute_node(agent, body_node, body_context)), db.close
+
+            return flow_nodes.run_loop_node(node, context, execute=_execute_body, execute_factory=_parallel_executor)
+        if node_type == "Agent":
+            from core.runtime import flow_nodes
+
+            return flow_nodes.run_agent_node(
+                node,
+                context,
+                db=self.db,
+                user_id=context.get("user_id") or 0,
+                call_stack=list(context.get("agent_call_stack") or []),
+            )
         return {}
 
     def _stream_llm_node(self, agent, node: dict, context: dict):
@@ -747,7 +958,7 @@ class WorkflowRunner:
             for index in range(0, len(draft), 24):
                 yield {"event": "token", "content": draft[index : index + 24]}
             return self._llm_output(agent, context, draft)
-        messages = self._llm_messages(agent, context)
+        messages = self._llm_messages(agent, context, node)
         native_thinking = bool(context.get("thinking_enabled")) and (context.get("thinking_status") or {}).get("type") == "native"
         chunks = []
         for frame in self.provider.chat_stream(
@@ -793,6 +1004,13 @@ class WorkflowRunner:
         if context.get("rag_refusal"):
             return {}
         bound_tools = self._runtime_tools(agent, node)
+        # 节点级工具白名单：工作流作者在 Tool 节点上显式写了 tools 就只给这些工具，
+        # 空列表（默认工作流的写法）表示不限制、沿用 agent 绑定的全部工具。
+        # 旧实现完全不读 node.config["tools"]，节点上填什么都是空操作。
+        node_tool_names = (node.get("config") or {}).get("tools") or []
+        if node_tool_names:
+            node_tool_names = {str(name) for name in node_tool_names}
+            bound_tools = [tool for tool in bound_tools if tool.name in node_tool_names]
         if not context.get('search_enabled', bool((agent.settings.get('tool_policy') or {}).get('web_search_enabled'))):
             bound_tools = [tool for tool in bound_tools if tool.type != 'builtin_search']
         tool_policy = (agent.settings.get("tool_policy") or {})
@@ -1038,7 +1256,7 @@ class WorkflowRunner:
             yield {"event": "token", "content": text}
         return "".join(chunks)
 
-    def _llm_messages(self, agent, context: dict) -> list[dict]:
+    def _llm_messages(self, agent, context: dict, node: dict | None = None) -> list[dict]:
         """
         极其精密的全局系统 System Prompt / User Message 的“编织与熔接引擎”。
 
@@ -1132,10 +1350,19 @@ class WorkflowRunner:
         if len(system_content) > max_system_chars:
             system_content = system_content[:max_system_chars] + "\n\n[上下文已截断以避免超出模型上下文窗口限制]"
             
+        # LLM 节点可写自己的提示词（支持 {{变量}}）：替换掉这一步发给模型的用户消息。
+        # 没有它，循环里每一轮都只会重复回答用户原话，迭代就没法「逐项处理」。
+        node_prompt = str(((node or {}).get("config") or {}).get("prompt") or "").strip()
+        if node_prompt:
+            from core.runtime.flow_nodes import render_template
+
+            user_turn = str(render_template(node_prompt, context))
+        else:
+            user_turn = context["input"]
         return [
             {"role": "system", "content": system_content},
             *context.get('conversation_history', []),
-            {"role": "user", "content": self._user_content(context["input"], context.get("uploads", []))},
+            {"role": "user", "content": self._user_content(user_turn, context.get("uploads", []))},
         ]
 
     def _llm_output(self, agent, context: dict, draft: str) -> dict:
@@ -1435,13 +1662,17 @@ class WorkflowRunner:
             ]
         return list(kb_ids)
 
-    def _retrieve(self, agent, kb_ids: list[int], query: str, context: dict):
-        """执行 RAG 向量混合检索与重排重估；自纠模式默认关闭，关闭时仍走原生单趟路径。"""
+    def _retrieve(self, agent, kb_ids: list[int], query: str, context: dict, *, config: dict | None = None):
+        """执行 RAG 向量混合检索与重排重估；自纠模式默认关闭，关闭时仍走原生单趟路径。
+
+        `config` 用于节点级检索参数覆盖（如 Knowledge 节点自带的 top_k）；
+        为 None 时沿用本轮 agent 级 rag_config。
+        """
         retrieve_kwargs = {
             "workspace_id": agent.workspace_id,
             "knowledge_base_ids": kb_ids,
             "query": query,
-            "config": context.get("rag_config") or {},
+            "config": config if config is not None else (context.get("rag_config") or {}),
             "runtime_config": getattr(agent, "runtime_config", None),
         }
         if get_settings().rag_self_correct:
@@ -1749,17 +1980,6 @@ class WorkflowRunner:
         context["confidence"] = result.confidence
         context["route"] = result.route
         context["query_understanding_event"] = result.event_payload()
-
-    @staticmethod
-    def _history_turns(memory_summary: str) -> list[dict]:
-        """把 session memory 解析成 [{user, assistant}] 轮次列表（兼容三种格式），失败则空。"""
-        if not memory_summary.strip():
-            return []
-        _, turns = parse_memory(memory_summary)
-        return turns
-
-    def _session_memory(self, session_id: int) -> SessionMemory | None:
-        return self.db.query(SessionMemory).filter(SessionMemory.session_id == session_id).first()
 
 
 def compact_session_memory(

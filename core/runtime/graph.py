@@ -107,12 +107,15 @@ def eval_condition(spec: dict | None, context: dict, output: dict | None = None)
 def resolve_next(node: dict, output: dict, context: dict) -> str | None:
     """解析节点执行后的下一跳 id。返回 None 表示走列表顺序下一个(线性兼容)。
 
-    - Condition 节点:按 branches 顺序评估,首个命中的分支 next 胜出,否则 default。
+    - Condition / Classifier 节点:按分支顺序评估,首个命中的分支 next 胜出,否则 default。
+    - 节点输出里显式给了 ``_next`` 时优先用它(节点自己算出下一跳,如多路分类器)。
     - 普通节点:显式 ``next`` 字段(字符串)优先,缺省则 None。
     """
     node_type = node.get("type")
     config = node.get("config") or {}
-    if node_type == "Condition":
+    if isinstance(output, dict) and isinstance(output.get("_next"), str):
+        return output["_next"]
+    if node_type in {"Condition", "Classifier"}:
         for branch in config.get("branches") or []:
             if not isinstance(branch, dict):
                 continue
@@ -149,7 +152,10 @@ def validate_graph(nodes: list[dict]) -> list[str]:
     - 所有 next / Condition 分支 / default 指向的 id 必须存在(无悬空边)。
     """
     errors: list[str] = []
-    allowed = {"Start", "LLM", "Knowledge", "Tool", "Answer", "Condition", "HumanApproval"}
+    allowed = {
+        "Start", "LLM", "Knowledge", "Tool", "Answer", "Condition", "HumanApproval",
+        "HTTP", "Code", "VariableAssign", "VariableAggregate", "ParameterExtract", "Classifier", "Loop", "Agent",
+    }
     ids = [n.get("id") for n in nodes if isinstance(n, dict)]
     seen_types = {n.get("type") for n in nodes if isinstance(n, dict)}
 
@@ -164,6 +170,26 @@ def validate_graph(nodes: list[dict]) -> list[str]:
     dupes = [i for i in ids if ids.count(i) > 1]
     if dupes:
         errors.append("Duplicate node id: " + ", ".join(sorted(set(dupes))))
+
+    # 循环体是独立的子图：递归校验，但子图里允许没有 Start/Answer
+    for node in nodes:
+        if isinstance(node, dict) and node.get("type") == "Loop":
+            body = (node.get("config") or {}).get("body") or []
+            if not isinstance(body, list) or not body:
+                errors.append(f"Loop '{node.get('id')}' requires a non-empty body")
+                continue
+            body_types = {item.get("type") for item in body if isinstance(item, dict)}
+            if body_types & {"Start", "Answer"}:
+                errors.append(f"Loop '{node.get('id')}' body cannot contain Start or Answer")
+            body_ids = {item.get("id") for item in body if isinstance(item, dict)}
+            if len(body_ids) != len(body):
+                errors.append(f"Loop '{node.get('id')}' has duplicate body node ids")
+            for item in body:
+                if not isinstance(item, dict):
+                    continue
+                nxt = item.get("next")
+                if isinstance(nxt, str) and nxt not in body_ids:
+                    errors.append(f"Loop body node '{item.get('id')}' has dangling next -> '{nxt}'")
 
     id_set = set(ids)
     # 悬空边:任意 next / Condition 分支 / default 必须命中已存在的 id

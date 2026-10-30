@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 # 🎯 系统硬编码默认的 OpenAI 兼容模式 API 端点（指向阿里云百炼/通义千问兼容接口）
 DASHSCOPE_COMPATIBLE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 OPENAI_COMPATIBLE_DEFAULT_BASE = DASHSCOPE_COMPATIBLE_BASE
+# `core/config.py` 里 `OPENAI_API_BASE` 的出厂默认值。它与上面的常量不是同一个地址，
+# 早先只拿 DASHSCOPE_COMPATIBLE_BASE 做「用户没改过 base」的判据，
+# 于是默认配置永远被判成「用户显式指定了 SiliconFlow」，只填 DASHSCOPE_API_KEY
+# 时 key 取百炼、地址仍打 SiliconFlow，必然 401。两个默认都要认。
+SILICONFLOW_DEFAULT_BASE = "https://api.siliconflow.cn/v1"
 
 # 🛡️ 批量 embedding 的瞬时故障重试策略。
 # 只对网络类、5xx、以及语义上属瞬时的 408/429 重试；其余 4xx
@@ -187,7 +192,6 @@ class OpenAICompatibleProvider:
     def __init__(self) -> None:
         # 🛡️ 调试标记：记录上一次交互是否由 Mock 仿真模块接管，便于单元测试进行状态断言
         self.last_chat_mock = False
-        self.last_embed_mock = False
         # 🛡️ 三态熔断器：每个模型独立追踪健康状态
         self._breakers: dict[str, CircuitBreaker] = {}
 
@@ -397,11 +401,9 @@ class OpenAICompatibleProvider:
         settings = get_settings()
         api_key = self._api_key(settings, runtime_config, purpose="embedding")
         if settings.mock_llm:
-            self.last_embed_mock = True
             return self._mock_embed(text)
         if not api_key:
             raise RuntimeError("Embedding API key is not configured")
-        self.last_embed_mock = False
 
         model = settings.openai_embedding_model
         # 🎯 缓存分层：query 向量化是热点读路径，命中则直接返回，省一次最贵的外部 API 调用。
@@ -436,12 +438,10 @@ class OpenAICompatibleProvider:
             return []
         settings = get_settings()
         if settings.mock_llm:
-            self.last_embed_mock = True
             return [self._mock_embed(text) for text in texts]
         api_key = self._api_key(settings, runtime_config, purpose="embedding")
         if not api_key:
             raise RuntimeError("Embedding API key is not configured")
-        self.last_embed_mock = False
         # 🛡️ 批量上限默认取配置（DashScope text-embedding-v3 上限 10），避免超限 400
         effective_batch = max(1, batch_size if batch_size is not None else settings.embedding_batch_size)
         url = self._api_base(settings, runtime_config, purpose="embedding").rstrip("/") + "/embeddings"
@@ -601,7 +601,14 @@ class OpenAICompatibleProvider:
         ):
             return settings.deepseek_api_base
         base = (settings.openai_api_base or "").strip()
-        if settings.dashscope_api_key and (not base or base.rstrip("/") == OPENAI_COMPATIBLE_DEFAULT_BASE.rstrip("/")):
+        # 「用户没改过 base」有两种可能：留空，或仍是出厂默认的 SiliconFlow。
+        # 只看 DASHSCOPE_COMPATIBLE_BASE 会漏掉后者（那也是未修改），
+        # 导致只填了 DASHSCOPE_API_KEY 的用户拿百炼的 key 去打 SiliconFlow。
+        unmodified = not base or base.rstrip("/") in {
+            OPENAI_COMPATIBLE_DEFAULT_BASE.rstrip("/"),
+            SILICONFLOW_DEFAULT_BASE.rstrip("/"),
+        }
+        if settings.dashscope_api_key and unmodified:
             return DASHSCOPE_COMPATIBLE_BASE
         return base or OPENAI_COMPATIBLE_DEFAULT_BASE
 

@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from api.deps import get_current_membership, get_current_user, require_manager
+from api.deps import get_current_membership, get_current_user, require_platform_manager
 from api.schemas import (
     ModelConfigRequest,
     ModelConfigUpdateRequest,
@@ -14,7 +14,7 @@ from api.schemas import (
 )
 from core.db.models import ModelConfig, User, WorkspaceMember
 from core.db.session import get_db
-from core.security.permissions import can_manage
+from core.security.permissions import can_manage_platform
 from core.services.bootstrap import ensure_default_models
 from core.services.models import (
     create_model_config,
@@ -48,7 +48,7 @@ def list_models(
     ensure_default_models(db)
     query = db.query(ModelConfig)
     if include_disabled:
-        if not can_manage(membership.role):
+        if not can_manage_platform(membership):
             raise HTTPException(status_code=403, detail="Admin role required")
     else:
         query = query.filter(ModelConfig.enabled.is_(True))
@@ -57,7 +57,7 @@ def list_models(
 
 
 @router.post("/api/admin/models")
-def create_model(request: ModelConfigRequest, _: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
+def create_model(request: ModelConfigRequest, _: WorkspaceMember = Depends(require_platform_manager), db: Session = Depends(get_db)):
     if db.query(ModelConfig).filter(ModelConfig.model_name == request.model_name).first():
         raise HTTPException(status_code=409, detail="Model already exists")
     model = create_model_config(db, request.model_dump())
@@ -65,7 +65,7 @@ def create_model(request: ModelConfigRequest, _: WorkspaceMember = Depends(requi
 
 
 @router.patch("/api/admin/models/{model_id}")
-def patch_model(model_id: int, request: ModelConfigUpdateRequest, _: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
+def patch_model(model_id: int, request: ModelConfigUpdateRequest, _: WorkspaceMember = Depends(require_platform_manager), db: Session = Depends(get_db)):
     model = db.get(ModelConfig, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -79,7 +79,7 @@ def patch_model(model_id: int, request: ModelConfigUpdateRequest, _: WorkspaceMe
 
 
 @router.delete("/api/admin/models/{model_id}")
-def delete_model(model_id: int, _: WorkspaceMember = Depends(require_manager), db: Session = Depends(get_db)):
+def delete_model(model_id: int, _: WorkspaceMember = Depends(require_platform_manager), db: Session = Depends(get_db)):
     model = db.get(ModelConfig, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")

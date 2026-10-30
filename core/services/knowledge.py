@@ -24,7 +24,7 @@ from core.services.uploads import (
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_KNOWLEDGE_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".pdf", ".docx"}
+SUPPORTED_KNOWLEDGE_SUFFIXES = {".txt", ".md", ".markdown", ".csv", ".pdf", ".docx", ".xlsx", ".pptx"}
 SUPPORTED_TEXT_TYPES = {"text/plain", "text/markdown", "application/markdown", "text/csv"}
 SUPPORTED_FILE_TYPES = DOC_TYPES
 
@@ -68,6 +68,9 @@ def knowledge_base_summary(kb: KnowledgeBase, document_count: int = 0) -> dict:
         "description": kb.description,
         "document_count": document_count,
         "enabled": bool(getattr(kb, "enabled", True)),
+        # 前端按它判断启停/删除按钮该不该给：只看角色的话，普通成员会对
+        # 别人的知识库看到可用按钮，点下去后端 403，界面只表现为「没反应」
+        "created_by": getattr(kb, "created_by", None),
         # updated_at 为 NULL 时回退 created_at（兼容未跑回填的老库）。
         "updated_at": (
             (getattr(kb, "updated_at", None) or kb.created_at).isoformat()
@@ -94,6 +97,7 @@ def document_payload(document: KnowledgeDocument, chunk_count: int = 0) -> dict:
         "text_preview": text_preview,
         "error_message": getattr(document, "error_message", "") or None,
         "segment_config": getattr(document, "segment_config", None),
+        "metadata": getattr(document, "doc_metadata", None) or {},
         "created_at": document.created_at.isoformat() if document.created_at else None,
         "updated_at": document.updated_at.isoformat() if getattr(document, "updated_at", None) else None,
     }
@@ -337,8 +341,15 @@ def index_document(
         vector_store_module.vector_store.delete(
             filters={"workspace_id": workspace_id, "knowledge_base_id": kb.id, "document_id": document.id}
         )
-        db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).delete(synchronize_session=False)
-        db.query(KnowledgeParentChunk).filter(KnowledgeParentChunk.document_id == document.id).delete(synchronize_session=False)
+        # 按主键删，不要 `DELETE ... WHERE document_id = ?`：后者在二级索引上加间隙锁，
+        # 新文档没有旧切片时锁的是空区间，同时上传多篇文档的后台任务会各持一段间隙锁、
+        # 再往同一区间插入，互相等待死锁（实测并发 6 篇只成功 1 篇）。先用不加锁的快照读取 id。
+        chunk_ids = [row.id for row in db.query(KnowledgeChunk.id).filter(KnowledgeChunk.document_id == document.id)]
+        if chunk_ids:
+            db.query(KnowledgeChunk).filter(KnowledgeChunk.id.in_(chunk_ids)).delete(synchronize_session=False)
+        parent_ids = [row.id for row in db.query(KnowledgeParentChunk.id).filter(KnowledgeParentChunk.document_id == document.id)]
+        if parent_ids:
+            db.query(KnowledgeParentChunk).filter(KnowledgeParentChunk.id.in_(parent_ids)).delete(synchronize_session=False)
 
     document.status = "indexing"
     document.error_message = ""
@@ -431,6 +442,128 @@ def list_document_chunks(db: Session, *, document_id: int) -> list[dict]:
         }
         for chunk in chunks
     ]
+
+
+# ── 单条切片维护 ──────────────────────────────────────────────
+# 召回测试发现某条切片不对时，不必整篇重切：直接改这一条、删这一条或补一条。
+# 一条切片同时存在三处——KnowledgeChunk（正文与 BM25 词表）、向量库、父块表（仅新增时），
+# 改动要三处一起改。BM25 与检索缓存都以文档 updated_at 作版本，碰一下文档就整体失效。
+
+
+def _write_chunk_vector(document: KnowledgeDocument, chunk: KnowledgeChunk, *, runtime_config: dict | None = None) -> None:
+    from core.services.rag import _tokenize
+
+    vector = OpenAICompatibleProvider().embed(
+        _embed_text(_contextual_prefix(document.title or document.filename, chunk.section), chunk.text),
+        runtime_config=runtime_config,
+    )
+    metadata = {
+        **{key: value for key, value in (chunk.metadata_ or {}).items() if key != "tokens"},
+        "workspace_id": chunk.workspace_id,
+        "knowledge_base_id": chunk.knowledge_base_id,
+        "document_id": chunk.document_id,
+        "chunk_id": chunk.vector_id,
+        "parent_id": chunk.parent_id,
+        "filename": document.filename,
+        "title": chunk.title or document.title or document.filename,
+        "page": chunk.page,
+        "section": chunk.section or "",
+        "content_hash": chunk.content_hash,
+    }
+    vector_store_module.vector_store.upsert(chunk.vector_id, vector, chunk.text, metadata)
+    chunk.metadata_ = {**metadata, "tokens": _tokenize(chunk.text)}
+    chunk.embedding_dimension = len(vector)
+    chunk.embedding_model = get_settings().openai_embedding_model
+
+
+def _touch_document(db: Session, document: KnowledgeDocument) -> None:
+    from datetime import datetime, timezone
+
+    from core.services.rag import invalidate_bm25_cache
+
+    document.chunk_count = db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id).count()
+    document.updated_at = datetime.now(timezone.utc)
+    invalidate_bm25_cache(document.knowledge_base_id)
+
+
+def update_chunk(db: Session, *, document: KnowledgeDocument, chunk: KnowledgeChunk, text: str) -> KnowledgeChunk:
+    text = text.strip()
+    if not text:
+        raise KnowledgeDocumentError("切片内容不能为空")
+    chunk.text = text
+    chunk.content_hash = _hash(text)
+    _write_chunk_vector(document, chunk)
+    _touch_document(db, document)
+    db.commit()
+    db.refresh(chunk)
+    return chunk
+
+
+def create_chunk(db: Session, *, document: KnowledgeDocument, text: str) -> KnowledgeChunk:
+    """补一条切片：排在文档末尾，自成一个父块（父子检索时能回捞到它自己）。"""
+    import uuid
+
+    text = text.strip()
+    if not text:
+        raise KnowledgeDocumentError("切片内容不能为空")
+    last = (
+        db.query(KnowledgeChunk.chunk_index)
+        .filter(KnowledgeChunk.document_id == document.id)
+        .order_by(KnowledgeChunk.chunk_index.desc())
+        .first()
+    )
+    vector_id = f"kb{document.knowledge_base_id}-doc{document.id}-manual-{uuid.uuid4().hex[:12]}"
+    chunk = KnowledgeChunk(
+        workspace_id=_document_workspace_id(db, document),
+        knowledge_base_id=document.knowledge_base_id,
+        document_id=document.id,
+        chunk_index=(last[0] + 1) if last else 0,
+        text=text,
+        vector_id=vector_id,
+        parent_id=vector_id,
+        chunk_id=vector_id,
+        title=document.title or document.filename,
+        content_hash=_hash(text),
+        metadata_={},
+    )
+    db.add(chunk)
+    db.add(KnowledgeParentChunk(
+        workspace_id=chunk.workspace_id,
+        knowledge_base_id=document.knowledge_base_id,
+        document_id=document.id,
+        parent_id=vector_id,
+        text=text,
+        content_hash=chunk.content_hash,
+    ))
+    _write_chunk_vector(document, chunk)
+    db.flush()
+    _touch_document(db, document)
+    db.commit()
+    db.refresh(chunk)
+    return chunk
+
+
+def delete_chunk(db: Session, *, document: KnowledgeDocument, chunk: KnowledgeChunk) -> None:
+    vector_store_module.vector_store.delete(filters={"chunk_id": chunk.vector_id})
+    # 父块只在没有其它子块引用时才删，否则同一父块下的兄弟切片会丢上下文
+    siblings = (
+        db.query(KnowledgeChunk)
+        .filter(KnowledgeChunk.document_id == document.id, KnowledgeChunk.parent_id == chunk.parent_id, KnowledgeChunk.id != chunk.id)
+        .count()
+    )
+    if not siblings:
+        db.query(KnowledgeParentChunk).filter(
+            KnowledgeParentChunk.document_id == document.id, KnowledgeParentChunk.parent_id == chunk.parent_id
+        ).delete(synchronize_session=False)
+    db.delete(chunk)
+    db.flush()
+    _touch_document(db, document)
+    db.commit()
+
+
+def _document_workspace_id(db: Session, document: KnowledgeDocument) -> int:
+    kb = db.get(KnowledgeBase, document.knowledge_base_id)
+    return kb.workspace_id
 
 
 # ── 切分基础设施：token 计长 + 结构保留归一化 + CN/EN 递归分隔符 ──────────────

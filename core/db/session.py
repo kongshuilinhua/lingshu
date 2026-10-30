@@ -123,6 +123,29 @@ def _run_compat_migrations() -> None:
     if "avatar_url" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''"))
+    # 记录用户上次进入的工作区，登录时据此签发 workspace_id。
+    # 不加外键：工作区被删时留个失效 id，读取方按「查不到就回落」处理。
+    _ensure_columns("users", {"last_active_workspace_id": "INTEGER"})
+    if "workflows" in table_names:
+        _ensure_columns("workflows", {"agent_id": "INTEGER"})
+        workflow_indexes = {index["name"] for index in inspector.get_indexes("workflows")}
+        if "ix_workflows_agent_id" not in workflow_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_workflows_agent_id ON workflows (agent_id)"))
+    if "knowledge_documents" in table_names:
+        _ensure_columns("knowledge_documents", {"doc_metadata": "JSON"})
+    if "sessions" in table_names:
+        # 触发器唤起的会话要能回溯到触发源；老库靠这里补列
+        _ensure_columns("sessions", {"trigger_id": "INTEGER"})
+        session_indexes = {index["name"] for index in inspector.get_indexes("sessions")}
+        if "ix_sessions_trigger_id" not in session_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_sessions_trigger_id ON sessions (trigger_id)"))
+    if "triggers" in table_names:
+        trigger_indexes = {index["name"] for index in inspector.get_indexes("triggers")}
+        if "ix_triggers_next_run_at" not in trigger_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_triggers_next_run_at ON triggers (next_run_at)"))
     if "agents" in table_names:
         agent_columns = {column["name"] for column in inspector.get_columns("agents")}
         if "model_id" not in agent_columns:
@@ -131,10 +154,16 @@ def _run_compat_migrations() -> None:
         if "user_model_config_id" not in agent_columns:
             with engine.begin() as connection:
                 connection.execute(text("ALTER TABLE agents ADD COLUMN user_model_config_id INTEGER"))
+        if "workflow_id" not in agent_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE agents ADD COLUMN workflow_id INTEGER"))
         agent_indexes = {index["name"] for index in inspector.get_indexes("agents")}
         if "ix_agents_user_model_config_id" not in agent_indexes:
             with engine.begin() as connection:
                 connection.execute(text("CREATE INDEX ix_agents_user_model_config_id ON agents (user_model_config_id)"))
+        if "ix_agents_workflow_id" not in agent_indexes:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE INDEX ix_agents_workflow_id ON agents (workflow_id)"))
         
         avatar_col = next((col for col in inspector.get_columns("agents") if col["name"] == "avatar"), None)
         if avatar_col and getattr(avatar_col["type"], "length", None) == 40:
@@ -190,10 +219,16 @@ def _run_compat_migrations() -> None:
             },
         )
     if "agent_settings" in table_names:
-        settings_columns = {column["name"] for column in inspector.get_columns("agent_settings")}
-        if "rag" not in settings_columns:
-            with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE agent_settings ADD COLUMN rag JSON DEFAULT '{}'"))
+        # 全走 _ensure_columns：早先单独手写了 rag 一列，后续加列时忘了同步，
+        # query_understanding 因此漏在老库上，create_agent 每次 INSERT 都报 Unknown column。
+        # 新列一律加进这个字典，别再另起分支。
+        _ensure_columns(
+            "agent_settings",
+            {
+                "rag": "JSON DEFAULT '{}'",
+                "query_understanding": "JSON DEFAULT '{}'",
+            },
+        )
     if "tools" in table_names:
         _ensure_columns(
             "tools",
@@ -418,6 +453,9 @@ def _run_compat_migrations() -> None:
                 "error_message": "TEXT DEFAULT ''",
                 "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                 "segment_config": "JSON",
+                "doc_metadata": "JSON",
+                # 异步入库的分步日志；老库缺这列时入库收尾写入必炸
+                "ingestion_log": "JSON",
             },
         )
 
@@ -556,6 +594,29 @@ def _run_compat_migrations() -> None:
             "sessions",
             {
                 "is_debug": "BOOLEAN DEFAULT false",
+            },
+        )
+    if "runs" in table_names:
+        _ensure_columns(
+            "runs",
+            {
+                # HumanApproval 的恢复快照；旧库无此列时补上
+                "resume_state": "JSON",
+            },
+        )
+    if "run_steps" in table_names:
+        _ensure_columns(
+            "run_steps",
+            {
+                "latency_ms": "INTEGER",
+            },
+        )
+    if "messages" in table_names:
+        _ensure_columns(
+            "messages",
+            {
+                # 助手回答对应的运行，供「运行详情」回看；旧消息为空
+                "run_id": "INTEGER",
             },
         )
     if "session_memory" in table_names:

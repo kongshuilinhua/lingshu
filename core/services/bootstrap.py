@@ -24,6 +24,17 @@ MVP_BUILTIN_TOOL_NAMES = {
     "web_reader",
     "wikipedia",
     "arxiv_search",
+    # 本地确定性工具：无外部依赖、结果可复现，注册进来即可用。
+    "password_generator",
+    "uuid_generator",
+    "diff_checker",
+    "character_counter",
+    # 免 Key 公网接口：结果来自真实服务，失败时显式报错而不是编造内容。
+    "qr_generator",
+    "currency_converter",
+    "weather_lookup",
+    "url_shortener",
+    "ip_lookup",
 }
 
 # 🎯 默认内置智能体节点编排流转流程（典型 ReAct/RAG 工作流骨架）
@@ -208,25 +219,16 @@ def create_first_user_workspace(db: Session, *, email: str, name: str, password:
 
 
 def create_default_workspace_user(db: Session, *, email: str, name: str, password: str) -> tuple[User, Workspace]:
-    """
-    在默认共享工作区中为新普通成员分配空间。
-
-    🎯 意图与工程大局观：
-        实现轻量化的成员并网。当默认工作区 `default` 已经自举就绪后，
-        后续注册的其他用户不会重复触发繁重的全量自举引擎（避免模型/工具表爆炸），
-        而是快速绑定到现有的 `default` 共享空间并归类为 `user` 角色。
-        这极大降低了并发环境下的锁竞争与数据库压力。
-    """
-    workspace = db.query(Workspace).filter(Workspace.slug == "default").first()
-    if not workspace:
-        workspace = db.query(Workspace).order_by(Workspace.id.asc()).first()
-    if not workspace:
-        return create_first_user_workspace(db, email=email, name=name, password=password)
+    """普通注册创建独立工作区；加入已有工作区只能通过邀请。"""
     user = User(email=email.lower(), name=name, password_hash=hash_password(password))
     db.add(user)
     db.flush()
-    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="user"))
+    workspace = Workspace(name=f"{name} 的工作台", slug=f"personal-{user.id}")
+    db.add(workspace)
+    db.flush()
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="admin"))
     db.commit()
+    ensure_template_agent(db, user, workspace)
     return user, workspace
 
 

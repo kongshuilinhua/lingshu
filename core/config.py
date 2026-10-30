@@ -58,10 +58,17 @@ class Settings(BaseSettings):
     skill_sandbox_image: str = Field(default="", alias="SKILL_SANDBOX_IMAGE")
     mcp_oauth_redirect_url: str = Field(default="", alias="MCP_OAUTH_REDIRECT_URL")
     mcp_client_metadata_url: str = Field(default="", alias="MCP_CLIENT_METADATA_URL")
-    # 邀请制注册开关：关闭时任何人可自由注册
+    # 工作区邀请 API 开关，不限制平台账号注册
     invite_api_enabled: bool = Field(default=False, alias="INVITE_API_ENABLED")
+    # 邀请链接有效期（小时）。不设过期的话，一条泄露的链接就是永久后门：
+    # 邀请表只记 created_at，到期与否在读取时按这个值现算，不加列也就无需迁移。
+    invite_expire_hours: int = Field(default=168, alias="INVITE_EXPIRE_HOURS")
     # 🛡️ CORS 白名单：限制前端来源，防止跨站请求伪造
     cors_origins: str = Field(default="http://127.0.0.1:5174,http://localhost:5174", alias="CORS_ORIGINS")
+    # 🛡️ 受信反代列表（逗号分隔的 IP/CIDR）。为空时只信私网与回环——
+    #    容器化部署下 nginx 正是私网地址。配错会让限流退化成全局配额，
+    #    或者让任何人伪造 X-Forwarded-For 换配额桶，两种都不能接受。
+    trusted_proxies: str = Field(default="", alias="LINGSHU_TRUSTED_PROXIES")
 
     # ── 数据库 ──────────────────────────────────────────────────
     database_url: str = Field(
@@ -78,6 +85,11 @@ class Settings(BaseSettings):
     # broker / result backend 留空则复用 redis_url，避免重复配置。
     celery_broker_url: str | None = Field(default=None, alias="CELERY_BROKER_URL")
     celery_result_backend: str | None = Field(default=None, alias="CELERY_RESULT_BACKEND")
+
+    # ── 触发器调度 ────────────────────────────────────────────
+    # 进程内的 cron 扫描线程：定时触发器靠它唤起。多副本部署时每份都会扫，
+    # 但抢占是行级条件更新，只有一份能真正抢到，不会重复触发。
+    trigger_scheduler_enabled: bool = Field(default=True, alias="TRIGGER_SCHEDULER_ENABLED")
 
     # 熔断器分布式状态：开启后模型熔断的「失败计数 + 开断状态」存 Redis，多 worker 共享一致；
     # 关闭（默认）或 Redis 不可用时退回进程内三态熔断器。

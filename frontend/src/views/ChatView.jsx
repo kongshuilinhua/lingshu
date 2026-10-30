@@ -1,4 +1,5 @@
-﻿import { ChatComposer } from '../components/chat/ChatComposer.jsx';
+import { ChatComposer } from '../components/chat/ChatComposer.jsx';
+import { VariableBar } from '../components/chat/VariableBar.jsx';
 import React, { Suspense, lazy } from 'react';
 import {
   SquarePen,
@@ -34,8 +35,8 @@ function MessageListFallback() {
 }
 
 const CHAT_COPY = {
-  noAgentTitle: '暂无可对话的智能体',
-  noAgentDesc: '主对话页只开放已审核并上架的智能体。请先发布，普通用户发布后需要管理员审核。',
+  noAgentTitle: '暂无可对话的智能体或工作流',
+  noAgentDesc: '先在编辑页发布一个智能体，或到「工作流」里建一条流程。',
   welcomeTitle: '今天想让哪个智能体帮你？',
   welcomeDesc: '选择智能体后可以直接聊天，也可以进入配置页调整能力。',
   promptIntro: '介绍一下你的能力',
@@ -55,6 +56,9 @@ export function ChatView({
   activeAgentId,
   activeSummary,
   chatAgents,
+  chatWorkflows = [],
+  activeWorkflowId = null,
+  setActiveWorkflowId,
   canEditActive,
   openBuilder,
   setActiveAgentId,
@@ -78,6 +82,8 @@ export function ChatView({
   setSearchEnabled,
   sources,
   submitFeedback,
+  resolveApproval,
+  loadRunSteps,
   ragRuntime,
   webSearchRuntime,
   thinkingEnabled,
@@ -92,17 +98,34 @@ export function ChatView({
         <div className="agent-select">
           <AgentAvatar value={activeSummary?.avatar || activeAgent?.avatar || 'AI'} />
           <select
-            value={chatAgents.some((agent) => agent.id === activeAgentId) ? activeAgentId : ''}
-            onChange={(e) => setActiveAgentId(Number(e.target.value))}
+            value={activeWorkflowId ? `workflow:${activeWorkflowId}` : (chatAgents.some((agent) => agent.id === activeAgentId) ? `agent:${activeAgentId}` : '')}
+            onChange={(e) => {
+              const [kind, id] = String(e.target.value).split(':');
+              if (kind === 'workflow') {
+                setActiveWorkflowId?.(Number(id));
+              } else {
+                setActiveWorkflowId?.(null);
+                setActiveAgentId(Number(id));
+              }
+            }}
           >
             <option value="" disabled>
-              {chatAgents.length ? '选择已上架智能体' : '暂无已上架智能体'}
+              {chatAgents.length || chatWorkflows.length ? '选择智能体或工作流' : '暂无可对话对象'}
             </option>
-            {chatAgents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
+            {chatAgents.filter((agent) => !agent.is_workflow_host).map((agent) => (
+              <option key={`agent-${agent.id}`} value={`agent:${agent.id}`}>
                 {agent.name}
               </option>
             ))}
+            {chatWorkflows.length > 0 && (
+              <optgroup label="工作流">
+                {chatWorkflows.map((workflow) => (
+                  <option key={`workflow-${workflow.id}`} value={`workflow:${workflow.id}`}>
+                    {workflow.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
           <button
             className="agent-edit-button"
@@ -127,6 +150,9 @@ export function ChatView({
         agentForm={agentForm}
         busy={busy}
         chatAgents={chatAgents}
+        chatWorkflows={chatWorkflows}
+        activeWorkflowId={activeWorkflowId}
+        setActiveWorkflowId={setActiveWorkflowId}
         chatAttachments={chatAttachments}
         chatVariables={chatVariables}
         error={error}
@@ -143,6 +169,8 @@ export function ChatView({
         setSearchEnabled={setSearchEnabled}
         sources={sources}
         submitFeedback={submitFeedback}
+        resolveApproval={resolveApproval}
+        loadRunSteps={loadRunSteps}
         ragRuntime={ragRuntime}
         webSearchRuntime={webSearchRuntime}
         thinkingEnabled={thinkingEnabled}
@@ -165,6 +193,9 @@ function ChatHomeV2({
   agentForm,
   busy,
   chatAgents,
+  chatWorkflows = [],
+  activeWorkflowId = null,
+  setActiveWorkflowId,
   chatAttachments,
   chatVariables,
   error,
@@ -185,6 +216,8 @@ function ChatHomeV2({
   setThinkingEnabled,
   sources,
   submitFeedback,
+  resolveApproval,
+  loadRunSteps,
   uploadChatAttachment,
   uploadingAttachment,
   updateChatVariable,
@@ -204,7 +237,8 @@ function ChatHomeV2({
   const attachmentHint = chatAttachments.length ? `${chatAttachments.length} file ready` : attachmentHintForModel(currentModel);
   const conversationStarted = Boolean(activeSessionId) || messages.some((message) => message.role === 'user');
   const runtimeWarning = modelWarning || { text: '' }; // Fallback
-  const hasChatAgent = chatAgents.length > 0;
+  // 只有工作流、没有已发布智能体时也应能开始对话
+  const hasChatAgent = chatAgents.length > 0 || chatWorkflows.length > 0;
 
   return (
     <div className={`chat-home ${conversationStarted ? 'has-conversation' : 'is-empty'}`}>
@@ -234,6 +268,8 @@ function ChatHomeV2({
               messages={messages}
               feedbackByMessage={feedbackByMessage}
               submitFeedback={submitFeedback}
+              resolveApproval={resolveApproval}
+              loadRunSteps={loadRunSteps}
               avatar={activeAgent?.avatar || agentForm.avatar || 'AI'}
             />
           </Suspense>
@@ -283,33 +319,6 @@ function ChatHomeV2({
         </div>
       )}
       {error && <p className="error inline">{error}</p>}
-    </div>
-  );
-}
-
-function VariableBar({ variables, values, onChange }) {
-  return (
-    <div className="chat-variable-bar">
-      {variables.map((variable) => (
-        <label key={variable.key}>
-          {variable.label || variable.key}
-          {variable.type === 'boolean' ? (
-            <select
-              value={String(values[variable.key] ?? variable.default_value ?? false)}
-              onChange={(e) => onChange(variable.key, e.target.value === 'true')}
-            >
-              <option value="false">false</option>
-              <option value="true">true</option>
-            </select>
-          ) : (
-            <input
-              type={variable.type === 'number' ? 'number' : 'text'}
-              value={values[variable.key] ?? variable.default_value ?? ''}
-              onChange={(e) => onChange(variable.key, e.target.value)}
-            />
-          )}
-        </label>
-      ))}
     </div>
   );
 }

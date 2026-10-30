@@ -28,7 +28,7 @@ describe('认证与权限错误', () => {
     const expired = vi.fn();
     window.addEventListener('lingshu-auth-expired', expired);
     try {
-      await expect(api('/api/admin/agent-reviews', { token: 'member-token' }))
+      await expect(api('/api/admin/models', { token: 'member-token' }))
         .rejects.toMatchObject({ status: 403 });
       expect(expired).not.toHaveBeenCalled();
       expect(isAuthError({ status: 403 })).toBe(false);

@@ -66,10 +66,22 @@ def _create_user_model(client, headers, display_name: str = "My Qwen", **overrid
 
 
 def _register_regular_user(client, *, email: str, name: str = "User"):
-    response = client.post(
-        "/api/auth/register",
-        json={"email": email, "name": name, "password": "password123"},
-    )
+    # 权限用例需要的是默认工作区的普通成员，显式通过邀请建立成员关系。
+    from core.db.models import Workspace
+    from core.db.session import SessionLocal
+    from core.services.workspaces import create_invite
+    from core.config import get_settings
+    from unittest.mock import patch
+
+    with SessionLocal() as db:
+        workspace = db.query(Workspace).filter(Workspace.slug == "default").one()
+        invitation = create_invite(db, workspace_id=workspace.id, email=email, role="user")
+        invite_token = invitation.token
+    with patch.object(get_settings(), "invite_api_enabled", True):
+        response = client.post(
+            "/api/auth/register",
+            json={"email": email, "name": name, "password": "password123", "invite_token": invite_token},
+        )
     assert response.status_code == 200
     assert response.json()["workspace"]["role"] == "user"
     return response, {"Authorization": f"Bearer {response.json()['access_token']}"}
@@ -91,7 +103,55 @@ def _docx_bytes(text_value: str) -> bytes:
     return buffer.getvalue()
 
 
-def test_second_registered_user_becomes_regular_user(client):
+def _xlsx_bytes(rows: list[list[str]]) -> bytes:
+    """构造一个最小 xlsx：共享字符串 + 单张工作表。"""
+    buffer = BytesIO()
+    shared = []
+    index = {}
+    sheet_rows = []
+    for row_number, row in enumerate(rows, start=1):
+        cells = []
+        for column, value in enumerate(row):
+            if value not in index:
+                index[value] = len(shared)
+                shared.append(value)
+            ref = f"{chr(65 + column)}{row_number}"
+            cells.append(f'<c r="{ref}" t="s"><v>{index[value]}</v></c>')
+        sheet_rows.append(f'<row r="{row_number}">{"".join(cells)}</row>')
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f'<sheetData>{"".join(sheet_rows)}</sheetData></worksheet>',
+        )
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            + "".join(f"<si><t>{item}</t></si>" for item in shared)
+            + "</sst>",
+        )
+    return buffer.getvalue()
+
+
+def _pptx_bytes(slides: list[str]) -> bytes:
+    """构造一个最小 pptx：每页一个 slide xml。"""
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        for number, text_value in enumerate(slides, start=1):
+            archive.writestr(
+                f"ppt/slides/slide{number}.xml",
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                f"<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text_value}</a:t></a:r></a:p>"
+                "</p:txBody></p:sp></p:spTree></p:cSld></p:sld>",
+            )
+    return buffer.getvalue()
+
+
+def test_second_registered_user_gets_separate_workspace(client):
     admin = client.post(
         "/api/auth/register",
         json={"email": "first-admin@example.com", "name": "First Admin", "password": "password123"},
@@ -104,12 +164,13 @@ def test_second_registered_user_becomes_regular_user(client):
         json={"email": "regular-user@example.com", "name": "Regular User", "password": "password123"},
     )
     assert user.status_code == 200
-    assert user.json()["workspace"]["role"] == "user"
+    assert user.json()["workspace"]["role"] == "admin"
+    assert user.json()["workspace"]["id"] != admin.json()["workspace"]["id"]
 
     user_headers = {"Authorization": f"Bearer {user.json()['access_token']}"}
     me = client.get("/api/auth/me", headers=user_headers)
     assert me.status_code == 200
-    assert me.json()["membership"]["role"] == "user"
+    assert me.json()["membership"]["role"] == "admin"
 
 
 def test_invite_api_is_disabled_by_default(client, auth_headers):
@@ -984,14 +1045,15 @@ def test_tool_crud_http_security_and_secret_redaction(client, auth_headers):
     listed_items = listed.json()["items"]
     assert any(item["id"] == tool["id"] and item["auth"]["has_secret"] for item in listed_items)
     tool_names = {item["name"] for item in listed_items}
-    assert {"web_search", "current_time", "calculator", "web_reader", "wikipedia", "arxiv_search"}.issubset(tool_names)
+    assert {
+        "web_search", "current_time", "calculator", "web_reader", "wikipedia", "arxiv_search",
+        "password_generator", "uuid_generator", "diff_checker", "character_counter",
+        "qr_generator", "currency_converter", "weather_lookup", "url_shortener", "ip_lookup",
+    }.issubset(tool_names)
+    # 编造内容的内置工具已下线：不允许再出现在可用工具列表里
     assert {
         "image_search",
         "news_search",
-        "qr_generator",
-        "currency_converter",
-        "ip_lookup",
-        "url_shortener",
         "horoscope",
         "joke_generator",
         "advice_slip",
@@ -1376,6 +1438,30 @@ def test_session_list_and_detail_after_chat(client, auth_headers):
     assert [message["role"] for message in detail.json()["messages"]] == ["user", "assistant"]
 
 
+def test_assistant_message_links_to_run_details(client, auth_headers):
+    """助手消息记下 run_id，运行详情接口按节点返回耗时与摘要。"""
+    agent_id = client.get("/api/agents", headers=auth_headers).json()["items"][0]["id"]
+    response = client.post(f"/api/agents/{agent_id}/chat/stream", headers=auth_headers, json={"message": "hello"})
+    assert response.status_code == 200
+
+    session_id = client.get(f"/api/agents/{agent_id}/sessions", headers=auth_headers).json()["items"][0]["id"]
+    messages = client.get(f"/api/sessions/{session_id}", headers=auth_headers).json()["messages"]
+    user_message, assistant = messages
+    assert user_message["run_id"] is None
+    assert assistant["run_id"]
+
+    steps = client.get(f"/api/runs/{assistant['run_id']}/steps", headers=auth_headers)
+    assert steps.status_code == 200
+    body = steps.json()
+    assert body["run"]["status"] == "succeeded"
+    node_types = [item["node_type"] for item in body["items"]]
+    assert node_types[0] == "Start" and node_types[-1] == "Answer"
+    assert all(isinstance(item["latency_ms"], int) for item in body["items"])
+    knowledge = next(item for item in body["items"] if item["node_type"] == "Knowledge")
+    assert "reason" in knowledge["summary"]
+    llm = next(item for item in body["items"] if item["node_type"] == "LLM")
+    assert llm["summary"]["model"]
+
 def test_chat_can_continue_existing_session_and_feedback(client, auth_headers):
     agents = client.get("/api/agents", headers=auth_headers).json()["items"]
     agent_id = agents[0]["id"]
@@ -1566,6 +1652,76 @@ def test_knowledge_file_ingestion_supports_txt_md_csv_pdf_and_docx(client, auth_
         assert indexed["error_message"] is None
 
 
+def test_knowledge_file_ingestion_supports_xlsx_and_pptx(client, auth_headers):
+    """xlsx / pptx 走与 docx 相同的标准库 OOXML 解析，入库后可被检索。"""
+    kb_id = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "OOXML KB"}).json()["knowledge_base"]["id"]
+    cases = [
+        (
+            "price.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            _xlsx_bytes([["产品", "价格", "库存"], ["扫地机器人", "xlsx-token-1999", "12"]]),
+            "xlsx-token-1999",
+        ),
+        (
+            "deck.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            _pptx_bytes(["季度汇报", "pptx-token-覆盖华东区"]),
+            "pptx-token-覆盖华东区",
+        ),
+    ]
+    for filename, content_type, raw, token in cases:
+        document = client.post(
+            f"/api/knowledge-bases/{kb_id}/documents",
+            headers=auth_headers,
+            json={
+                "filename": filename,
+                "content_type": content_type,
+                "content_base64": base64.b64encode(raw).decode("ascii"),
+                "source_type": "file",
+            },
+        )
+        assert document.status_code == 200, document.text
+        payload = document.json()["document"]
+        assert token in payload["text_preview"]
+        indexed = _document_after_upload(client, auth_headers, kb_id, payload["id"])
+        assert indexed["status"] == "indexed"
+        assert indexed["chunk_count"] >= 1
+        assert indexed["error_message"] is None
+
+
+def test_xlsx_rows_keep_cells_together_and_pptx_keeps_slide_order():
+    """同一行单元格必须留在同一段，否则检索片段会丢掉列语义；幻灯片要保留页序。"""
+    from core.services.uploads import extract_document_text
+
+    xlsx_text = extract_document_text(
+        filename="a.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        raw=_xlsx_bytes([["产品", "价格"], ["扫地机器人", "1999"]]),
+    )
+    assert "产品 | 价格" in xlsx_text
+    assert "扫地机器人 | 1999" in xlsx_text
+
+    pptx_text = extract_document_text(
+        filename="b.pptx",
+        content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        raw=_pptx_bytes(["第一页内容", "第二页内容"]),
+    )
+    assert pptx_text.index("第一页内容") < pptx_text.index("第二页内容")
+    assert "## 第 1 页" in pptx_text
+
+
+def test_invalid_xlsx_reports_clear_error():
+    import pytest as _pytest
+    from core.services.uploads import extract_document_text
+
+    with _pytest.raises(ValueError, match="Invalid XLSX document"):
+        extract_document_text(
+            filename="broken.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            raw=b"not-a-zip",
+        )
+
+
 def test_knowledge_document_strips_nul_characters(client, auth_headers):
     kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "NUL KB"})
     kb_id = kb.json()["knowledge_base"]["id"]
@@ -1724,53 +1880,30 @@ def test_agent_coze_settings_can_be_saved_and_published(client, auth_headers):
     assert snapshot["memory"]["enabled"] is True
 
 
-def test_user_publish_requires_admin_review_then_market_copy(client, auth_headers):
+def test_user_publish_goes_live_then_market_copy(client, auth_headers):
     user, user_headers = _register_regular_user(client, email="maker@example.com", name="Maker")
 
     created = client.post(
         "/api/agents",
         headers=user_headers,
-        json={"name": "待审核智能体", "description": "普通用户提交的智能体", "system_prompt": "你是市场智能体。"},
+        json={"name": "直接发布智能体", "description": "普通用户发布的智能体", "system_prompt": "你是市场智能体。"},
     )
     agent_id = created.json()["agent"]["id"]
 
-    submitted = client.post(f"/api/agents/{agent_id}/publish", headers=user_headers)
-    assert submitted.status_code == 200
-    assert submitted.json()["status"] == "pending_review"
-    assert submitted.json()["review_required"] is True
-
-    market_before = client.get("/api/market/agents", headers=user_headers)
-    assert all(item["id"] != agent_id for item in market_before.json()["items"])
-
-    blocked_chat = client.post(
-        f"/api/agents/{agent_id}/chat/stream",
-        headers=user_headers,
-        json={"message": "审核前不能正式对话", "mode": "published"},
-    )
-    assert blocked_chat.status_code == 200
-    assert "当前智能体还没有发布版本" in blocked_chat.text
-
-    forbidden = client.post(f"/api/admin/agent-reviews/{agent_id}/approve", headers=user_headers)
-    assert forbidden.status_code == 403
-
-    reviews = client.get("/api/admin/agent-reviews", headers=auth_headers)
-    assert reviews.status_code == 200
-    assert any(item["id"] == agent_id for item in reviews.json()["items"])
-
-    approved = client.post(f"/api/admin/agent-reviews/{agent_id}/approve", headers=auth_headers)
-    assert approved.status_code == 200
-    assert approved.json()["agent"]["status"] == "published"
+    published = client.post(f"/api/agents/{agent_id}/publish", headers=user_headers)
+    assert published.status_code == 200
+    assert published.json()["status"] == "published"
 
     market_after = client.get("/api/market/agents", headers=user_headers)
     assert any(item["id"] == agent_id for item in market_after.json()["items"])
 
-    approved_chat = client.post(
+    live_chat = client.post(
         f"/api/agents/{agent_id}/chat/stream",
         headers=user_headers,
-        json={"message": "审核后可以正式对话", "mode": "published"},
+        json={"message": "发布后可以直接对话", "mode": "published"},
     )
-    assert approved_chat.status_code == 200
-    assert "event: done" in approved_chat.text
+    assert live_chat.status_code == 200
+    assert "event: done" in live_chat.text
 
     copy = client.post(f"/api/market/agents/{agent_id}/copy", headers=user_headers)
     assert copy.status_code == 200
@@ -2983,3 +3116,50 @@ def test_knowledge_base_patch_preserves_unset_fields_and_bounds_name(client, aut
     )
     assert padded.status_code == 200
     assert padded.json()["knowledge_base"]["name"] == "Trimmed KB"
+
+
+def test_knowledge_retrieval_test_returns_matches_and_hits(client, auth_headers):
+    """召回测试直接调用真实检索链路，返回命中片段与各通道分数。"""
+    kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "召回测试库"}).json()["knowledge_base"]
+    client.post(
+        f"/api/knowledge-bases/{kb['id']}/documents",
+        headers=auth_headers,
+        json={"filename": "guide.txt", "text": "回充失败时，请先检查充电座供电、摆放位置和路径遮挡。"},
+    )
+
+    response = client.post(
+        f"/api/knowledge-bases/{kb['id']}/retrieval-test",
+        headers=auth_headers,
+        json={"query": "机器人不回充怎么办", "top_k": 6, "rerank_enabled": True},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["query"] == "机器人不回充怎么办"
+    assert isinstance(body["latency_ms"], int)
+    assert "dense" in body["status"] and "bm25" in body["status"]
+    assert body["status"]["rerank"]["enabled"] is True
+    for item in body["items"]:
+        assert {"chunk_id", "title", "score", "dense_score", "bm25_score", "channel"} <= set(item)
+
+
+def test_knowledge_retrieval_test_skips_cache_and_rejects_blank_query(client, auth_headers):
+    """调参时不能拿缓存结果冒充实时召回；空问题直接 422。"""
+    kb = client.post("/api/knowledge-bases", headers=auth_headers, json={"name": "缓存测试库"}).json()["knowledge_base"]
+    blank = client.post(f"/api/knowledge-bases/{kb['id']}/retrieval-test", headers=auth_headers, json={"query": "   "})
+    assert blank.status_code == 422
+
+    client.post(
+        f"/api/knowledge-bases/{kb['id']}/documents",
+        headers=auth_headers,
+        json={"filename": "a.txt", "text": "营业时间为上午九点到晚上八点。"},
+    )
+    first = client.post(f"/api/knowledge-bases/{kb['id']}/retrieval-test", headers=auth_headers, json={"query": "营业时间"}).json()
+    second = client.post(f"/api/knowledge-bases/{kb['id']}/retrieval-test", headers=auth_headers, json={"query": "营业时间"}).json()
+    # 端点固定关闭缓存：连续两次都走真实检索，结果一致且不出现缓存命中标记
+    assert "cache" not in first["status"] and "cache" not in second["status"]
+    assert [item["chunk_id"] for item in first["items"]] == [item["chunk_id"] for item in second["items"]]
+
+
+def test_knowledge_retrieval_test_requires_workspace_access(client, auth_headers):
+    """不存在的知识库返回 404，不泄露其他工作区资源。"""
+    assert client.post("/api/knowledge-bases/999999/retrieval-test", headers=auth_headers, json={"query": "x"}).status_code == 404

@@ -15,7 +15,7 @@ from core.config import get_settings
 from core.db.models import Agent, AgentMcpBinding, AgentVersion, McpServer, WorkspaceMember
 from core.integrations.mcp_client import get_mcp_client, invalidate_mcp_client
 from core.security.api_keys import decrypt_api_key, encrypt_api_key
-from core.security.permissions import can_manage
+from core.security.permissions import can_manage, can_manage_platform
 from core.security.outbound_http import resolve_public_https
 
 MAX_SERVERS_PER_WORKSPACE = 50
@@ -227,8 +227,8 @@ def create_server(db: Session, membership: WorkspaceMember, payload: dict) -> Mc
             server.oauth_scope = str(payload.get("scope") or "").strip()
             _update_oauth_client(server, payload)
     else:
-        if not can_manage(membership.role):
-            raise ValueError("Only workspace managers can register stdio servers")
+        if not can_manage_platform(membership):
+            raise ValueError("Only platform managers can register stdio servers")
         command, env = _stdio_launch(payload)
         server.command = command
         server.encrypted_env = encrypt_api_key(json.dumps(env)) if env else ""
@@ -299,8 +299,8 @@ def update_server(db: Session, server: McpServer, membership: WorkspaceMember, p
                 server.oauth_scope = next_scope
             _update_oauth_client(server, payload)
     elif any(key in payload for key in ('template_id', 'command', 'args', 'env', 'env_remove')):
-        if not can_manage(membership.role):
-            raise ValueError("Only workspace managers can register stdio servers")
+        if not can_manage_platform(membership):
+            raise ValueError("Only platform managers can register stdio servers")
         command, env = _stdio_launch(payload, server)
         server.command = command
         server.encrypted_env = encrypt_api_key(json.dumps(env)) if env else ""
