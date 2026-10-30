@@ -66,10 +66,22 @@ def _create_user_model(client, headers, display_name: str = "My Qwen", **overrid
 
 
 def _register_regular_user(client, *, email: str, name: str = "User"):
-    response = client.post(
-        "/api/auth/register",
-        json={"email": email, "name": name, "password": "password123"},
-    )
+    # 权限用例需要的是默认工作区的普通成员，显式通过邀请建立成员关系。
+    from core.db.models import Workspace
+    from core.db.session import SessionLocal
+    from core.services.workspaces import create_invite
+    from core.config import get_settings
+    from unittest.mock import patch
+
+    with SessionLocal() as db:
+        workspace = db.query(Workspace).filter(Workspace.slug == "default").one()
+        invitation = create_invite(db, workspace_id=workspace.id, email=email, role="user")
+        invite_token = invitation.token
+    with patch.object(get_settings(), "invite_api_enabled", True):
+        response = client.post(
+            "/api/auth/register",
+            json={"email": email, "name": name, "password": "password123", "invite_token": invite_token},
+        )
     assert response.status_code == 200
     assert response.json()["workspace"]["role"] == "user"
     return response, {"Authorization": f"Bearer {response.json()['access_token']}"}
@@ -139,7 +151,7 @@ def _pptx_bytes(slides: list[str]) -> bytes:
     return buffer.getvalue()
 
 
-def test_second_registered_user_becomes_regular_user(client):
+def test_second_registered_user_gets_separate_workspace(client):
     admin = client.post(
         "/api/auth/register",
         json={"email": "first-admin@example.com", "name": "First Admin", "password": "password123"},
@@ -152,12 +164,13 @@ def test_second_registered_user_becomes_regular_user(client):
         json={"email": "regular-user@example.com", "name": "Regular User", "password": "password123"},
     )
     assert user.status_code == 200
-    assert user.json()["workspace"]["role"] == "user"
+    assert user.json()["workspace"]["role"] == "admin"
+    assert user.json()["workspace"]["id"] != admin.json()["workspace"]["id"]
 
     user_headers = {"Authorization": f"Bearer {user.json()['access_token']}"}
     me = client.get("/api/auth/me", headers=user_headers)
     assert me.status_code == 200
-    assert me.json()["membership"]["role"] == "user"
+    assert me.json()["membership"]["role"] == "admin"
 
 
 def test_invite_api_is_disabled_by_default(client, auth_headers):

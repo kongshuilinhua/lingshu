@@ -77,9 +77,11 @@ def create_invite(db: Session, *, workspace_id: int, email: str, role: str) -> W
     if normalized_role not in INVITABLE_ROLES:
         raise HTTPException(status_code=400, detail="Invite role must be user or admin")
     address = email.strip().lower()
-    if db.query(User).filter(User.email == address).first():
-        # 已有账号的人该走「接受邀请」，再发一封注册邀请只会让人注册时撞 409。
-        raise HTTPException(status_code=400, detail="该邮箱已有账号，请让对方登录后使用邀请链接加入")
+    member = db.query(WorkspaceMember).join(User).filter(
+        WorkspaceMember.workspace_id == workspace_id, User.email == address,
+    ).first()
+    if member:
+        raise HTTPException(status_code=409, detail="该账号已经是工作区成员")
 
     invite = (
         db.query(WorkspaceInvite)
@@ -115,6 +117,9 @@ def accept_invite(db: Session, *, invite: WorkspaceInvite, user: User) -> Worksp
     🎯 为什么要改 last_active_workspace_id：用户本来在别的工作区，接受邀请后如果
         这个字段不动，下一次登录签发的令牌还指向旧工作区——邀请接受成功却什么都看不到。
     """
+    ensure_usable_invite(invite)
+    if invite.email.lower() != user.email.lower():
+        raise HTTPException(status_code=404, detail="Invite not found")
     membership = (
         db.query(WorkspaceMember)
         .filter(WorkspaceMember.workspace_id == invite.workspace_id, WorkspaceMember.user_id == user.id)

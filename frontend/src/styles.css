@@ -7196,3 +7196,6 @@ body.dark .coze-accordion-item {
   color: #2547a0;
   font-size: 13px;
 }
+.workspace-switcher { padding: 8px 12px; }
+.workspace-switcher label { display: grid; gap: 6px; font-size: 12px; }
+.workspace-switcher select { width: 100%; min-width: 0; padding: 7px; }

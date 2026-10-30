@@ -16,7 +16,8 @@ from api.serializers import (
 from core.config import get_settings
 from core.db.models import User, Workspace, WorkspaceInvite, WorkspaceMember
 from core.db.session import get_db
-from core.security.permissions import normalize_role
+from core.security.permissions import normalize_role, can_manage_platform
+from core.security.auth import create_access_token
 from core.services.workspaces import (
     accept_invite,
     create_invite,
@@ -31,9 +32,27 @@ router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 settings = get_settings()
 
 
+@router.get("")
+def list_workspaces(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    memberships = db.query(WorkspaceMember).filter(WorkspaceMember.user_id == current_user.id).order_by(WorkspaceMember.id.asc()).all()
+    return {"items": [workspace_payload(row.workspace, row.role) for row in memberships]}
+
+
+@router.post("/{workspace_id}/switch")
+def switch_workspace(workspace_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    membership = db.query(WorkspaceMember).filter(
+        WorkspaceMember.user_id == current_user.id, WorkspaceMember.workspace_id == workspace_id,
+    ).first()
+    if not membership:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    current_user.last_active_workspace_id = workspace_id
+    db.commit()
+    return {"access_token": create_access_token({"sub": str(current_user.id), "workspace_id": workspace_id}), "token_type": "bearer"}
+
+
 @router.get("/current")
 def current_workspace(membership: WorkspaceMember = Depends(get_current_membership)):
-    return {"workspace": workspace_payload(membership.workspace, membership.role), "membership": membership_payload(membership)}
+    return {"workspace": {**workspace_payload(membership.workspace, membership.role), "can_manage_platform": can_manage_platform(membership)}, "membership": membership_payload(membership)}
 
 
 @router.get("/invites")
@@ -125,9 +144,9 @@ def accept_invite_endpoint(
     expires_at = invite_expires_at(invite)
     return {
         "accepted": True,
-        # 接受邀请后成员身份换了工作区，令牌里的 workspace_id 还是旧的。
-        # 前端拿到这个字段就重登一次，否则后续请求全部落在原工作区。
-        "relogin_required": True,
+        "relogin_required": False,
+        "access_token": create_access_token({"sub": str(current_user.id), "workspace_id": membership.workspace_id}),
+        "token_type": "bearer",
         "workspace_id": membership.workspace_id,
         "expires_at": expires_at.isoformat() if expires_at else None,
         "member_count": total,

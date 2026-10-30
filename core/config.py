@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     skill_sandbox_image: str = Field(default="", alias="SKILL_SANDBOX_IMAGE")
     mcp_oauth_redirect_url: str = Field(default="", alias="MCP_OAUTH_REDIRECT_URL")
     mcp_client_metadata_url: str = Field(default="", alias="MCP_CLIENT_METADATA_URL")
-    # 邀请制注册开关：关闭时任何人可自由注册
+    # 工作区邀请 API 开关，不限制平台账号注册
     invite_api_enabled: bool = Field(default=False, alias="INVITE_API_ENABLED")
     # 邀请链接有效期（小时）。不设过期的话，一条泄露的链接就是永久后门：
     # 邀请表只记 created_at，到期与否在读取时按这个值现算，不加列也就无需迁移。

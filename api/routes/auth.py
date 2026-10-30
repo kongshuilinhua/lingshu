@@ -39,7 +39,6 @@ from core.services.bootstrap import (
 from core.services.workspaces import accept_invite, ensure_usable_invite
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-settings = get_settings()
 
 
 def pick_membership(db: Session, user: User) -> WorkspaceMember | None:
@@ -64,6 +63,8 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="Email already registered")
     invite = None
     if request.invite_token:
+        if not get_settings().invite_api_enabled:
+            raise HTTPException(status_code=404, detail="Invite API is disabled")
         invite = db.query(WorkspaceInvite).filter(WorkspaceInvite.token == request.invite_token).first()
         # 邮箱必须对上：链接可能被转发，不校验就等于谁拿到都能进。
         ensure_usable_invite(invite)
@@ -76,17 +77,11 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         workspace = invite_workspace(db, membership.workspace_id)
         role = normalize_role(membership.role)
     elif not has_any_user(db):
-        # 首个账号必须放行，且要排在邀请制开关之前：开关打开时若连首用户也拦，
-        # 就没人能进系统建出第一条邀请，整个部署当场死锁（浏览器验证时实测踩到）。
         user, workspace = create_first_user_workspace(db, email=request.email, name=request.name, password=request.password)
         role = "admin"
-    elif settings.invite_api_enabled:
-        # 🛡️ 开关打开 = 只允许被邀请的人进来。此前这个开关只管邀请端点，
-        #    注册照样对所有人开放并自动并入默认工作区，等于开着也拦不住任何人。
-        raise HTTPException(status_code=403, detail="当前工作区为邀请制，请使用邀请链接注册")
     else:
         user, workspace = create_default_workspace_user(db, email=request.email, name=request.name, password=request.password)
-        role = "user"
+        role = "admin"
     # 记录本次进入的工作区，下次登录签发的令牌才不会退回最早那条成员身份
     user.last_active_workspace_id = workspace.id
     db.commit()
@@ -149,6 +144,12 @@ def change_password(
     token = (authorization or "").split(" ", 1)[-1].strip()
     revoked = revoke_access_token(token) if token else False
     return {"changed": True, "relogin_required": True, "revoked": revoked}
+
+
+@router.get("/account")
+def account(current_user: User = Depends(get_current_user)):
+    """账号身份不依赖工作区成员关系；被移除的成员仍可接受新的邀请。"""
+    return {"user": user_payload(current_user)}
 
 
 @router.get("/me")

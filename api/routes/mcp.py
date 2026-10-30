@@ -22,7 +22,7 @@ from core.integrations.mcp_client import get_mcp_client
 from core.integrations.mcp_oauth import receive_oauth_callback, oauth_redirect_url
 from core.integrations.mcp_sdk_client import McpSdkError
 from core.security.api_keys import decrypt_api_key
-from core.security.permissions import can_manage
+from core.security.permissions import can_manage, can_manage_platform
 from core.services.mcp_registry import (
     accessible_server,
     agent_bindings_payload,
@@ -49,8 +49,8 @@ def mcp_connection_options(membership: WorkspaceMember = Depends(get_current_mem
     except ValueError:
         redirect = ""
     return {"transports": ["streamable_http", "sse", "stdio"], "oauth_redirect_url": redirect,
-            "can_register_stdio": can_manage(membership.role),
-            "can_configure_stdio": can_manage(membership.role) and custom_stdio_enabled()}
+            "can_register_stdio": can_manage_platform(membership),
+            "can_configure_stdio": can_manage_platform(membership) and custom_stdio_enabled()}
 
 
 @router.get("/api/mcp/servers")
@@ -61,7 +61,7 @@ def get_mcp_servers(membership: WorkspaceMember = Depends(get_current_membership
 
 @router.get("/api/mcp/stdio-templates")
 def get_stdio_templates(membership: WorkspaceMember = Depends(get_current_membership)):
-    if not can_manage(membership.role):
+    if not can_manage_platform(membership):
         return {"items": []}
     return {"items": [
         {"id": key, "name": value.get("name") or key,

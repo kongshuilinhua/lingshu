@@ -98,11 +98,19 @@ def require_manager(membership: WorkspaceMember = Depends(get_current_membership
     细粒度 RBAC 权限守门人：强制校验超级管理员 / 经理等高级资产管理角色。
 
     🎯 意图与工程大局观：
-        专用于模型发布、全系统内置工具清洗、多租户 Workspace 自举创建等具备全局毁灭性破坏力的管理 API。
+        用于工作区成员管理等管理 API；全平台配置须使用 require_platform_manager。
         通过级联依赖注入（Depends）链条：
         `get_current_user` (身份校验) -> `get_current_membership` (租户物理隔离) -> `require_manager` (管理权能校验)，
         用极简、声明式的工程化 API 代码逻辑，封堵了越权提权的任何通道。
     """
     if not can_manage(membership.role):
+        raise ForbiddenException(ErrorCode.PERMISSION_DENIED, message="Admin role required")
+    return membership
+
+
+def require_platform_manager(membership: WorkspaceMember = Depends(get_current_membership)) -> WorkspaceMember:
+    from core.security.permissions import can_manage_platform
+
+    if not can_manage_platform(membership):
         raise ForbiddenException(ErrorCode.PERMISSION_DENIED, message="Admin role required")
     return membership

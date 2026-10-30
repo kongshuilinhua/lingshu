@@ -219,25 +219,16 @@ def create_first_user_workspace(db: Session, *, email: str, name: str, password:
 
 
 def create_default_workspace_user(db: Session, *, email: str, name: str, password: str) -> tuple[User, Workspace]:
-    """
-    在默认共享工作区中为新普通成员分配空间。
-
-    🎯 意图与工程大局观：
-        实现轻量化的成员并网。当默认工作区 `default` 已经自举就绪后，
-        后续注册的其他用户不会重复触发繁重的全量自举引擎（避免模型/工具表爆炸），
-        而是快速绑定到现有的 `default` 共享空间并归类为 `user` 角色。
-        这极大降低了并发环境下的锁竞争与数据库压力。
-    """
-    workspace = db.query(Workspace).filter(Workspace.slug == "default").first()
-    if not workspace:
-        workspace = db.query(Workspace).order_by(Workspace.id.asc()).first()
-    if not workspace:
-        return create_first_user_workspace(db, email=email, name=name, password=password)
+    """普通注册创建独立工作区；加入已有工作区只能通过邀请。"""
     user = User(email=email.lower(), name=name, password_hash=hash_password(password))
     db.add(user)
     db.flush()
-    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="user"))
+    workspace = Workspace(name=f"{name} 的工作台", slug=f"personal-{user.id}")
+    db.add(workspace)
+    db.flush()
+    db.add(WorkspaceMember(workspace_id=workspace.id, user_id=user.id, role="admin"))
     db.commit()
+    ensure_template_agent(db, user, workspace)
     return user, workspace
 
 

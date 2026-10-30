@@ -15,12 +15,13 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 ## 核心功能
 
 ### 账号与权限
-- 本地注册/登录，JWT 鉴权
+- 本地注册/登录，JWT 鉴权；普通注册创建独立工作区，不自动加入其他人的工作区
 - 个人资料管理（名称、头像）
-- `admin` / `user` 双角色：管理员管理成员与全部资产；普通用户只能改自己创建的东西
-- 邀请成员：管理员填邮箱生成邀请链接，对方打开链接注册即可加入本工作区（有效期默认 7 天，用过即失效，重新邀请会作废旧链接）
+- `admin` / `user` 双角色：管理员管理本工作区成员与资产；普通成员只能改自己创建的东西。平台模型管理与后端 stdio 启动配置仅允许初始 `default` 工作区管理员操作
+- 邀请成员：管理员填邮箱生成邀请链接，新账号可注册并加入，已有账号登录后确认加入；邀请邮箱必须与账号一致（有效期默认 7 天，用过即失效，重新邀请会作废旧链接）
+- 接受邀请立即进入目标工作区；原工作区保留，可在左下角账号菜单切换。已有用户和成员关系不自动迁移
 - 成员管理：改角色（普通用户 / 管理员）、移除成员；工作区所有者与本人不可被改，至少保留一位管理员
-- `INVITE_API_ENABLED=true` 时工作区转为邀请制：不带邀请链接的公开注册会被拒绝
+- `INVITE_API_ENABLED=true` 开启工作区邀请 API，用于邀请用户加入工作区；平台账号注册不受此开关影响
 
 ### 模型配置
 - **系统模型**：管理员预设的模型配置，供所有用户选择
@@ -272,7 +273,7 @@ WEB_SEARCH_ENABLED=true
 WEB_SEARCH_PROVIDER=duckduckgo_html
 
 # 其他
-INVITE_API_ENABLED=false          # 邀请制开关：true 时只允许凭邀请链接注册
+INVITE_API_ENABLED=false          # 工作区邀请 API 开关，不影响平台账号注册
 INVITE_EXPIRE_HOURS=168           # 邀请链接有效期（小时）
 UPLOAD_MAX_BYTES=31457280         # 上传文件大小上限（30MB）
 ```
@@ -350,7 +351,8 @@ LINGSHU_DEPLOYMENT_MODE=production
 
 | 模块 | 端点 | 说明 |
 |------|------|------|
-| Auth | `POST /api/auth/register` `POST /api/auth/login` `GET/PATCH /api/auth/me` | 注册/登录/个人资料 |
+| Auth | `POST /api/auth/register` `POST /api/auth/login` `GET /api/auth/account` `GET/PATCH /api/auth/me` | 注册/登录/账号身份/个人资料 |
+| Workspaces | `GET /api/workspaces` `POST /api/workspaces/{id}/switch` | 已加入的工作区与切换 |
 | Workspace | `GET /api/workspaces/current` `GET /api/workspaces/members` | 工作空间与成员 |
 | Invites | `GET/POST /api/workspaces/invites` | 邀请管理 |
 | System Models | `GET /api/models` `POST/PATCH/DELETE /api/admin/models` | 系统模型管理 |
