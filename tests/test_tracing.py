@@ -285,3 +285,32 @@ def test_chat_stream_builds_trace_tree_and_feedback_score(client, auth_headers, 
         assert scores[0]["name"] == "user_feedback" and scores[0]["value"] == 0
     finally:
         tracing.reset_for_tests()
+
+
+def test_flush_and_shutdown_only_touch_an_existing_client(monkeypatch):
+    """退出/刷新路径不得惰性创建客户端。
+
+    回归用例：app 关闭时调用 tracing.shutdown()。若它走 client() 的惰性初始化，
+    就会在退出路径上新建 Langfuse 客户端并卡在 SDK 的 queue.join() 上——实测
+    FastAPI 每个用例的 shutdown 都可能挂死，CI 直接停在整套测试中间。
+    """
+    monkeypatch.setattr(tracing, "_settings", lambda: _settings())
+    tracing.reset_for_tests()
+
+    def _boom():
+        raise AssertionError("flush/shutdown 不应惰性创建客户端")
+
+    monkeypatch.setattr(tracing, "client", _boom)
+    try:
+        tracing.flush()      # 没有实例时直接返回
+        tracing.shutdown()   # 同上，且不能抛
+    finally:
+        monkeypatch.undo()
+        tracing.reset_for_tests()
+
+
+def test_shutdown_closes_existing_client_and_stays_closed(exporter):
+    assert tracing.enabled() is True
+    tracing.shutdown()
+    # 关掉之后再问也不该重新建一个，否则退出回调又被拉回初始化路径
+    assert tracing.enabled() is False

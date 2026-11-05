@@ -331,7 +331,8 @@ def bind_context(generator):
 
 
 def flush() -> None:
-    langfuse = client()
+    # 只刷新已存在的实例：为了刷新而惰性创建客户端，等于在退出路径上引入一次网络初始化
+    langfuse = _client
     if langfuse is None:
         return
     try:
@@ -341,7 +342,19 @@ def flush() -> None:
 
 
 def shutdown() -> None:
-    langfuse = client()
+    """
+    退出回调：只关闭已存在的实例。
+
+    🛡️ 这里绝不能走 client() 的惰性初始化：
+        - 退出路径上新建客户端没有任何观测价值，却会真的去连一次网关；
+        - SDK 的 shutdown() 会 queue.join() 等待导出队列排空，队列若因无法连接而排不空，
+          整个进程就卡在退出上（实测 FastAPI 每个用例的 shutdown 都可能挂死）。
+        把实例摘下来、置 _initialized=True，后续再调用也不会重新创建。
+    """
+    global _client, _initialized
+    with _lock:
+        langfuse = _client
+        _client, _initialized = None, True
     if langfuse is None:
         return
     try:
