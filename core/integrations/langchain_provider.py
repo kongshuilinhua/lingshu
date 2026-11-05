@@ -73,6 +73,12 @@ def get_chat_model(*, model=None, temperature=0.0, runtime_config=None, **kwargs
     resolved_model = model or (runtime_config or {}).get("chat_model") or settings.openai_model
     if (runtime_config or {}).get("untrusted_base_url"):
         kwargs["http_client"] = httpx.Client(transport=PublicHTTPSHttpxTransport(allow_private=bool(getattr(settings, "user_model_allow_private_network", False))), follow_redirects=False)
+    # Anthropic 分支内部走 OpenAICompatibleProvider.chat()，已在调用层埋点；ChatOpenAI 走 SDK，挂 Langfuse 回调。
+    from core.observability import tracing
+
+    callbacks = tracing.langchain_callbacks()
+    if callbacks:
+        kwargs["callbacks"] = [*(kwargs.get("callbacks") or []), *callbacks]
     return ChatOpenAI(
         model=resolved_model,
         base_url=base_url,
