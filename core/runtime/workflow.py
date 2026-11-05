@@ -929,6 +929,7 @@ class WorkflowRunner:
                 db=self.db,
                 user_id=context.get("user_id") or 0,
                 call_stack=list(context.get("agent_call_stack") or []),
+                workspace_id=agent.workspace_id,
             )
         return {}
 

@@ -343,7 +343,96 @@ def test_validate_graph_accepts_loop_and_checks_body():
         {"id": "loop", "type": "Loop", "config": {"body": [{"id": "b1", "type": "Answer"}]}},
         {"id": "answer", "type": "Answer"},
     ]
-    assert any("Start or Answer" in item for item in validate_graph(with_answer))
+    assert any("cannot contain Start" in item for item in validate_graph(with_answer))
+
+
+def test_validate_graph_rejects_human_approval_in_loop_body():
+    """循环体里没有暂停传播路径，审批节点放进去等于静默跳过审批。"""
+    nodes = [
+        {"id": "start", "type": "Start"},
+        {
+            "id": "loop",
+            "type": "Loop",
+            "config": {"body": [{"id": "b1", "type": "HumanApproval", "config": {"prompt": "确认?"}}]},
+        },
+        {"id": "answer", "type": "Answer"},
+    ]
+    errors = validate_graph(nodes)
+    assert any("HumanApproval" in item for item in errors)
+
+
+def test_validate_graph_rejects_nested_loop():
+    """嵌套循环会让每层预算各自生效，把单次运行的模型调用量成倍放大。"""
+    nodes = [
+        {"id": "start", "type": "Start"},
+        {
+            "id": "outer",
+            "type": "Loop",
+            "config": {"body": [{"id": "inner", "type": "Loop", "config": {"body": [{"id": "b1", "type": "LLM"}]}}]},
+        },
+        {"id": "answer", "type": "Answer"},
+    ]
+    errors = validate_graph(nodes)
+    assert any("another Loop" in item for item in errors)
+
+
+def test_validate_graph_rejects_unknown_type_inside_loop_body():
+    nodes = [
+        {"id": "start", "type": "Start"},
+        {"id": "loop", "type": "Loop", "config": {"body": [{"id": "b1", "type": "WTF"}]}},
+        {"id": "answer", "type": "Answer"},
+    ]
+    errors = validate_graph(nodes)
+    assert any("unsupported node type" in item for item in errors)
+
+
+def test_validate_graph_rejects_dangling_condition_inside_loop_body():
+    nodes = [
+        {"id": "start", "type": "Start"},
+        {
+            "id": "loop",
+            "type": "Loop",
+            "config": {
+                "body": [
+                    {"id": "b1", "type": "Condition", "config": {"branches": [{"next": "nope"}], "default": "b2"}},
+                    {"id": "b2", "type": "LLM"},
+                ]
+            },
+        },
+        {"id": "answer", "type": "Answer"},
+    ]
+    errors = validate_graph(nodes)
+    assert any("dangling branch" in item for item in errors)
+
+
+def test_run_loop_node_rejects_approval_and_nested_loop():
+    """运行时也要拦：校验层被绕过时（例如老数据）不能真的执行。"""
+    execute = lambda node, context: {}  # noqa: E731
+    with_approval = {"config": {"body": [{"id": "b1", "type": "HumanApproval"}]}}
+    with pytest.raises(ValueError, match="HumanApproval"):
+        flow_nodes.run_loop_node(with_approval, {}, execute=execute)
+
+    nested = {"config": {"body": [{"id": "b1", "type": "Loop", "config": {"body": []}}]}}
+    with pytest.raises(ValueError, match="嵌套"):
+        flow_nodes.run_loop_node(nested, {}, execute=execute)
+
+
+def test_agent_node_rejects_cross_workspace_target():
+    """config.agent_id 是用户填的任意整数，执行层必须自己确认归属。"""
+
+    class _StubDB:
+        def __init__(self, agent):
+            self._agent = agent
+
+        def get(self, model, pk):
+            return self._agent if pk == self._agent.id else None
+
+    outsider = SimpleNamespace(id=7, workspace_id=99, published_version_id=3, name="别人的智能体")
+    node = {"id": "a1", "type": "Agent", "config": {"agent_id": 7}}
+    with pytest.raises(ValueError, match="不属于当前工作区"):
+        flow_nodes.run_agent_node(
+            node, {"input": "hi"}, db=_StubDB(outsider), user_id=1, call_stack=[], workspace_id=1
+        )
 
 
 # ── 迭代：结果收集 / 失败策略 / 并行 ─────────────────────────────

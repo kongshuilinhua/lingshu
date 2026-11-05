@@ -101,6 +101,66 @@ def test_trigger_requires_published_target(client, auth_headers):
     assert "发布" in fired.json()["detail"]
 
 
+def test_trigger_rejects_cross_workspace_target(client, auth_headers):
+    """target_id 是调用方填的整数，指向别的工作区的智能体必须被拒。
+
+    少了这道判断，触发器就成了「按 id 调用他人智能体」的入口：
+    跑的是对方的发布版本，花的是对方的模型配额，答案却落在自己的工作区。
+    """
+    registered = client.post(
+        "/api/auth/register",
+        json={"email": "trigger-outsider@example.com", "name": "Outsider", "password": "password123"},
+    ).json()
+    outsider_headers = {"Authorization": f"Bearer {registered['access_token']}"}
+    outsider_agent = _published_agent(client, outsider_headers, name="别人工作区的智能体")
+
+    created = _create_trigger(client, auth_headers, target_id=outsider_agent["id"])
+    assert created.status_code == 400, created.text
+    assert "不属于当前工作区" in created.json()["detail"]
+
+    # 已有触发器也不能改到别人的智能体上
+    own_agent = _published_agent(client, auth_headers, name="自己工作区的智能体")
+    trigger = _create_trigger(client, auth_headers, target_id=own_agent["id"]).json()["trigger"]
+    patched = client.patch(
+        f"/api/triggers/{trigger['id']}",
+        headers=auth_headers,
+        json={"target_id": outsider_agent["id"]},
+    )
+    assert patched.status_code == 400, patched.text
+    assert "不属于当前工作区" in patched.json()["detail"]
+
+
+def test_scoped_target_rejects_foreign_agent():
+    """不依赖数据库地守住核心判断：目标归属不同工作区必须取不到。"""
+    from types import SimpleNamespace
+
+    from core.db.models import Agent, Workflow
+    from core.services.triggers import scoped_target
+
+    own = SimpleNamespace(id=1, workspace_id=10, name="自己的智能体")
+    foreign = SimpleNamespace(id=2, workspace_id=20, name="别人的智能体")
+    workflows = {
+        100: SimpleNamespace(id=100, workspace_id=10, agent_id=1),
+        200: SimpleNamespace(id=200, workspace_id=20, agent_id=2),
+    }
+
+    class _StubDB:
+        def get(self, model, pk):
+            if model is Agent:
+                return next((row for row in (own, foreign) if row.id == pk), None)
+            if model is Workflow:
+                return workflows.get(pk)
+            return None
+
+    db = _StubDB()
+    assert scoped_target(db, workspace_id=10, target_type="agent", target_id=1) is own
+    assert scoped_target(db, workspace_id=10, target_type="agent", target_id=2) is None
+    # 工作流型触发借它的宿主智能体，宿主归属同样要判
+    assert scoped_target(db, workspace_id=10, target_type="workflow", target_id=100) is own
+    assert scoped_target(db, workspace_id=10, target_type="workflow", target_id=200) is None
+    assert scoped_target(db, workspace_id=10, target_type="agent", target_id=999) is None
+
+
 def test_next_run_after_uses_timezone():
     now = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)  # 北京时间 08:00
     # 每天 09:00 北京时间 = 01:00 UTC

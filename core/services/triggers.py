@@ -81,14 +81,38 @@ def next_run_after(cron: str, *, after: datetime | None = None, timezone_name: s
         return None
 
 
+def scoped_target(db: Session, *, workspace_id: int, target_type: str, target_id: int) -> Agent | None:
+    """
+    取触发器指向的智能体，并确认它属于同一个工作区。
+
+    🎯 为什么必须在这里判一次：`target_id` 是调用方填的整数，`agents.id` 又是自增的，
+        业务层若按 id 直接取实体，就等于提供了一个「跨工作区调用他人智能体」的入口——
+        执行的还是对方的发布版本，连同对方的知识库与模型配额。路由层的 require_* 守卫
+        只覆盖 HTTP 入参，覆盖不到这里。
+    工作流型触发借它宿主智能体跑，宿主同样要校验归属。
+    """
+    if target_type == "workflow":
+        workflow = db.get(Workflow, target_id)
+        if not workflow or workflow.workspace_id != workspace_id or not workflow.agent_id:
+            return None
+        agent = db.get(Agent, workflow.agent_id)
+        if not agent or agent.workspace_id != workspace_id:
+            return None
+        return agent
+    agent = db.get(Agent, target_id)
+    if not agent or agent.workspace_id != workspace_id:
+        return None
+    return agent
+
+
 def resolve_target(db: Session, trigger: Trigger) -> Agent | None:
     """触发器指向的智能体。工作流型触发借它的宿主智能体跑。"""
-    if trigger.target_type == "workflow":
-        workflow = db.get(Workflow, trigger.target_id)
-        if not workflow or not workflow.agent_id:
-            return None
-        return db.get(Agent, workflow.agent_id)
-    return db.get(Agent, trigger.target_id)
+    return scoped_target(
+        db,
+        workspace_id=trigger.workspace_id,
+        target_type=trigger.target_type,
+        target_id=trigger.target_id,
+    )
 
 
 # 用发布快照跑，和用户在对话页发消息完全同一条路径
@@ -156,6 +180,9 @@ def create_trigger(db: Session, *, workspace_id: int, user_id: int, payload: dic
     )
     if not trigger.target_id:
         raise ValueError("必须指定触发目标")
+    # 目标必须在同一个工作区内，否则等于给了外部一个按 id 调用他人智能体的入口
+    if scoped_target(db, workspace_id=workspace_id, target_type=trigger.target_type, target_id=trigger.target_id) is None:
+        raise ValueError("触发目标不存在或不属于当前工作区")
     if trigger.kind == "schedule":
         trigger.next_run_at = next_run_after(trigger.cron, timezone_name=trigger.timezone)
         if trigger.next_run_at is None:
@@ -167,6 +194,14 @@ def create_trigger(db: Session, *, workspace_id: int, user_id: int, payload: dic
 
 
 def update_trigger(db: Session, trigger: Trigger, payload: dict) -> Trigger:
+    # 只改了目标才重判归属：目标智能体已被删除的旧触发器，也要允许被停用/改名，
+    # 否则一条坏记录就再也改不动了。
+    target_changed = payload.get("target_id") is not None or payload.get("target_type") is not None
+    if target_changed:
+        next_type = payload.get("target_type") or trigger.target_type
+        next_target_id = int(payload["target_id"]) if payload.get("target_id") is not None else trigger.target_id
+        if scoped_target(db, workspace_id=trigger.workspace_id, target_type=next_type, target_id=next_target_id) is None:
+            raise ValueError("触发目标不存在或不属于当前工作区")
     for key in ("name", "target_type", "cron", "timezone", "message_template"):
         if payload.get(key) is not None:
             setattr(trigger, key, payload[key])

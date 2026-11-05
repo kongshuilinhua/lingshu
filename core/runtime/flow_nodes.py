@@ -483,8 +483,13 @@ def run_loop_node(node: dict, context: dict, *, execute, execute_factory=None) -
     body = [item for item in (config.get("body") or []) if isinstance(item, dict)]
     if not body:
         raise ValueError("循环节点缺少循环体")
-    if any(item.get("type") in {"Start", "Answer"} for item in body):
-        raise ValueError("循环体内不能包含 Start 或 Answer 节点")
+    # 与 core/runtime/graph.py 的 validate_graph 保持同一套限制：
+    # Start/Answer 是主图的首尾，HumanApproval 依赖主执行器的暂停传播，
+    # 而嵌套循环会让每层预算各自生效、把调用量成倍放大。
+    if any(item.get("type") in {"Start", "Answer", "HumanApproval"} for item in body):
+        raise ValueError("循环体内不能包含 Start 或 Answer 节点，也不能包含 HumanApproval 节点")
+    if any(item.get("type") == "Loop" for item in body):
+        raise ValueError("循环体内不能嵌套另一个循环")
 
     items = _render_items(config.get("items"), context)
     if items is not None and not isinstance(items, list):
@@ -662,7 +667,7 @@ def _eval_stop(spec: dict, context: dict, output: dict) -> bool:
 
 # ── 智能体节点 ────────────────────────────────────────────────────
 
-def run_agent_node(node: dict, context: dict, *, db, user_id: int, call_stack: list[int]) -> dict:
+def run_agent_node(node: dict, context: dict, *, db, user_id: int, call_stack: list[int], workspace_id: int) -> dict:
     """
     智能体节点：在流程的固定位置调用一个已发布的智能体，把它的回答写进上下文。
 
@@ -675,6 +680,10 @@ def run_agent_node(node: dict, context: dict, *, db, user_id: int, call_stack: l
         - `config.agent_id`：目标智能体；
         - `config.input`：交给它的输入，默认 `{{input}}`，可写任意模板；
         - 输出写入 `agent_result`（最近一次）、`agent_results`（按节点 id 累积）和 `draft`。
+
+    🛡️ 租户隔离：`config.agent_id` 是用户在画布上填的任意整数，执行层必须自己确认它
+        属于当前工作区。路由层的 `require_agent_read_access` 只守 HTTP 入口，守不到这里——
+        少了这句，流程就能按 id 调用别人工作区的智能体（连同它的知识库与模型配额）。
     """
     config = node.get("config") or {}
     target_id = config.get("agent_id")
@@ -686,6 +695,8 @@ def run_agent_node(node: dict, context: dict, *, db, user_id: int, call_stack: l
     target = db.get(Agent, int(target_id))
     if not target:
         raise ValueError(f"智能体节点 '{node.get('id')}' 的目标智能体不存在")
+    if target.workspace_id != workspace_id:
+        raise ValueError(f"智能体节点 '{node.get('id')}' 的目标智能体不属于当前工作区")
     if not target.published_version_id:
         raise ValueError(f"目标智能体「{target.name}」还没有发布，无法在工作流中调用")
     if target.id in call_stack:

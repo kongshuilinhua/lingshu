@@ -171,25 +171,46 @@ def validate_graph(nodes: list[dict]) -> list[str]:
     if dupes:
         errors.append("Duplicate node id: " + ", ".join(sorted(set(dupes))))
 
-    # 循环体是独立的子图：递归校验，但子图里允许没有 Start/Answer
+    # 循环体是独立的子图：单独校验，子图里允许没有 Start/Answer
     for node in nodes:
-        if isinstance(node, dict) and node.get("type") == "Loop":
-            body = (node.get("config") or {}).get("body") or []
-            if not isinstance(body, list) or not body:
-                errors.append(f"Loop '{node.get('id')}' requires a non-empty body")
+        if not isinstance(node, dict) or node.get("type") != "Loop":
+            continue
+        body = (node.get("config") or {}).get("body") or []
+        if not isinstance(body, list) or not body:
+            errors.append(f"Loop '{node.get('id')}' requires a non-empty body")
+            continue
+        body_types = {item.get("type") for item in body if isinstance(item, dict)}
+        # HumanApproval 依赖主执行器的暂停语义，而循环体没有暂停传播路径，
+        # 放进来的结果是「画了审批但从来没有停下过」，比不许放更糟。
+        if body_types & {"Start", "Answer", "HumanApproval"}:
+            errors.append(f"Loop '{node.get('id')}' body cannot contain Start, Answer or HumanApproval")
+        # 循环体不嵌套循环：每层循环各自计预算，嵌套会把单次运行的模型调用量
+        # 放大若干倍，而校验层只看得见一层 body，拦不住更深的结构。
+        if "Loop" in body_types:
+            errors.append(f"Loop '{node.get('id')}' body cannot contain another Loop")
+        unknown = body_types - allowed
+        if unknown:
+            errors.append(f"Loop '{node.get('id')}' body has unsupported node type: " + ", ".join(sorted(unknown)))
+        body_ids = {item.get("id") for item in body if isinstance(item, dict)}
+        if len(body_ids) != len(body):
+            errors.append(f"Loop '{node.get('id')}' has duplicate body node ids")
+        for item in body:
+            if not isinstance(item, dict):
                 continue
-            body_types = {item.get("type") for item in body if isinstance(item, dict)}
-            if body_types & {"Start", "Answer"}:
-                errors.append(f"Loop '{node.get('id')}' body cannot contain Start or Answer")
-            body_ids = {item.get("id") for item in body if isinstance(item, dict)}
-            if len(body_ids) != len(body):
-                errors.append(f"Loop '{node.get('id')}' has duplicate body node ids")
-            for item in body:
-                if not isinstance(item, dict):
-                    continue
-                nxt = item.get("next")
-                if isinstance(nxt, str) and nxt not in body_ids:
-                    errors.append(f"Loop body node '{item.get('id')}' has dangling next -> '{nxt}'")
+            nxt = item.get("next")
+            if isinstance(nxt, str) and nxt not in body_ids:
+                errors.append(f"Loop body node '{item.get('id')}' has dangling next -> '{nxt}'")
+            if item.get("type") == "Condition":
+                config = item.get("config") or {}
+                for branch in config.get("branches") or []:
+                    if not isinstance(branch, dict):
+                        continue
+                    bn = branch.get("next")
+                    if isinstance(bn, str) and bn not in body_ids:
+                        errors.append(f"Loop body Condition '{item.get('id')}' has dangling branch -> '{bn}'")
+                default = config.get("default")
+                if isinstance(default, str) and default not in body_ids:
+                    errors.append(f"Loop body Condition '{item.get('id')}' has dangling default -> '{default}'")
 
     id_set = set(ids)
     # 悬空边:任意 next / Condition 分支 / default 必须命中已存在的 id
