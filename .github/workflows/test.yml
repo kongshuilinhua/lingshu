@@ -63,7 +63,9 @@ jobs:
           # 保存用户模型 / 工具密钥需要加密密钥；缺失时这些接口返回 503，约 18 个用例必失败。
           API_KEY_ENCRYPTION_KEY: ci-test-encryption-key-not-for-production-use
         # 使用隔离的 MySQL service 跑完整套件，任何集成回归都会阻断合并。
-        run: python -m pytest tests/ -v --timeout=60
+        # faulthandler_timeout：单个用例超过 150 秒会 dump 所有线程栈。--timeout 走 SIGALRM，
+        # 在 MySQL 的 socket 等待里可能叫不醒；带看门狗线程的 faulthandler 能把"卡在哪一行"留在日志里。
+        run: python -m pytest tests/ -v --timeout=60 -o faulthandler_timeout=150
 
   frontend:
     runs-on: ubuntu-latest
