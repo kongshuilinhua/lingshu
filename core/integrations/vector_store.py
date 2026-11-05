@@ -61,8 +61,8 @@ class MemoryVectorStore:
         filters = filters or {}
         hits = []
         for vector_id, item_vector, text, metadata in self._items:
-            # 🛡️ 过滤校验：内存环境下的前置 KV 元数据完全匹配
-            if any(metadata.get(key) != value for key, value in filters.items()):
+            # 🛡️ 过滤校验：内存环境下的前置 KV 元数据匹配；列表值表示「属于其中之一」
+            if not all(_matches(metadata.get(key), value) for key, value in filters.items()):
                 continue
             hits.append(VectorHit(vector_id, text, _cosine(vector, item_vector), metadata))
         return sorted(hits, key=lambda item: item.score, reverse=True)[:limit]
@@ -247,6 +247,12 @@ class MilvusVectorStore:
             return
 
 
+def _matches(actual, expected) -> bool:
+    if isinstance(expected, (list, tuple, set)):
+        return actual in expected
+    return actual == expected
+
+
 def build_milvus_filter(filters: dict) -> str:
     """
     将普通的 Python 字典过滤结构转换为符合 Milvus ANTLR 语法规范的高级布尔代数过滤表达式。
@@ -256,7 +262,10 @@ def build_milvus_filter(filters: dict) -> str:
     """
     parts = []
     for key, value in filters.items():
-        if isinstance(value, str):
+        if isinstance(value, (list, tuple, set)):
+            items = ", ".join(f'"{str(item).replace(chr(34), chr(92) + chr(34))}"' if isinstance(item, str) else str(int(item)) for item in value)
+            parts.append(f"{key} in [{items}]")
+        elif isinstance(value, str):
             safe = value.replace('"', '\\"')
             parts.append(f'{key} == "{safe}"')
         else:

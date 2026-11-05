@@ -19,7 +19,16 @@ from core.integrations.storage import object_storage
 # 区分 image 与 document 可以让系统对于不同资产实施差异化的编排链路（如多模态 Vision vs RAG 检索分流）。
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 TEXT_TYPES = {"text/plain", "text/markdown", "application/markdown", "text/csv"}
-DOC_TYPES = TEXT_TYPES | {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+# OOXML 家族（docx/xlsx/pptx）共用的 mime-type 前缀
+_OOXML_PREFIX = "application/vnd.openxmlformats-officedocument."
+XLSX_TYPE = _OOXML_PREFIX + "spreadsheetml.sheet"
+PPTX_TYPE = _OOXML_PREFIX + "presentationml.presentation"
+DOC_TYPES = TEXT_TYPES | {
+    "application/pdf",
+    _OOXML_PREFIX + "wordprocessingml.document",
+    XLSX_TYPE,
+    PPTX_TYPE,
+}
 LANGCHAIN_EXTRA_SUFFIXES = {".html", ".htm"}
 LANGCHAIN_EXTRA_TYPES = {"text/html", "application/xhtml+xml"}
 
@@ -153,8 +162,12 @@ def extract_document_text(filename: str, content_type: str, raw: bytes) -> str:
         return decode_bytes(raw)
     if content_type == "application/pdf" or suffix == ".pdf":
         return _extract_pdf_text(raw)
-    if content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or suffix == ".docx":
+    if content_type == _OOXML_PREFIX + "wordprocessingml.document" or suffix == ".docx":
         return _extract_docx_text(raw)
+    if content_type == XLSX_TYPE or suffix == ".xlsx":
+        return _extract_xlsx_text(raw)
+    if content_type == PPTX_TYPE or suffix == ".pptx":
+        return _extract_pptx_text(raw)
     if get_settings().ingest_langchain_loaders and (
         suffix in LANGCHAIN_EXTRA_SUFFIXES or content_type in LANGCHAIN_EXTRA_TYPES
     ):
@@ -243,7 +256,7 @@ def _kind(content_type: str, filename: str) -> str:
     suffix = Path(filename).suffix.lower()
     if content_type in IMAGE_TYPES or suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
         return "image"
-    if content_type in DOC_TYPES or suffix in {".txt", ".md", ".markdown", ".csv", ".pdf", ".docx"}:
+    if content_type in DOC_TYPES or suffix in {".txt", ".md", ".markdown", ".csv", ".pdf", ".docx", ".xlsx", ".pptx"}:
         return "document"
     if get_settings().ingest_langchain_loaders and (
         content_type in LANGCHAIN_EXTRA_TYPES or suffix in LANGCHAIN_EXTRA_SUFFIXES
@@ -281,6 +294,122 @@ def _extract_pdf_text(raw: bytes) -> str:
         if chunks:
             return "\n".join(chunks)
         return re.sub(r"\s+", " ", text)[:4000]
+
+
+def _extract_xlsx_text(raw: bytes) -> str:
+    """
+    Excel (xlsx) 纯文本提取器，同样只用标准库解 OOXML。
+
+    🎯 与 DOCX 提取器保持同一思路：xlsx 是 zip，工作表在 `xl/worksheets/sheetN.xml`，
+    字符串常集中在 `xl/sharedStrings.xml` 里按索引引用。
+
+    🧠 输出形态：每个工作表一段，行内单元格用 ` | ` 分隔，空行丢弃。
+        RAG 需要的是「同一行的单元格仍然挨在一起」——比如「产品名 | 价格 | 库存」，
+        拆成独立行会让检索片段丢掉列语义。单元格坐标不参与输出，避免 `A1`、`B2` 这类噪音进向量。
+    """
+    try:
+        from io import BytesIO
+
+        with ZipFile(BytesIO(raw)) as archive:
+            names = archive.namelist()
+            shared = _xlsx_shared_strings(archive) if "xl/sharedStrings.xml" in names else []
+            # 工作表按文件名排序：sheet1, sheet2 … sheet10
+            sheets = sorted(
+                (name for name in names if re.match(r"xl/worksheets/sheet\d+\.xml$", name)),
+                key=lambda name: int(re.search(r"sheet(\d+)\.xml$", name).group(1)),
+            )
+            if not sheets:
+                raise ValueError("Invalid XLSX document")
+            blocks = []
+            for index, sheet_name in enumerate(sheets, start=1):
+                xml = archive.read(sheet_name).decode("utf-8", errors="replace")
+                rows = _xlsx_rows(xml, shared)
+                if rows:
+                    blocks.append(f"## 工作表 {index}\n" + "\n".join(rows))
+            return "\n\n".join(blocks)
+    except (KeyError, BadZipFile) as exc:
+        raise ValueError("Invalid XLSX document") from exc
+
+
+def _xlsx_shared_strings(archive: ZipFile) -> list[str]:
+    """读取共享字符串表；解析失败返回空表，让调用方退化为只取单元格原始值。"""
+    try:
+        xml = archive.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
+    except KeyError:
+        return []
+    return [
+        _strip_xml("".join(re.findall(r"<t[^>]*>(.*?)</t>", item, re.DOTALL)))
+        for item in re.findall(r"<si[ >].*?</si>", xml, re.DOTALL)
+    ]
+
+
+def _xlsx_rows(xml: str, shared: list[str]) -> list[str]:
+    """把一张工作表拆成「单元格用 | 连接」的文本行。"""
+    rows = []
+    for row_xml in re.findall(r"<row[ >].*?</row>", xml, re.DOTALL):
+        cells = []
+        for cell_xml in re.findall(r"<c[ >].*?(?:</c>|/>)", row_xml, re.DOTALL):
+            cell_type = re.search(r'\bt="([^"]+)"', cell_xml)
+            value = ""
+            if cell_type and cell_type.group(1) == "inlineStr":
+                value = _strip_xml("".join(re.findall(r"<t[^>]*>(.*?)</t>", cell_xml, re.DOTALL)))
+            else:
+                raw_value = re.search(r"<v[^>]*>(.*?)</v>", cell_xml, re.DOTALL)
+                if raw_value:
+                    text = _strip_xml(raw_value.group(1))
+                    if cell_type and cell_type.group(1) == "s":
+                        try:
+                            value = shared[int(text)]
+                        except (ValueError, IndexError):
+                            value = ""
+                    else:
+                        value = text
+            value = value.strip()
+            if value:
+                cells.append(value)
+        if cells:
+            rows.append(" | ".join(cells))
+    return rows
+
+
+def _extract_pptx_text(raw: bytes) -> str:
+    """
+    PowerPoint (pptx) 纯文本提取器。
+
+    🎯 幻灯片正文在 `ppt/slides/slideN.xml`，文字节点是 DrawingML 的 `<a:t>`。
+        按幻灯片编号输出，保留「第几页」这个结构信息——演示文稿的上下文强依赖页序。
+    备注页（notesSlides）单独拼接在后面：很多汇报的实际信息量在备注里。
+    """
+    try:
+        from io import BytesIO
+
+        with ZipFile(BytesIO(raw)) as archive:
+            names = archive.namelist()
+            slides = sorted(
+                (name for name in names if re.match(r"ppt/slides/slide\d+\.xml$", name)),
+                key=lambda name: int(re.search(r"slide(\d+)\.xml$", name).group(1)),
+            )
+            if not slides:
+                raise ValueError("Invalid PPTX document")
+            blocks = []
+            for index, slide_name in enumerate(slides, start=1):
+                xml = archive.read(slide_name).decode("utf-8", errors="replace")
+                lines = [line.strip() for line in re.findall(r"<a:t[^>]*>(.*?)</a:t>", xml, re.DOTALL)]
+                body = "\n".join(_strip_xml(line) for line in lines if line.strip())
+                if body:
+                    blocks.append(f"## 第 {index} 页\n{body}")
+            notes = []
+            for name in sorted(name for name in names if re.match(r"ppt/notesSlides/notesSlide\d+\.xml$", name)):
+                xml = archive.read(name).decode("utf-8", errors="replace")
+                lines = [line.strip() for line in re.findall(r"<a:t[^>]*>(.*?)</a:t>", xml, re.DOTALL)]
+                text = "\n".join(_strip_xml(line) for line in lines if line.strip())
+                if text:
+                    notes.append(text)
+            if notes:
+                blocks.append("## 备注\n" + "\n\n".join(notes))
+            return "\n\n".join(blocks)
+    except (KeyError, BadZipFile) as exc:
+        raise ValueError("Invalid PPTX document") from exc
 
 
 def _extract_docx_text(raw: bytes) -> str:

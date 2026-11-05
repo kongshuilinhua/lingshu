@@ -5,13 +5,13 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
   SquarePen, ImagePlus, FileText, X,
-  AlertTriangle, Brain, Database, Send, ChevronDown,
+  AlertTriangle, Brain, Database, Send, ChevronDown, Globe,
 } from 'lucide-react';
 import { uploadTypeFromContentType } from '../../utils.js';
 
 const CHAT_COPY = {
   noAgentTitle: '暂无可对话的智能体',
-  noAgentDesc: '主对话页只开放已审核并上架的智能体。请先发布，普通用户发布后需要管理员审核。',
+  noAgentDesc: '主对话页只开放已发布的智能体。请先在编辑页发布。',
   welcomeTitle: '今天想让哪个智能体帮你？',
   welcomeDesc: '选择智能体后可以直接聊天，也可以进入配置页调整能力。',
   promptIntro: '介绍一下你的能力',
@@ -27,6 +27,7 @@ const CHAT_COPY = {
   thinking: '深度思考',
   search: '联网搜索',
   rag: '知识库',
+  search: '联网搜索',
   unavailable: '不可用',
   on: '开启',
   off: '关闭',
@@ -62,12 +63,16 @@ export function ChatComposer({
   onNewChat,
   onSubmit,
   onToggleRag,
+  onToggleSearch,
   onToggleThinking,
   placeholder,
   removeAttachment,
   ragAvailable,
   ragEnabled,
   ragStatus,
+  searchAvailable,
+  searchEnabled,
+  searchStatus,
   submitDisabled,
   thinkingCapability,
   thinkingEnabled,
@@ -193,6 +198,18 @@ export function ChatComposer({
           >
             <Database size={14} />
             <span>{CHAT_COPY.rag}</span>
+          </button>
+          <button
+            type="button"
+            className={searchEnabled ? 'search-toggle on' : 'search-toggle'}
+            disabled={!searchAvailable}
+            title={searchStatus}
+            aria-label={searchStatus}
+            aria-pressed={searchEnabled}
+            onClick={onToggleSearch}
+          >
+            <Globe size={14} />
+            <span>{CHAT_COPY.search}</span>
           </button>
         </div>
         <div className="composer-action-right">

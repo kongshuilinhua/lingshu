@@ -17,7 +17,9 @@ from core.services.knowledge import (
     KnowledgeDocumentError,
     add_document,
     chunk_document,
+    create_chunk,
     create_knowledge_base,
+    delete_chunk,
     delete_document,
     delete_knowledge_base,
     document_payload,
@@ -28,11 +30,13 @@ from core.services.knowledge import (
     mark_document_reindexing,
     run_document_ingestion,
     run_kb_reindex,
+    update_chunk,
 )
+from core.services.rag import retrieve
 from core.services.rag_cache import redis_store
 from core.tasks.dispatch import dispatch
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +44,23 @@ router = APIRouter(prefix="/api/knowledge-bases", tags=["knowledge"])
 
 
 class ResegmentRequest(BaseModel):
-    parse_mode: str = "precise"
+    # 注意：曾经有一个 `parse_mode` 字段，但它从未被任何代码读取（切分只认 segment_mode），
+    # 前端也从未提交过它。已移除，避免调用方误以为“精确/快速解析”是可选行为。
     segment_mode: str = "auto"
     delimiter: str | None = "##"
     max_chunk_len: int = 5000
     overlap_pct: int = 10
     hierarchy_level: int = 3
     keep_hierarchy_info: bool = True
+
+
+class DocumentMetadataRequest(BaseModel):
+    """整份覆盖文档元数据；值一律按字符串存，过滤时也按字符串比较。"""
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class ChunkTextRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
 
 
 class PreviewUploadRequest(ResegmentRequest):
@@ -206,6 +220,76 @@ def get_document_chunks(kb_id: int, document_id: int, membership: WorkspaceMembe
     return {"document": document_payload(document, len(chunks)), "chunks": chunks}
 
 
+def _require_document(db: Session, kb: KnowledgeBase, document_id: int) -> KnowledgeDocument:
+    document = db.query(KnowledgeDocument).filter(KnowledgeDocument.knowledge_base_id == kb.id, KnowledgeDocument.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+
+def _require_chunk(db: Session, document: KnowledgeDocument, chunk_id: int) -> KnowledgeChunk:
+    chunk = db.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document.id, KnowledgeChunk.id == chunk_id).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    return chunk
+
+
+def _chunk_response(db: Session, document: KnowledgeDocument) -> dict:
+    chunks = list_document_chunks(db, document_id=document.id)
+    return {"document": document_payload(document, len(chunks)), "chunks": chunks}
+
+
+@router.put("/{kb_id}/documents/{document_id}/metadata")
+def put_document_metadata(kb_id: int, document_id: int, request: DocumentMetadataRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """给文档打元数据（产品、版本、部门…），检索时可按它圈定范围。"""
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    require_kb_write_access(kb, membership)
+    document = _require_document(db, kb, document_id)
+    cleaned = {key.strip()[:64]: str(value).strip()[:255] for key, value in request.metadata.items() if key.strip()}
+    if len(cleaned) > 20:
+        raise HTTPException(status_code=400, detail="每篇文档最多 20 个元数据字段")
+    document.doc_metadata = cleaned
+    db.commit()
+    db.refresh(document)
+    return {"document": document_payload(document)}
+
+
+@router.post("/{kb_id}/documents/{document_id}/chunks")
+def create_document_chunk(kb_id: int, document_id: int, request: ChunkTextRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """补一条切片：文档漏掉的关键内容直接补进去，不用改原文再重切。"""
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    require_kb_write_access(kb, membership)
+    document = _require_document(db, kb, document_id)
+    try:
+        create_chunk(db, document=document, text=request.text)
+    except KnowledgeDocumentError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _chunk_response(db, document)
+
+
+@router.patch("/{kb_id}/documents/{document_id}/chunks/{chunk_id}")
+def update_document_chunk(kb_id: int, document_id: int, chunk_id: int, request: ChunkTextRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """改一条切片：重新向量化并刷新 BM25 词表，下次检索立刻生效。"""
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    require_kb_write_access(kb, membership)
+    document = _require_document(db, kb, document_id)
+    chunk = _require_chunk(db, document, chunk_id)
+    try:
+        update_chunk(db, document=document, chunk=chunk, text=request.text)
+    except KnowledgeDocumentError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _chunk_response(db, document)
+
+
+@router.delete("/{kb_id}/documents/{document_id}/chunks/{chunk_id}")
+def delete_document_chunk(kb_id: int, document_id: int, chunk_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    require_kb_write_access(kb, membership)
+    document = _require_document(db, kb, document_id)
+    delete_chunk(db, document=document, chunk=_require_chunk(db, document, chunk_id))
+    return _chunk_response(db, document)
+
+
 @router.post("/{kb_id}/documents/{document_id}/preview")
 def preview_document_chunks(kb_id: int, document_id: int, request: ResegmentRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
     kb = require_workspace_kb(db, membership.workspace_id, kb_id)
@@ -278,3 +362,67 @@ def update_kb(kb_id: int, request: KnowledgeBaseUpdateRequest, membership: Works
     db.commit()
     db.refresh(kb)
     return {"knowledge_base": knowledge_base_summary(kb)}
+
+
+class RetrievalTestRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=6, ge=1, le=20)
+    rerank_enabled: bool = True
+    metadata_filter: dict | None = None
+
+
+
+@router.post("/{kb_id}/retrieval-test")
+def retrieval_test(kb_id: int, request: RetrievalTestRequest, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """
+    召回测试：对单个知识库跑一遍真实检索链路，返回每个片段在各通道的分数。
+
+    🎯 用于调 RAG：看某个问题到底能不能命中、命中的是哪段、是向量还是关键词命中的、
+        rerank 把它排到了第几。走的是和对话完全相同的 retrieve()，所见即对话时所得。
+    🛡️ 关闭缓存：调参时要看实时结果，命中旧缓存会让刚改的分块/文档看起来没生效。
+        停用的知识库直接返回 reason=all_knowledge_bases_disabled，与对话时的行为一致。
+    """
+    kb = require_workspace_kb(db, membership.workspace_id, kb_id)
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="请输入测试问题")
+    config = {
+        "top_k": request.top_k,
+        "rerank_enabled": request.rerank_enabled,
+        "cache_enabled": False,
+        "parent_expansion": False,
+    }
+    if request.metadata_filter:
+        config["metadata_filter"] = request.metadata_filter
+    started = time.monotonic()
+    result = retrieve(db, workspace_id=membership.workspace_id, knowledge_base_ids=[kb.id], query=query, config=config)
+    status = result.status
+    return {
+        "query": query,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "status": {
+            "reason": status.get("reason"),
+            "dense": status.get("dense"),
+            "bm25": status.get("bm25"),
+            "rrf": status.get("rrf"),
+            "rerank": status.get("rerank"),
+            "translate": status.get("translate"),
+            "no_evidence": status.get("no_evidence"),
+            "metadata_filter": status.get("metadata_filter"),
+        },
+        "items": [
+            {
+                "chunk_id": item.get("chunk_id"),
+                "document_id": item.get("document_id"),
+                "title": item.get("title"),
+                "section": item.get("section"),
+                "page": item.get("page"),
+                "snippet": item.get("content") or item.get("snippet"),
+                "score": item.get("score"),
+                "dense_score": item.get("dense_score"),
+                "bm25_score": item.get("bm25_score"),
+                "channel": item.get("retrieval_channel"),
+            }
+            for item in result.sources
+        ],
+    }

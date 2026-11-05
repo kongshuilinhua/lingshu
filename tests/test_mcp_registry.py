@@ -17,7 +17,7 @@ def catalog_db():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        workspaces = [Workspace(name="One", slug="one"), Workspace(name="Two", slug="two")]
+        workspaces = [Workspace(name="One", slug="default"), Workspace(name="Two", slug="two")]
         users = [User(email="one@example.test", name="One", password_hash="test"),
                  User(email="two@example.test", name="Two", password_hash="test")]
         db.add_all(workspaces + users)

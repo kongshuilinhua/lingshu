@@ -1,7 +1,7 @@
 # Lingshu Agent 项目开发规范
 
 ## 项目概述
-Lingshu Agent 是 FastAPI(Python 3.11,后端)+ Vite/React 18(前端)的全栈 AI 智能体平台:账号、智能体管理、知识库 RAG、工具集成、发布审核、多轮会话。详见 `README.md`。
+Lingshu Agent 是 FastAPI(Python 3.11,后端)+ Vite/React 18(前端)的全栈 AI 智能体平台:账号、智能体管理、知识库 RAG、工具集成、工作流编排、多轮会话。详见 `README.md`。
 
 ## 回复语言
 所有回复一律用中文。

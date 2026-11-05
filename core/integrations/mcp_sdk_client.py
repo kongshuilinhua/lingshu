@@ -117,7 +117,10 @@ class SdkMcpClient:
             raise McpSdkError("OAuth 服务响应超时，请检查网络连接和服务地址。") from exc
 
     def _serve_loop(self) -> None:
-        assert self._loop is not None
+        # 不能用 assert 做运行期前置校验：`python -O` 下断言会被整体剔除，
+        # 那时这里变成 `set_event_loop(None)`，报的是一个与真实原因无关的 TypeError。
+        if self._loop is None:
+            raise McpSdkError("MCP client event loop is not running")
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
@@ -197,7 +200,8 @@ class SdkMcpClient:
 
     def _invoke(self, factory):
         self._ensure()
-        assert self._loop is not None
+        if self._loop is None:
+            raise McpSdkError("MCP client event loop is not running")
         future = asyncio.run_coroutine_threadsafe(factory(), self._loop)
         try:
             return future.result(timeout=self.timeout_seconds + 5)
@@ -209,7 +213,8 @@ class SdkMcpClient:
             raise McpSdkError("MCP service request failed") from exc
 
     async def _list(self, kind: str, *, refresh: bool = False) -> list[dict]:
-        assert self._client is not None
+        if self._client is None:
+            raise McpSdkError("MCP client is not connected")
         method = getattr(self._client, f"list_{kind}")
         items: list[dict] = []
         cursor = None
@@ -238,7 +243,8 @@ class SdkMcpClient:
 
     def call_tool_result(self, name: str, arguments: dict | None = None) -> dict:
         async def call():
-            assert self._client is not None
+            if self._client is None:
+                raise McpSdkError("MCP client is not connected")
             result = await self._client.call_tool(name, arguments or {}, read_timeout_seconds=self.timeout_seconds)
             return result.model_dump(mode="json", by_alias=True)
 
@@ -246,7 +252,8 @@ class SdkMcpClient:
 
     def read_resource(self, uri: str) -> dict:
         async def read():
-            assert self._client is not None
+            if self._client is None:
+                raise McpSdkError("MCP client is not connected")
             result = await self._client.read_resource(uri)
             return result.model_dump(mode="json", by_alias=True)
 
@@ -254,7 +261,8 @@ class SdkMcpClient:
 
     def get_prompt(self, name: str, arguments: dict[str, str] | None = None) -> dict:
         async def read():
-            assert self._client is not None
+            if self._client is None:
+                raise McpSdkError("MCP client is not connected")
             result = await self._client.get_prompt(name, arguments or {})
             return result.model_dump(mode="json", by_alias=True)
 

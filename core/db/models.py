@@ -40,6 +40,11 @@ class User(Base):
     # 🛡️ 安全设计：存储单向加盐加密后的密码哈希，绝对禁止明文存储。
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 🎯 上次进入的工作区。登录时用它决定令牌里的 workspace_id。
+    #    没有它的话，被邀请进第二个工作区的人下次登录会退回最早那条成员身份，
+    #    邀请接受算是白做了。不设外键：工作区被删时这里留个失效 id，
+    #    读取方按「查不到成员身份就回落」处理，不值得为它加级联。
+    last_active_workspace_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
@@ -169,6 +174,10 @@ class Agent(Base):
     temperature: Mapped[float] = mapped_column(Float, default=0.4)
     status: Mapped[str] = mapped_column(String(20), default="draft")  # 'draft' / 'published'
     published_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 引用一个独立工作流；为空则沿用智能体内置的 `WorkflowDefinition`
+    workflow_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     is_template: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -364,6 +373,9 @@ class KnowledgeDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     segment_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ingestion_log: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 用户给文档打的元数据（如 {"产品": "A", "版本": "2025"}），检索时可按它圈定文档范围。
+    # 挂在文档上而非切片上：没人会逐条给切片打标签，主流平台也都按文档维度过滤。
+    doc_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 
@@ -604,15 +616,73 @@ class McpOAuthAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class Workflow(Base):
+    """
+    独立工作流资源。
+
+    编排的主体是工作流本身，不再依附某个智能体；智能体的内置流程仍走
+    `WorkflowDefinition`（老字段，行为不变），新建的编排则由这张表承接。
+    """
+    __tablename__ = "workflows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    nodes: Mapped[list] = mapped_column(JSON, default=list)
+    # 运行配置（模型/提示词）挂在一个隐藏宿主智能体上：会话与 Run 的 agent_id 是非空外键，
+    # 借它承接运行即可复用整套对话链路；该智能体不出现在智能体列表与市场里。
+    agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class WorkflowDefinition(Base):
     """
     工作流节点定义实体。
+
+    兼容保留：保存智能体「内置流程」。独立工作流见 `Workflow`。
     """
     __tablename__ = "workflow_definitions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), unique=True, index=True)
     nodes: Mapped[list] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class Trigger(Base):
+    """
+    触发器：让智能体/工作流在没有人说话的时候也能被唤起。
+
+    🎯 两种触发方式共用一张表：
+        - webhook：外部系统 POST 一个 token 地址，body 可带 `{{变量}}` 填进消息模板；
+        - schedule：用 cron 表达式定时唤起，由平台内的调度线程扫描 `next_run_at`。
+    触发一次 = 用目标智能体的发布版本跑一轮对话，产物落成普通会话与 Run，
+    所以「触发了什么、模型怎么答的」在现有的运行详情页里直接能看。
+    """
+    __tablename__ = "triggers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    # 'agent' 直接跑智能体；'workflow' 跑独立工作流（借它的宿主智能体）
+    target_type: Mapped[str] = mapped_column(String(20), default="agent")
+    target_id: Mapped[int] = mapped_column(Integer, index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="webhook")  # 'webhook' / 'schedule'
+    token: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    cron: Mapped[str] = mapped_column(String(80), default="")
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    message_template: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 调度扫描依据；webhook 型为空。取用前用条件更新原子抢占，多进程不会重复触发。
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
@@ -628,6 +698,8 @@ class Session(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="新对话")
     is_debug: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, comment="调试会话标记")
+    # 由哪个触发器唤起；为空即用户自己发起的会话
+    trigger_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
@@ -643,6 +715,9 @@ class Message(Base):
     role: Mapped[str] = mapped_column(String(20))  # 'user' / 'assistant'
     content: Mapped[str] = mapped_column(LongText)
     sources: Mapped[list] = mapped_column(JSON, default=list)  # 用于回显大模型回答的知识库召回引用
+    # 生成这条助手回答的那次运行；用于「运行详情」回看各节点。用户消息与旧数据为空。
+    # 不建外键：删会话时运行与消息各自清理，避免级联顺序问题。
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
@@ -656,7 +731,10 @@ class Run(Base):
     workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
     agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(20), default="running")  # 'running' / 'succeeded' / 'failed'
+    status: Mapped[str] = mapped_column(String(20), default="running")  # 'running' / 'paused' / 'succeeded' / 'failed' / 'rejected'
+    # 暂停在 HumanApproval 节点时保存的可恢复状态：节点后的上下文快照、工作流、下一跳与模式。
+    # 恢复接口据此从暂停点继续执行，而不是从头重跑（重跑会丢掉已检索的证据与工具结果）。
+    resume_state: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -678,6 +756,8 @@ class RunStep(Base):
     status: Mapped[str] = mapped_column(String(20))
     input: Mapped[dict] = mapped_column(JSON, default=dict)
     output: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 节点耗时（毫秒），运行详情据此标出慢节点；旧数据为空
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

@@ -5,8 +5,8 @@
 
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_KNOWLEDGE_BYTES = 30 * 1024 * 1024; // 知识库文档单独上限（文献类 PDF 较大），与后端 upload_max_bytes 保持一致
-const KNOWLEDGE_FILE_ACCEPT = '.txt,.md,.markdown,.csv,.pdf,.docx';
-const KNOWLEDGE_FILE_EXTENSIONS = ['txt', 'md', 'markdown', 'csv', 'pdf', 'docx'];
+const KNOWLEDGE_FILE_ACCEPT = '.txt,.md,.markdown,.csv,.pdf,.docx,.xlsx,.pptx';
+const KNOWLEDGE_FILE_EXTENSIONS = ['txt', 'md', 'markdown', 'csv', 'pdf', 'docx', 'xlsx', 'pptx'];
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -19,7 +19,7 @@ function fileToBase64(file) {
 
 function guessContentType(filename) {
   const suffix = filename.toLowerCase().split('.').pop();
-  const types = { txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown', csv: 'text/csv', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+  const types = { txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown', csv: 'text/csv', pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' };
   return types[suffix] || 'application/octet-stream';
 }
 
@@ -30,7 +30,7 @@ function uploadTypeFromContentType(contentType = '') {
 function validateKnowledgeFile(file) {
   if (file.size > MAX_KNOWLEDGE_BYTES) throw new Error('知识库文件不能超过 30MB');
   const suffix = String(file.name || '').toLowerCase().split('.').pop();
-  if (!KNOWLEDGE_FILE_EXTENSIONS.includes(suffix)) throw new Error('知识库仅支持 TXT、MD、CSV、PDF、DOCX');
+  if (!KNOWLEDGE_FILE_EXTENSIONS.includes(suffix)) throw new Error('知识库仅支持 TXT、MD、CSV、PDF、DOCX、XLSX、PPTX');
 }
 
 function filesFromList(fileList) {

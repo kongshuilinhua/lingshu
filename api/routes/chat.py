@@ -13,8 +13,9 @@ from api.access import (
     require_workspace_agent,
 )
 from api.deps import get_current_membership, get_current_user
+from api.rate_limit import redis_rate_limit
 from api.schemas import ChatRequest, FeedbackRequest, SessionUpdateRequest
-from api.serializers import message_payload, session_payload
+from api.serializers import message_payload, session_message_counts, session_payload
 from core.db.models import (
     Agent,
     Feedback,
@@ -142,15 +143,20 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
                 run = event["run"]
                 answer = event["answer"]
                 sources = event["sources"]
+            elif event["event"] == "paused":
+                # HumanApproval 暂停：不能再往下走 done——此时没有 final answer，
+                # run 也还在 paused 状态，前端应停下来等审批。
+                yield sse_event("paused", event.get("data", {}))
+                return
             elif event["event"] == "memory_compaction":
                 yield sse_event("memory_compaction", event["data"])
         if sources:
             yield sse_event("sources", {"items": sources})
-        assistant = Message(session_id=session.id, role="assistant", content=answer, sources=sources)
+        assistant = Message(session_id=session.id, role="assistant", content=answer, sources=sources, run_id=run.id if run is not None else None)
         db.add(assistant)
         db.commit()
         db.refresh(assistant)
-        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id, "content": answer})
+        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id if run is not None else None, "content": answer})
 
         if runner.runtime and getattr(runner.runtime, "settings", {}).get("memory", {}).get("enabled"):
             dispatch(
@@ -175,9 +181,75 @@ def stream_chat_events(db: Session, agent: Agent, user_id: int, request: ChatReq
         yield sse_event("error", safe_stream_error(exc))
 
 
+def stream_resume_events(db: Session, run: Run, approved: bool) -> Iterable[str]:
+    """从 HumanApproval 暂停点继续执行，并把结果作为一条新的助手消息落库。"""
+    session = db.get(ChatSession, run.session_id)
+    agent = db.get(Agent, run.agent_id)
+    if not session or not agent:
+        yield sse_event("error", {"message": "会话或智能体不存在"})
+        return
+    state = dict(run.resume_state or {})
+    user_message = str((state.get("context") or {}).get("input") or "")
+    runner = WorkflowRunner(db)
+    answer = ""
+    sources = []
+    rejected = False
+    try:
+        for event in runner.resume_events(
+            run=run, agent=agent, chat_session=session,
+            user_message=user_message, approved=approved,
+        ):
+            if event["event"] == "token":
+                yield sse_event("token", {"content": event.get("content", "")})
+            elif event["event"] == "thinking_token":
+                yield sse_event("thinking_token", {"content": event.get("content", "")})
+            elif event["event"] == "token_reset":
+                yield sse_event("token_reset", {"content": event.get("content", "")})
+            elif event["event"] == "runtime":
+                runtime_event = event["data"]
+                yield sse_event(runtime_event.get("event", "tool_call"), runtime_event.get("data", {}))
+            elif event["event"] == "step":
+                step = event["step"]
+                if not step.get("events_streamed"):
+                    for runtime_event in step.get("events", []):
+                        yield sse_event(runtime_event.get("event", "tool_call"), runtime_event.get("data", {}))
+                yield sse_event("run_step", step)
+            elif event["event"] == "complete":
+                answer = event["answer"]
+                sources = event["sources"]
+            elif event["event"] == "rejected":
+                rejected = True
+            elif event["event"] == "paused":
+                # 恢复路径上再次遇到审批点（链路里有两个 HumanApproval）
+                yield sse_event("paused", event.get("data", {}))
+                return
+            elif event["event"] == "memory_compaction":
+                yield sse_event("memory_compaction", event["data"])
+        if rejected:
+            yield sse_event("rejected", {"run_id": run.id if run is not None else None, "session_id": session.id})
+            return
+        if sources:
+            yield sse_event("sources", {"items": sources})
+        assistant = Message(session_id=session.id, role="assistant", content=answer, sources=sources, run_id=run.id if run is not None else None)
+        db.add(assistant)
+        db.commit()
+        db.refresh(assistant)
+        yield sse_event("done", {"session_id": session.id, "message_id": assistant.id, "run_id": run.id if run is not None else None, "content": answer})
+    except Exception as exc:
+        db.rollback()
+        try:
+            run.status = "failed"
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            db.rollback()
+        logger.exception("Agent chat resume failed")
+        yield sse_event("error", safe_stream_error(exc))
+
+
 # ── Chat Stream ──
 
-@router.post("/api/agents/{agent_id}/chat/stream")
+@router.post("/api/agents/{agent_id}/chat/stream", dependencies=[Depends(redis_rate_limit(30, 60, scope="chat-stream"))])
 def chat_stream(agent_id: int, request: ChatRequest, background_tasks: BackgroundTasks, membership: WorkspaceMember = Depends(get_current_membership), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     agent = require_workspace_agent(db, membership.workspace_id, agent_id)
     require_agent_read_access(agent, membership)
@@ -187,6 +259,34 @@ def chat_stream(agent_id: int, request: ChatRequest, background_tasks: Backgroun
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="所选模型不可用或无权访问，请重新选择。") from exc
     return StreamingResponse(stream_chat_events(db, agent, current_user.id, request, background_tasks), media_type="text/event-stream")
+
+
+@router.post("/api/runs/{run_id}/approve")
+def approve_run(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """放行暂停在 HumanApproval 节点的运行，从下一跳继续执行（SSE 流式返回后续输出）。"""
+    run = db.get(Run, run_id)
+    if not run or run.workspace_id != membership.workspace_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    session = db.get(ChatSession, run.session_id)
+    if session:
+        require_session_access(session, membership)
+    if run.status != "paused":
+        raise HTTPException(status_code=409, detail="该运行不在暂停中，无法审批。")
+    return StreamingResponse(stream_resume_events(db, run, True), media_type="text/event-stream")
+
+
+@router.post("/api/runs/{run_id}/reject")
+def reject_run(run_id: int, membership: WorkspaceMember = Depends(get_current_membership), db: Session = Depends(get_db)):
+    """驳回暂停中的运行：不执行后续节点，Run 置 rejected。"""
+    run = db.get(Run, run_id)
+    if not run or run.workspace_id != membership.workspace_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    session = db.get(ChatSession, run.session_id)
+    if session:
+        require_session_access(session, membership)
+    if run.status != "paused":
+        raise HTTPException(status_code=409, detail="该运行不在暂停中，无法审批。")
+    return StreamingResponse(stream_resume_events(db, run, False), media_type="text/event-stream")
 
 
 # ── Sessions ──
@@ -199,7 +299,8 @@ def list_agent_sessions(agent_id: int, membership: WorkspaceMember = Depends(get
     if not can_manage(membership.role):
         query = query.filter(ChatSession.user_id == membership.user_id)
     sessions = query.order_by(ChatSession.updated_at.desc()).all()
-    return {"items": [session_payload(session, db) for session in sessions]}
+    counts = session_message_counts(db, [session.id for session in sessions])
+    return {"items": [session_payload(session, db, message_count=counts.get(session.id, 0)) for session in sessions]}
 
 
 @router.get("/api/sessions/{session_id}")
@@ -266,7 +367,88 @@ def get_run_steps(run_id: int, membership: WorkspaceMember = Depends(get_current
     if session:
         require_session_access(session, membership)
     steps = db.query(RunStep).filter(RunStep.run_id == run.id).order_by(RunStep.id.asc()).all()
-    return {"items": [{"id": step.id, "node_id": step.node_id, "node_type": step.node_type, "status": step.status, "output": step.output} for step in steps]}
+    return {
+        "run": {
+            "id": run.id,
+            "status": run.status,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        },
+        "items": [
+            {
+                "id": step.id,
+                "node_id": step.node_id,
+                "node_type": step.node_type,
+                "status": step.status,
+                "latency_ms": step.latency_ms,
+                "summary": step_summary(step.node_type, step.output or {}),
+                "output": step.output,
+            }
+            for step in steps
+        ],
+    }
+
+
+def step_summary(node_type: str, output: dict) -> dict:
+    """
+    把节点原始输出压成「运行详情」需要看的几项。
+
+    原始 output 里有父块全文、完整草稿等大字段，直接给前端既笨重又难读；
+    这里按节点类型挑出排障时真正关心的信息：检索命中了什么、调了哪些工具、用了哪个模型。
+    """
+    if node_type == "Knowledge":
+        status = output.get("rag_status") or {}
+        return {
+            "reason": status.get("reason"),
+            "retrieval_mode": status.get("retrieval_mode"),
+            "query": status.get("query"),
+            "matched": status.get("matched_chunks"),
+            "dense": (status.get("dense") or {}).get("matched"),
+            "bm25": (status.get("bm25") or {}).get("matched"),
+            "rerank_applied": (status.get("rerank") or {}).get("applied"),
+            "cache_hit": (status.get("cache") or {}).get("hit"),
+            "refused": bool(output.get("rag_refusal")),
+            "sources": [
+                {
+                    "title": item.get("title"),
+                    "snippet": (item.get("snippet") or "")[:160],
+                    "score": item.get("score"),
+                    "channel": item.get("retrieval_channel"),
+                }
+                for item in (output.get("sources") or [])[:8]
+            ],
+        }
+    if node_type == "Tool":
+        stats = output.get("tool_stats") or {}
+        return {
+            "total_calls": stats.get("total_calls", 0),
+            "tools_used": stats.get("tools_used") or [],
+            "calls": [
+                {
+                    "tool": item.get("tool_name"),
+                    "status": item.get("status"),
+                    "error_code": item.get("error_code"),
+                    "arguments": item.get("arguments"),
+                }
+                for item in (output.get("tool_trace") or [])[:20]
+            ],
+        }
+    if node_type == "LLM":
+        return {
+            "model": output.get("model"),
+            "thinking_type": output.get("thinking_type"),
+            "history_message_count": output.get("history_message_count"),
+            "used_profile_memory": output.get("used_profile_memory"),
+            "attachment_count": output.get("attachment_count"),
+            "draft_chars": len(output.get("draft") or ""),
+        }
+    if node_type == "Answer":
+        return {"citation_count": output.get("citation_count"), "answer_chars": len(output.get("answer") or "")}
+    if node_type == "HumanApproval":
+        return {"prompt": output.get("approval_prompt")}
+    if node_type == "Start":
+        return {key: output.get(key) for key in ("rag_enabled", "search_enabled", "attachment_count") if key in output}
+    return {}
 
 
 # ── Feedback ──

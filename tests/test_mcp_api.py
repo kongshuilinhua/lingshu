@@ -24,7 +24,8 @@ def test_marketplace_registers_and_binds_multiple_mcp_services(monkeypatch):
     Base.metadata.create_all(engine)
     monkeypatch.setattr(redis_store, "rate_limit_check", lambda *args, **kwargs: (True, 9))
     with Session(engine) as db:
-        workspace = Workspace(name="Test", slug="mcp-api-test")
+        # 此用例包含后端 stdio 启动配置，使用平台管理工作区。
+        workspace = Workspace(name="Test", slug="default")
         user = User(email="mcp-api@example.test", name="Test", password_hash="test")
         db.add_all([workspace, user])
         db.flush()

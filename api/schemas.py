@@ -88,6 +88,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """
+    修改密码载荷。
+
+    🛡️ 必须带旧密码：仅凭登录态就能改密码，等于令牌泄露即账号被夺走。
+        新密码沿用注册时的 8 位下限。
+    """
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
+
+
 class UserProfileUpdateRequest(BaseModel):
     """
     用户个人资料更新载荷。
@@ -113,7 +124,9 @@ class AgentCreateRequest(BaseModel):
     model_id: int | None = None
     user_model_config_id: int | None = None
     model: str | None = None
-    temperature: float = 0.4
+    # 与 WorkflowUpdateRequest 一致：超出 [0,2] 的温度会让上游模型直接 400，
+    # 现在没有边界，等于允许把非法值写进库、等到对话时才炸
+    temperature: float = Field(default=0.4, ge=0, le=2)
     knowledge_base_ids: list[int] = []
     tool_ids: list[int] = []
     suggested_questions: list[str] = []
@@ -121,6 +134,7 @@ class AgentCreateRequest(BaseModel):
     memory: AgentMemoryConfig = Field(default_factory=AgentMemoryConfig)
     rag: AgentRagConfig = Field(default_factory=AgentRagConfig)
     tool_policy: AgentToolPolicy = Field(default_factory=AgentToolPolicy)
+    workflow_id: int | None = None
 
 
 class AgentUpdateRequest(BaseModel):
@@ -133,7 +147,7 @@ class AgentUpdateRequest(BaseModel):
     model_id: int | None = None
     user_model_config_id: int | None = None
     model: str | None = None
-    temperature: float | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
     knowledge_base_ids: list[int] | None = None
     tool_ids: list[int] | None = None
     suggested_questions: list[str] | None = None
@@ -141,6 +155,7 @@ class AgentUpdateRequest(BaseModel):
     memory: AgentMemoryConfig | None = None
     rag: AgentRagConfig | None = None
     tool_policy: AgentToolPolicy | None = None
+    workflow_id: int | None = None
 
 
 class KnowledgeBaseCreateRequest(BaseModel):
@@ -183,8 +198,51 @@ class SessionUpdateRequest(BaseModel):
 
 
 class WorkflowUpdateRequest(BaseModel):
-    """图工作流编排定义更新契约。"""
-    nodes: list[dict]
+    """工作流更新契约：名称、描述、节点图与运行配置（模型/提示词），均可按需部分更新。"""
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = None
+    nodes: list[dict] | None = None
+    model_id: int | None = None
+    user_model_config_id: int | None = None
+    system_prompt: str | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+
+
+class WorkflowCreateRequest(BaseModel):
+    """新建独立工作流。"""
+    name: str = Field(min_length=1, max_length=160)
+    description: str = ""
+    nodes: list[dict] | None = None
+
+
+class WorkflowTestRequest(BaseModel):
+    """试运行：用哪个智能体的配置来跑，输入是什么。"""
+    agent_id: int
+    message: str = Field(min_length=1)
+    variables: dict | None = None
+
+
+class TriggerCreateRequest(BaseModel):
+    """新建触发器：webhook 或 schedule 二选一。"""
+    name: str = Field(min_length=1, max_length=160)
+    target_type: str = Field(default="agent", pattern="^(agent|workflow)$")
+    target_id: int = Field(gt=0)
+    kind: str = Field(default="webhook", pattern="^(webhook|schedule)$")
+    cron: str = ""
+    timezone: str = "Asia/Shanghai"
+    message_template: str = ""
+    enabled: bool = True
+
+
+class TriggerUpdateRequest(BaseModel):
+    """改触发器：只给要改的字段。"""
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    target_type: str | None = Field(default=None, pattern="^(agent|workflow)$")
+    target_id: int | None = Field(default=None, gt=0)
+    cron: str | None = None
+    timezone: str | None = None
+    message_template: str | None = None
+    enabled: bool | None = None
 
 
 class ChatModelSelection(BaseModel):
@@ -309,6 +367,15 @@ class AgentMcpBindingItem(BaseModel):
 
 class AgentMcpBindingsRequest(BaseModel):
     items: list[AgentMcpBindingItem] = Field(max_length=20)
+
+
+class AgentSubAgentBindingItem(BaseModel):
+    target_agent_id: int = Field(gt=0)
+    enabled: bool = True
+
+
+class AgentSubAgentBindingsRequest(BaseModel):
+    items: list[AgentSubAgentBindingItem] = Field(max_length=20)
 
 
 class McpResourceReadRequest(BaseModel):
@@ -459,6 +526,11 @@ class InviteCreateRequest(BaseModel):
 class InviteAcceptRequest(BaseModel):
     """接受团队邀请契约载荷。"""
     token: str
+
+
+class MemberRoleUpdateRequest(BaseModel):
+    """调整成员角色。只开放 user/admin 两档，owner 只能由首个管理员自然产生。"""
+    role: str = Field(pattern="^(user|admin)$")
 
 
 class FeedbackRequest(BaseModel):

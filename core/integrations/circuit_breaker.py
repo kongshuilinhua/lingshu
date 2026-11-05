@@ -77,10 +77,17 @@ class CircuitBreaker:
                 self._state = CircuitState.OPEN
 
     def status(self) -> dict:
-        """导出当前状态信息，供健康检查端点使用。"""
+        """
+        导出当前状态信息，供健康检查端点使用。
+
+        ⚠️ 状态必须走 `state` property 读：OPEN 冷却期满后它会自动过渡到 HALF_OPEN，
+            直接读 `_state` 会让健康检查永远显示 OPEN，看起来像一直没恢复。
+        """
+        # 先取状态（property 内部会拿锁并做过渡），再单独拿计数，避免嵌套加锁
+        state = self.state
         with self._lock:
             return {
-                "state": self._state.value,
+                "state": state.value,
                 "failures": self._failures,
                 "threshold": self.failure_threshold,
                 "timewindow_s": self.timewindow,

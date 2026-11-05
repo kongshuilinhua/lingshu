@@ -3,7 +3,10 @@
  * 从 utils.js 提取 —— API 调用、错误处理、认证令牌管理。
  */
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+// 默认走同源：容器部署时由 nginx 把 /api 反代到后端，地址与构建无关。
+// 本地 vite dev 没有反代，故 dev 下仍直连 8000；需要指向别处时用 VITE_API_BASE_URL 覆盖。
+const API_BASE = import.meta.env.VITE_API_BASE_URL
+  ?? (import.meta.env.DEV ? 'http://127.0.0.1:8000' : '');
 const AUTH_TOKEN_KEY = 'lingshu_token';
 const LEGACY_AUTH_TOKEN_KEY = 'sweeper_token';
 

@@ -389,7 +389,10 @@ function UserModelsPanel({
       editGuard.markSaved();
       setEditConfig(null);
       setEditForm(null);
-      setNotice(updated?.supports_image ? '模型已保存，图片探测通过。' : '模型已保存；图片探测未通过，但聊天发送不会被前端拦截。');
+      // 后端只测连通性，不探测图片能力（见 core/services/user_models.py 的说明：
+      // 自动探测既慢又易误判）。这里如实说「按你的选择保存了」，
+      // 不能写成「探测通过」——那只是在回显用户自己的勾选。
+      setNotice('模型已保存。图片能力按你勾选的设置生效，未做自动探测。');
       return true;
     } catch (err) {
       setProfileError(errorMessage(err));

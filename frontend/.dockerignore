@@ -1,0 +1,12 @@
+# 构建上下文排除项（前端独立镜像）
+#
+# 背景：frontend/Dockerfile 使用 `COPY . .`，没有本文件时 node_modules 会被
+# 复制进构建阶段，既拖慢构建又可能覆盖镜像内按 lockfile 安装的依赖。
+
+node_modules
+dist
+coverage
+.git
+.env
+.env.*
+npm-debug.log*

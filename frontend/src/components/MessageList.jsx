@@ -7,8 +7,9 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { ThumbsUp, ThumbsDown, FileText, Search, ImagePlus, Brain, ChevronDown, ExternalLink, X } from 'lucide-react';
 import { AgentAvatar } from './AgentAvatar.jsx';
+import { RunDetails } from './RunDetails.jsx';
 
-export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {}, avatar = 'AI' }) {
+export function MessageList({ messages, feedbackByMessage = {}, submitFeedback = () => {}, resolveApproval, loadRunSteps, avatar = 'AI' }) {
   return (
     <>
       {messages.map((message, index) => (
@@ -25,6 +26,12 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
                   <ThinkingPanel thinking={message.thinking} inProgress={Boolean(message.pending && !message.content)} />
                 )}
                 {message.process?.length > 0 && <ProcessNotes notes={message.process} />}
+                {message.paused && (
+                  <ApprovalPrompt
+                    paused={message.paused}
+                    onResolve={(approved) => resolveApproval?.({ runId: message.paused.run_id, approved })}
+                  />
+                )}
                 {message.pending && !message.content
                   ? (!message.thinking && <p className="message-pending">思考中...</p>)
                   : <MarkdownContent content={message.content || ''} />}
@@ -68,6 +75,9 @@ export function MessageList({ messages, feedbackByMessage = {}, submitFeedback =
             {message.role === 'assistant' && (message.sources || []).length > 0 && (
               <MessageSources sources={message.sources} />
             )}
+            {message.role === 'assistant' && message.run_id && loadRunSteps && !message.pending && (
+              <RunDetails runId={message.run_id} loadRunSteps={loadRunSteps} />
+            )}
           </div>
         </div>
       ))}
@@ -102,6 +112,32 @@ export function ProcessNotes({ notes }) {
         <ChevronDown size={14} className={`thinking-chevron ${open ? 'open' : ''}`} />
       </button>
       {open && <pre className="message-thinking-body">{notes.join('\n\n')}</pre>}
+    </div>
+  );
+}
+
+export function ApprovalPrompt({ paused, onResolve }) {
+  // HumanApproval 暂停点：本轮没有最终回答，等用户放行或驳回。
+  // 放行后后端从暂停点继续执行，复用暂停时的检索证据与工具结果，不会重跑前面的节点。
+  const [busy, setBusy] = useState(false);
+  async function resolve(approved) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await onResolve(approved);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="message-approval">
+      <p className="message-approval-prompt">{paused.prompt || '请确认是否继续执行'}</p>
+      <div className="message-approval-actions">
+        <button type="button" className="primary" disabled={busy} onClick={() => resolve(true)}>
+          {busy ? '处理中…' : '通过并继续'}
+        </button>
+        <button type="button" disabled={busy} onClick={() => resolve(false)}>驳回</button>
+      </div>
     </div>
   );
 }

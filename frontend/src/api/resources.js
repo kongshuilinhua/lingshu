@@ -103,3 +103,26 @@ export async function fetchMembers(token) {
   const data = await api('/api/workspaces/members', { token });
   return data.items || [];
 }
+
+export async function createInvite(payload, token) {
+  const data = await api('/api/workspaces/invites', { token, method: 'POST', body: payload });
+  return data.invite;
+}
+
+export async function fetchInvites(token) {
+  const data = await api('/api/workspaces/invites', { token });
+  return data.items || [];
+}
+
+export async function updateMemberRole(memberId, role, token) {
+  const data = await api(`/api/workspaces/members/${memberId}`, { token, method: 'PATCH', body: { role } });
+  return data.member;
+}
+
+export async function removeMember(memberId, token) {
+  return api(`/api/workspaces/members/${memberId}`, { token, method: 'DELETE' });
+}
+
+export async function previewInvite(token) {
+  return api(`/api/workspaces/invites/${encodeURIComponent(token)}`);
+}

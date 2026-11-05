@@ -59,6 +59,21 @@ def require_kb_write_access(kb: KnowledgeBase, membership: WorkspaceMember) -> N
     raise HTTPException(status_code=403, detail="Knowledge base edit denied")
 
 
+def require_workflow_write_access(workflow, membership: WorkspaceMember) -> None:
+    """
+    工作流写权限：创建者本人，或管理员。
+
+    🎯 为什么列表开放、写操作收窄：工作流是工作区共享资源，成员之间要能互相看到、互相跑；
+        但改和删会连带删掉宿主智能体（`core/services/workflows.py` 的 delete_workflow），
+        别人的流程不该被任何人随手改掉。这个语义与触发器完全一致。
+    """
+    if can_manage(membership.role):
+        return
+    if workflow.created_by == membership.user_id:
+        return
+    raise HTTPException(status_code=403, detail="Workflow edit denied")
+
+
 def invite_workspace(db: Session, workspace_id: int):
     from core.db.models import Workspace
     workspace = db.get(Workspace, workspace_id)

@@ -2,10 +2,20 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# 先装依赖再拷源码：改代码时不必重装依赖，镜像层可复用
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# 非 root 运行：容器被攻破时拿到的不是宿主 root。UID 固定，便于挂载卷时对齐权限
+RUN useradd --create-home --uid 10001 lingshu
+COPY --chown=lingshu:lingshu . .
+USER lingshu
 
 EXPOSE 8000
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# 用 python 探活而不是 curl：slim 镜像里没有 curl，少装一个包
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+
+# worker 数按 CPU 调；定时触发器的抢占是行级条件更新，多 worker 同时扫描也不会重复触发
+CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2}"]

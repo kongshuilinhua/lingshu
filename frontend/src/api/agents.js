@@ -45,16 +45,3 @@ export async function fetchMarketAgents(token) {
   const data = await api('/api/market/agents', { token });
   return data.items || [];
 }
-
-export async function fetchReviews(token) {
-  const data = await api('/api/admin/agent-reviews', { token });
-  return data.items || [];
-}
-
-export async function approveReview(agentId, token) {
-  return api(`/api/admin/agent-reviews/${agentId}/approve`, { token, method: 'POST' });
-}
-
-export async function rejectReview(agentId, token) {
-  return api(`/api/admin/agent-reviews/${agentId}/reject`, { token, method: 'POST' });
-}

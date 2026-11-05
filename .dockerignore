@@ -1,0 +1,44 @@
+# 构建上下文排除项
+#
+# 背景：Dockerfile.api 使用 `COPY . .`，没有本文件时会把本地虚拟环境、
+# 前端依赖、以及 .env（含真实密钥）一并打进镜像层。`.dockerignore` 只影响
+# 构建上下文，不影响仓库本身，必须与 .gitignore 分开维护。
+
+# 版本控制与编辑器
+.git
+.gitignore
+.github
+.claude
+.superpowers
+.zcode
+.idea
+.vscode
+
+# Python 虚拟环境与缓存
+.venv
+venv
+env
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# 前端依赖与构建产物（前端有独立镜像）
+frontend/node_modules
+frontend/dist
+node_modules
+
+# 密钥：绝不进入镜像层
+.env
+.env.*
+!.env.example
+
+# 本地数据与运行时产物
+data
+*.db
+*.sqlite3
+*.log

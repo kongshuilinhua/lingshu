@@ -26,6 +26,7 @@ export const useAgentStore = create((set, get) => ({
     memory: { enabled: false, strategy: 'session_summary', max_messages: 12 },
     rag: { enabled_by_default: true, top_k: 4, retrieval_mode: 'on_demand' },
     tool_policy: { mode: 'auto', allowed_tool_names: [], web_search_enabled: false },
+    workflow_id: null,
   },
 
   setActiveAgentId: (id) => set({ activeAgentId: id }),
@@ -59,6 +60,7 @@ export const useAgentStore = create((set, get) => ({
           memory: agent.memory || { enabled: false, strategy: 'session_summary', max_messages: 12 },
           rag: agent.rag || { enabled_by_default: true, top_k: 4 },
           tool_policy: agent.tool_policy || { mode: 'auto', allowed_tool_names: [] },
+          workflow_id: agent.workflow_id || null,
         },
       });
     } catch (err) {

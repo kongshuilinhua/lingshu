@@ -84,12 +84,6 @@ def test_builtin_tools_implementation():
         _exec_diff_checker,
         _exec_currency_converter,
         _exec_qr_generator,
-        _exec_joke_generator,
-        _exec_advice_slip,
-        _exec_bored_activity,
-        _exec_horoscope,
-        _exec_image_search,
-        _exec_news_search,
     )
     
     # Test password generator
@@ -125,36 +119,4 @@ def test_builtin_tools_implementation():
     qr_res = _exec_qr_generator({"text": "https://example.com"})
     qr_data = json.loads(qr_res["content"])
     assert "qr_code_url" in qr_data
-    
-    # Test joke generator
-    joke_res = _exec_joke_generator({})
-    joke_data = json.loads(joke_res["content"])
-    assert "setup" in joke_data
-    assert "punchline" in joke_data
-    
-    # Test advice slip
-    adv_res = _exec_advice_slip({})
-    adv_data = json.loads(adv_res["content"])
-    assert "advice" in adv_data
-    
-    # Test bored activity
-    bored_res = _exec_bored_activity({})
-    bored_data = json.loads(bored_res["content"])
-    assert "activity" in bored_data
-    
-    # Test horoscope
-    horo_res = _exec_horoscope({"sign": "白羊座"})
-    horo_data = json.loads(horo_res["content"])
-    assert horo_data["sign"] == "白羊座"
-    assert "summary" in horo_data
-    
-    # Test image search
-    img_res = _exec_image_search({"query": "nature"})
-    img_data = json.loads(img_res["content"])
-    assert len(img_data["images"]) > 0
-    
-    # Test news search
-    news_res = _exec_news_search({"category": "tech"})
-    news_data = json.loads(news_res["content"])
-    assert len(news_data["news"]) > 0
 

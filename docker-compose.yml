@@ -11,11 +11,22 @@
     volumes:
       - mysql_data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ulingshu", "-plingshu"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
     ports:
       - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   milvus:
     image: milvusdb/milvus:v2.5.4
@@ -27,6 +38,13 @@
       - "19530:19530"
     volumes:
       - milvus_data:/var/lib/milvus
+    healthcheck:
+      # 镜像里没有 python，用自带的 curl 探健康端点（已实测 curl 存在且该端点返回 OK）
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9091/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
 
   minio:
     image: quay.io/minio/minio
@@ -42,6 +60,11 @@
     volumes:
       - minio_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   api:
     build:
@@ -75,10 +98,15 @@
     ports:
       - "8000:8000"
     depends_on:
-      - mysql
-      - redis
-      - milvus
-      - minio
+      # 等依赖真正可用再启动：只写服务名时，api 会在 mysql/milvus 还没就绪时连接并失败退出
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
 
   # Celery worker：执行文档入库 / 重建索引 / 会话记忆压缩等异步任务。
   # 与 api 共用镜像与环境，仅入口命令不同；横向扩容直接 `--scale worker=N`。
@@ -87,6 +115,9 @@
       context: .
       dockerfile: Dockerfile.api
     command: celery -A core.tasks.celery_app:celery_app worker -Q lingshu --loglevel=info
+    # 与 api 共用镜像，会继承镜像里的 8000 端口探针；worker 不监听该端口，必须关掉
+    healthcheck:
+      disable: true
     environment:
       DATABASE_URL: mysql+pymysql://lingshu:lingshu@mysql:3306/lingshu_agent
       REDIS_URL: redis://redis:6379/0
@@ -113,20 +144,24 @@
       ANTHROPIC_API_BASE: ${ANTHROPIC_API_BASE:-https://api.anthropic.com/v1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
-      - mysql
-      - redis
-      - milvus
-      - minio
+      # 等依赖真正可用再启动：只写服务名时，api 会在 mysql/milvus 还没就绪时连接并失败退出
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
 
   frontend:
     build:
       context: ./frontend
-      args:
-        VITE_API_BASE_URL: http://127.0.0.1:8000
     ports:
       - "5174:5174"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   mysql_data:

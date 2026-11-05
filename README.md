@@ -1,6 +1,6 @@
 # Lingshu Agent
 
-本地可运行的自定义智能体平台，提供账号体系、智能体管理、知识库 RAG、工具集成、发布审核与多轮会话的完整闭环。
+本地可运行的自定义智能体平台，提供账号体系、工作区成员协作、智能体管理、知识库 RAG、工具集成、工作流编排与多轮会话的完整闭环。
 
 ---
 
@@ -8,17 +8,20 @@
 
 Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，前端基于 Vite + React 18，支持用户创建、配置和发布自定义 AI 智能体，并在聊天页面中进行多轮对话。
 
-核心闭环：**用户注册 → 配置私有模型 → 创建智能体（绑定知识库 + 工具 + 提示词）→ 发布审核 → 内部市场复制 → 多轮聊天（支持深度思考 + RAG + 附件）。**
+核心闭环：**用户注册 → 配置私有模型 → 创建智能体（绑定知识库 + 工具 + 提示词）→ 发布 → 内部市场复制 → 多轮聊天（支持深度思考 + RAG + 附件）。**
 
 ---
 
 ## 核心功能
 
 ### 账号与权限
-- 本地注册/登录，JWT 鉴权
+- 本地注册/登录，JWT 鉴权；普通注册创建独立工作区，不自动加入其他人的工作区
 - 个人资料管理（名称、头像）
-- `admin` / `user` 双角色：管理员审核智能体、查看成员列表；普通用户管理自己的智能体
-- 邀请制加入工作空间（可选，通过 `INVITE_API_ENABLED` 开关）
+- `admin` / `user` 双角色：管理员管理本工作区成员与资产；普通成员只能改自己创建的东西。平台模型管理与后端 stdio 启动配置仅允许初始 `default` 工作区管理员操作
+- 邀请成员：管理员填邮箱生成邀请链接，新账号可注册并加入，已有账号登录后确认加入；邀请邮箱必须与账号一致（有效期默认 7 天，用过即失效，重新邀请会作废旧链接）
+- 接受邀请立即进入目标工作区；原工作区保留，可在左下角账号菜单切换。已有用户和成员关系不自动迁移
+- 成员管理：改角色（普通用户 / 管理员）、移除成员；工作区所有者与本人不可被改，至少保留一位管理员
+- `INVITE_API_ENABLED=true` 开启工作区邀请 API，用于邀请用户加入工作区；平台账号注册不受此开关影响
 
 ### 模型配置
 - **系统模型**：管理员预设的模型配置，供所有用户选择
@@ -38,12 +41,12 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 - 绑定知识库（多对多）
 - 绑定工具（多对多）
 - 草稿模式调试聊天（仅创建者可见）
-- 发布 → 管理员审核 → 进入内部市场 → 其他用户可复制使用
-- 版本快照：每次发布保存完整配置快照，支持版本列表查看
+- 发布 → 进入内部市场 → 其他用户可复制使用（发布不需要审核）
+- 版本快照：每次发布保存完整配置快照（`GET /api/agents/{id}/versions`）
 - 记忆画像（Memory Profile）：按用户 + 智能体维度存储用户偏好和事实
 
 ### 聊天交互
-- 仅可选择已审核发布的智能体进行聊天
+- 仅可选择已发布的智能体进行聊天
 - SSE 流式输出，实时展示生成内容
 - 支持 Markdown 渲染、表格、代码块复制
 - 按模型能力可选开启单轮「深度思考」（reasoning）
@@ -80,9 +83,9 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 
 ### 工具集成
 - **内置工具**：系统预置，所有用户可用（如 web_search）
-- **用户自定义 HTTP 工具**：CRUD 管理，支持 GET/POST 方法
+- **用户自定义 HTTP 工具**：CRUD 管理，支持 GET/POST/PUT/PATCH/DELETE 方法
   - 配置请求头、查询参数、请求体 Schema
-  - 认证方式：API Key（Header/Query）、Bearer Token、Basic Auth
+  - 认证方式：API Key（Header/Query）、Bearer Token
   - 响应路径提取（JSONPath）
   - 超时设置
 - 工具测试：填入参数即时测试工具连通性
@@ -112,9 +115,18 @@ Lingshu Agent 是一个全栈智能体平台，后端基于 FastAPI + MySQL，�
 - 发布快照隔离：草稿聊天使用当前配置，已发布聊天使用发布时的快照配置
 
 ### 工作流引擎
-- 基于节点的可视化工作流执行（Start → Knowledge → Tool → LLM → Answer）
-- 每个节点产生 RunStep 记录，可追溯执行路径
-- 支持自定义工作流节点顺序
+- 基于节点的可视化工作流执行，支持 15 类节点：`Start` / `Knowledge` / `Tool` / `LLM` / `HTTP` / `Code` / `VariableAssign` / `VariableAggregate` / `ParameterExtract` / `Classifier` / `Condition` / `HumanApproval` / `Loop` / `Agent` / `Answer`
+- 工作流是独立资源（可在「工作流」页单独维护），智能体通过引用使用它；也可以直接与工作流对话
+- 画布（拖拽）与表单两种编排视图，行为一致
+- 每个节点产生 RunStep 记录，可追溯执行路径；运行失败时 Run 置 `failed` 而非停在 `running`
+- `Iteration` 支持并行迭代与失败策略；`HumanApproval` 暂停后可恢复，保留暂停时的检索证据与工具结果
+
+### 触发器
+- 让智能体/工作流在没人说话时也能被唤起：
+  - `webhook`：外部系统 `POST /api/triggers/hook/{token}`，body 字段可填入消息模板
+  - `schedule`：按 cron 定时唤起，由进程内调度线程每 30 秒扫描一次（`TRIGGER_SCHEDULER_ENABLED`）
+- 触发一次跑的就是普通对话，结果出现在「会话」里，可回溯到触发源
+- 原子抢占 `next_run_at` 防重复触发；成员只能管理自己建的触发器，管理员不限
 
 ### 评测与可观测
 - 提供 `eval/rag_cases.jsonl` 评测数据集
@@ -170,7 +182,7 @@ langchain/
 │   │   ├── api_keys.py             #     API Key 加密存储
 │   │   └── permissions.py          #     角色鉴权（admin/user）
 │   └── services/                   #   业务服务
-│       ├── agents.py               #     智能体 CRUD + 发布/审核/复制
+│       ├── agents.py               #     智能体 CRUD + 发布/复制
 │       ├── knowledge.py            #     知识库 CRUD + 文档入库/索引/分段
 │       ├── rag.py                  #     RAG 检索管线（Dense+BM25+RRF+Rerank+Cache）
 │       ├── rag_cache.py            #     Redis RAG 缓存
@@ -261,7 +273,8 @@ WEB_SEARCH_ENABLED=true
 WEB_SEARCH_PROVIDER=duckduckgo_html
 
 # 其他
-INVITE_API_ENABLED=false          # 邀请 API 开关
+INVITE_API_ENABLED=false          # 工作区邀请 API 开关，不影响平台账号注册
+INVITE_EXPIRE_HOURS=168           # 邀请链接有效期（小时）
 UPLOAD_MAX_BYTES=31457280         # 上传文件大小上限（30MB）
 ```
 
@@ -338,14 +351,14 @@ LINGSHU_DEPLOYMENT_MODE=production
 
 | 模块 | 端点 | 说明 |
 |------|------|------|
-| Auth | `POST /api/auth/register` `POST /api/auth/login` `GET/PATCH /api/auth/me` | 注册/登录/个人资料 |
+| Auth | `POST /api/auth/register` `POST /api/auth/login` `GET /api/auth/account` `GET/PATCH /api/auth/me` | 注册/登录/账号身份/个人资料 |
+| Workspaces | `GET /api/workspaces` `POST /api/workspaces/{id}/switch` | 已加入的工作区与切换 |
 | Workspace | `GET /api/workspaces/current` `GET /api/workspaces/members` | 工作空间与成员 |
 | Invites | `GET/POST /api/workspaces/invites` | 邀请管理 |
 | System Models | `GET /api/models` `POST/PATCH/DELETE /api/admin/models` | 系统模型管理 |
 | User Models | `GET/POST/PATCH/DELETE /api/user-models` `POST /api/user-models/{id}/test` | 用户私有模型 |
 | Agents | `GET/POST /api/agents` `GET/PATCH/DELETE /api/agents/{id}` | 智能体管理 |
-| Publish | `POST /api/agents/{id}/publish` | 发布（需审核） |
-| Review | `GET /api/admin/agent-reviews` `POST .../{id}/approve` `POST .../{id}/reject` | 审核 |
+| Publish | `POST /api/agents/{id}/publish` | 发布（直接生效，无审核环节） |
 | Market | `GET /api/market/agents` `POST /api/market/agents/{id}/copy` | 内部市场 |
 | Workflow | `GET/PATCH /api/agents/{id}/workflow` | 工作流配置 |
 | Chat | `POST /api/agents/{id}/chat/stream` | SSE 流式聊天 |
